@@ -1,0 +1,13 @@
+{
+  "name": "porcupi",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "check": "node --check scripts/install.mjs && node --check src/cli.mjs && node --check src/install.mjs && node --check src/runtime.mjs && node --check test/install.test.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

@@ -18,6 +18,10 @@ const resourceKeys = {
   Theme: "themes",
 };
 
+function lexicalCompare(left, right) {
+  return left === right ? 0 : left < right ? -1 : 1;
+}
+
 export function artifactKey(artifact) {
   return `${artifact.kind}\0${artifact.path}`;
 }
@@ -26,7 +30,7 @@ export function patchSelectionSnapshot(sources) {
   return sources.flatMap((source) => source.artifacts
     .filter((artifact) => artifact.kind === "Patch")
     .map((artifact) => ({ locator: source.locator, commit: source.commit, path: artifact.path, sha256: artifact.sha256 })))
-    .sort((left, right) => `${left.locator}\0${left.path}`.localeCompare(`${right.locator}\0${right.path}`));
+    .sort((left, right) => lexicalCompare(`${left.locator}\0${left.path}`, `${right.locator}\0${right.path}`));
 }
 
 export function patchIntentPending(sources, activePatches) {
@@ -390,7 +394,7 @@ export async function realizeResourceChanges({ executable, environment, changes,
 }
 
 export function saveSelectionSources(dataRoot, sources) {
-  const ordered = [...sources].sort((left, right) => left.locator.localeCompare(right.locator));
+  const ordered = [...sources].sort((left, right) => lexicalCompare(left.locator, right.locator));
   atomicWrite(selectionStatePath(dataRoot), { schemaVersion: 1, sources: ordered });
 }
 

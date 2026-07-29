@@ -11,6 +11,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -93,9 +94,13 @@ writeFileSync(cli, \`#!/usr/bin/env node
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 const args = process.argv.slice(2);
-if (args[0] === "--version") console.log("${version}");
+if (process.env.PI_FIXTURE_CHECK_FAIL === args[0]) process.exitCode = 44;
+else if (args[0] === "--version") console.log(process.env.PI_FIXTURE_VERSION_OVERRIDE || "${version}");
 else if (args[0] === "--help") console.log("Pi fixture help");
-else if (args[0] === "--list-models") console.log("fixture-model");
+else if (args[0] === "--list-models") {
+  if (process.env.PI_FIXTURE_SMOKE_HOME_LOG) appendFileSync(process.env.PI_FIXTURE_SMOKE_HOME_LOG, process.env.HOME + "\\\\n");
+  console.log("fixture-model");
+}
 else if (args[0] === "install" || args[0] === "remove") {
   const source = args[1];
   const local = args.includes("-l") || args.includes("--local");
@@ -197,6 +202,62 @@ function dataRoot(home) {
   return process.platform === "darwin"
     ? join(home, "Library", "Application Support", "porcupi")
     : join(home, ".local", "share", "porcupi");
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function rebindActiveReceipt(home, mutate) {
+  const root = dataRoot(home);
+  const activationPath = join(root, "state", "activation.json");
+  const activation = JSON.parse(readFileSync(activationPath, "utf8"));
+  const oldId = activation.active.compositionId;
+  const oldComposition = join(root, "compositions", oldId);
+  const oldCentral = join(root, "receipts", `${oldId}.json`);
+  const receipt = JSON.parse(readFileSync(oldCentral, "utf8"));
+  mutate(receipt);
+  const identity = {
+    schemaVersion: receipt.schemaVersion,
+    porcupiVersion: receipt.porcupiVersion,
+    piBase: receipt.piBase,
+    patches: receipt.patches,
+    recipe: receipt.recipe,
+    platform: receipt.platform,
+    requiredExecutable: receipt.requiredExecutable,
+    payload: receipt.payload,
+  };
+  const compositionId = createHash("sha256").update(canonicalJson(identity)).digest("hex");
+  receipt.compositionId = compositionId;
+  const embedded = join(oldComposition, "receipt.json");
+  chmodSync(embedded, 0o644);
+  writeFileSync(embedded, `${JSON.stringify(receipt, null, 2)}\n`);
+  const composition = join(root, "compositions", compositionId);
+  renameSync(oldComposition, composition);
+  writeFileSync(join(root, "receipts", `${compositionId}.json`), `${JSON.stringify(receipt, null, 2)}\n`);
+  rmSync(oldCentral);
+  activation.active.compositionId = compositionId;
+  writeFileSync(activationPath, `${JSON.stringify(activation, null, 2)}\n`);
+  return { activationPath, composition, compositionId, receipt };
+}
+
+function runPorcuPiProcess(home, args, extraEnvironment = {}, cwd) {
+  return spawnSync(join(home, ".local", "bin", "porcupi"), args, {
+    cwd,
+    encoding: "utf8",
+    timeout: 30_000,
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      NODE_ENV: "test",
+      ...extraEnvironment,
+    },
+  });
 }
 
 function runPorcuPi(home, args, inputHex, extraEnvironment = {}, cwd) {
@@ -586,6 +647,265 @@ test("guided install builds, activates, and launches a zero-Patch Managed Pi wit
   });
   assert.equal(launch.status, 0, launch.stderr);
   assert.deepEqual(JSON.parse(readFileSync(launchLog, "utf8").trim()), ["--model", "fixture-model", "hello"]);
+});
+
+test("porcupi verify audits the complete Composition and owned launcher while normal launch stays cheap and fail closed", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  const install = runInstaller(release, home);
+  assert.equal(install.status, 0, install.stderr || install.stdout);
+  const managedRoot = dataRoot(home);
+  const activation = JSON.parse(readFileSync(join(managedRoot, "state", "activation.json"), "utf8"));
+  const composition = join(managedRoot, "compositions", activation.active.compositionId);
+  const launcher = join(home, ".local", "bin", "porcupi");
+  const launcherReceiptPath = join(managedRoot, "state", "launcher.json");
+  const launcherReceipt = JSON.parse(readFileSync(launcherReceiptPath, "utf8"));
+  assert.deepEqual(Object.keys(launcherReceipt).sort(), ["kind", "mode", "path", "schemaVersion", "sha256", "size", "type"]);
+  assert.equal(launcherReceipt.type, "porcupi-launcher");
+  assert.equal(launcherReceipt.path, launcher);
+  assert.equal(launcherReceipt.kind, "file");
+  assert.equal(launcherReceipt.mode, lstatSync(launcher).mode & 0o777);
+  assert.equal(launcherReceipt.size, lstatSync(launcher).size);
+  assert.equal(launcherReceipt.sha256, createHash("sha256").update(readFileSync(launcher)).digest("hex"));
+
+  const launcherReceiptBytes = readFileSync(launcherReceiptPath);
+  writeFileSync(launcherReceiptPath, `${JSON.stringify({ ...launcherReceipt, unknown: true }, null, 2)}\n`);
+  const malformedLauncherReceipt = runPorcuPiProcess(home, ["verify"]);
+  assert.notEqual(malformedLauncherReceipt.status, 0);
+  assert.match(`${malformedLauncherReceipt.stdout}${malformedLauncherReceipt.stderr}`, /Malformed PorcuPi launcher receipt/);
+  writeFileSync(launcherReceiptPath, launcherReceiptBytes);
+  renameSync(launcherReceiptPath, `${launcherReceiptPath}.real`);
+  symlinkSync("launcher.json.real", launcherReceiptPath);
+  const symbolicLauncherReceipt = runPorcuPiProcess(home, ["verify"]);
+  assert.notEqual(symbolicLauncherReceipt.status, 0);
+  assert.match(`${symbolicLauncherReceipt.stdout}${symbolicLauncherReceipt.stderr}`, /Malformed PorcuPi launcher receipt/);
+  rmSync(launcherReceiptPath);
+  renameSync(`${launcherReceiptPath}.real`, launcherReceiptPath);
+
+  const smokeHomeLog = join(root, "smoke-home.log");
+  const verified = runPorcuPiProcess(home, ["verify"], { PI_FIXTURE_SMOKE_HOME_LOG: smokeHomeLog });
+  assert.equal(verified.status, 0, verified.stderr || verified.stdout);
+  assert.match(verified.stdout, /--help[\s\S]*--version[\s\S]*--list-models[\s\S]*Verified Managed Pi Composition/);
+  assert.match(verified.stdout, /Complete payload inventory/);
+  const smokeHome = readFileSync(smokeHomeLog, "utf8").trim();
+  assert.notEqual(smokeHome, home);
+  assert.match(smokeHome, /tmp[\\/]verify-/);
+  assert.equal(existsSync(smokeHome), false);
+
+  const series = join(composition, "payload", "series.txt");
+  const seriesBefore = readFileSync(series);
+  const seriesMode = lstatSync(series).mode & 0o777;
+  chmodSync(series, 0o644);
+  writeFileSync(series, "locally changed\n");
+  const cheapLaunch = runPorcuPiProcess(home, ["--version"]);
+  assert.equal(cheapLaunch.status, 0, cheapLaunch.stderr || cheapLaunch.stdout);
+  assert.equal(cheapLaunch.stdout.trim(), "0.81.1");
+  const changedPayload = runPorcuPiProcess(home, ["verify"]);
+  assert.notEqual(changedPayload.status, 0);
+  assert.match(`${changedPayload.stdout}${changedPayload.stderr}`, /payload inventory mismatch/);
+  writeFileSync(series, seriesBefore);
+  chmodSync(series, seriesMode);
+  const payloadRoot = join(composition, "payload");
+  chmodSync(payloadRoot, 0o755);
+  rmSync(series);
+  const missingPayload = runPorcuPiProcess(home, ["verify"]);
+  assert.notEqual(missingPayload.status, 0);
+  assert.match(`${missingPayload.stdout}${missingPayload.stderr}`, /payload inventory mismatch/);
+  writeFileSync(series, seriesBefore, { mode: seriesMode });
+  chmodSync(series, seriesMode);
+  chmodSync(payloadRoot, 0o555);
+
+  const executable = join(composition, "payload", "packages", "coding-agent", "dist", "cli.js");
+  const executableBefore = readFileSync(executable);
+  const executableMode = lstatSync(executable).mode & 0o777;
+  chmodSync(executable, 0o755);
+  writeFileSync(executable, `${executableBefore.toString()}\n// changed\n`);
+  const launchLog = join(root, "launch-must-not-run.log");
+  const refused = runPorcuPiProcess(home, ["hello"], { PI_FIXTURE_LAUNCH_LOG: launchLog });
+  assert.notEqual(refused.status, 0);
+  const refusalOutput = `${refused.stdout}${refused.stderr}`;
+  assert.match(refusalOutput, /executable does not match its Composition receipt/);
+  assert.match(refusalOutput, /neither the previous Composition nor Stock Pi was run/);
+  assert.match(refusalOutput, /porcupi verify/);
+  assert.match(refusalOutput, /porcupi rollback/);
+  assert.match(refusalOutput, /Stock Pi command \(`pi`\)/);
+  assert.equal(existsSync(launchLog), false);
+  writeFileSync(executable, executableBefore);
+  chmodSync(executable, executableMode);
+
+  const wrongVersion = runPorcuPiProcess(home, ["verify"], { PI_FIXTURE_VERSION_OVERRIDE: "9.9.9" });
+  assert.notEqual(wrongVersion.status, 0);
+  assert.match(`${wrongVersion.stdout}${wrongVersion.stderr}`, /expected 0\.81\.1, found 9\.9\.9/);
+  for (const failedCheck of ["--help", "--list-models"]) {
+    const failed = runPorcuPiProcess(home, ["verify"], { PI_FIXTURE_CHECK_FAIL: failedCheck });
+    assert.notEqual(failed.status, 0);
+    assert.match(`${failed.stdout}${failed.stderr}`, /exited with status 44/);
+  }
+
+  const launcherBefore = readFileSync(launcher);
+  writeFileSync(launcher, `${launcherBefore.toString()}# local change\n`);
+  const changedLauncher = runPorcuPiProcess(home, ["verify"]);
+  assert.notEqual(changedLauncher.status, 0);
+  assert.match(`${changedLauncher.stdout}${changedLauncher.stderr}`, /launcher does not match its ownership receipt/);
+  assert.notDeepEqual(readFileSync(launcher), launcherBefore);
+});
+
+test("Managed Pi launch strictly rejects malformed control state, receipt disagreement, symlinks, and foreign identities", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const managedRoot = dataRoot(home);
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const activationBytes = readFileSync(activationPath);
+  const activation = JSON.parse(activationBytes.toString());
+  const compositionId = activation.active.compositionId;
+  const composition = join(managedRoot, "compositions", compositionId);
+  const centralPath = join(managedRoot, "receipts", `${compositionId}.json`);
+  const embeddedPath = join(composition, "receipt.json");
+  const centralBytes = readFileSync(centralPath);
+  const embeddedBytes = readFileSync(embeddedPath);
+  const launchLog = join(root, "malformed-launch.log");
+  const ownerPath = join(managedRoot, "owner.json");
+  const ownerBytes = readFileSync(ownerPath);
+
+  const assertRefused = (expected) => {
+    const result = runPorcuPiProcess(home, ["hello"], { PI_FIXTURE_LAUNCH_LOG: launchLog });
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stdout}${result.stderr}`, expected);
+    assert.match(`${result.stdout}${result.stderr}`, /launch was refused/);
+    assert.equal(existsSync(launchLog), false);
+  };
+  const restoreActivation = () => writeFileSync(activationPath, activationBytes);
+
+  writeFileSync(ownerPath, `${JSON.stringify({ schemaVersion: 1, type: "porcupi-managed-root", unknown: true }, null, 2)}\n`);
+  assertRefused(/Malformed PorcuPi root ownership/);
+  writeFileSync(ownerPath, ownerBytes);
+
+  writeFileSync(activationPath, `${JSON.stringify({ ...activation, unknown: true }, null, 2)}\n`);
+  assertRefused(/Malformed PorcuPi activation/);
+  restoreActivation();
+  const missing = { ...activation };
+  delete missing.previous;
+  writeFileSync(activationPath, `${JSON.stringify(missing, null, 2)}\n`);
+  assertRefused(/Malformed PorcuPi activation/);
+  restoreActivation();
+  writeFileSync(activationPath, `${JSON.stringify({
+    ...activation,
+    previous: {
+      compositionId: "f".repeat(64),
+      patches: [
+        { locator: "example.test/source", commit: "a".repeat(40), path: "patches/../escape.patch", sha256: "b".repeat(64) },
+      ],
+    },
+  }, null, 2)}\n`);
+  assertRefused(/Malformed PorcuPi activation/);
+  restoreActivation();
+  writeFileSync(activationPath, `${JSON.stringify({
+    ...activation,
+    active: {
+      ...activation.active,
+      patches: [
+        { locator: "example.test/source", commit: "a".repeat(40), path: "patches/one.patch", sha256: "b".repeat(64) },
+      ],
+    },
+  }, null, 2)}\n`);
+  assertRefused(/activation and Composition Patch receipts disagree/);
+  restoreActivation();
+
+  renameSync(activationPath, `${activationPath}.real`);
+  symlinkSync("activation.json.real", activationPath);
+  assertRefused(/Malformed PorcuPi activation/);
+  rmSync(activationPath);
+  renameSync(`${activationPath}.real`, activationPath);
+
+  const central = JSON.parse(centralBytes.toString());
+  writeFileSync(centralPath, `${JSON.stringify({ ...central, porcupiVersion: "0.1.1" }, null, 2)}\n`);
+  assertRefused(/Composition receipt mismatch/);
+  writeFileSync(centralPath, centralBytes);
+  chmodSync(embeddedPath, 0o644);
+  const changedIdentity = { ...central, porcupiVersion: "0.1.1" };
+  writeFileSync(centralPath, `${JSON.stringify(changedIdentity, null, 2)}\n`);
+  writeFileSync(embeddedPath, `${JSON.stringify(changedIdentity, null, 2)}\n`);
+  assertRefused(/Composition identity mismatch/);
+  const malformedReceipt = { ...central, unknown: true };
+  writeFileSync(centralPath, `${JSON.stringify(malformedReceipt, null, 2)}\n`);
+  writeFileSync(embeddedPath, `${JSON.stringify(malformedReceipt, null, 2)}\n`);
+  assertRefused(/Malformed Managed Pi Composition receipt/);
+  writeFileSync(centralPath, centralBytes);
+  writeFileSync(embeddedPath, embeddedBytes);
+  chmodSync(embeddedPath, 0o444);
+
+  chmodSync(composition, 0o755);
+  renameSync(embeddedPath, `${embeddedPath}.real`);
+  symlinkSync("receipt.json.real", embeddedPath);
+  assertRefused(/Malformed embedded Composition receipt/);
+  rmSync(embeddedPath);
+  renameSync(`${embeddedPath}.real`, embeddedPath);
+  chmodSync(composition, 0o555);
+
+  const movedComposition = join(managedRoot, "compositions", `moved-${compositionId}`);
+  renameSync(composition, movedComposition);
+  symlinkSync(`moved-${compositionId}`, composition);
+  assertRefused(/Malformed Managed Pi Composition root/);
+  rmSync(composition);
+  renameSync(movedComposition, composition);
+
+  const receipts = join(managedRoot, "receipts");
+  const movedReceipts = join(managedRoot, "receipts-real");
+  renameSync(receipts, movedReceipts);
+  symlinkSync("receipts-real", receipts);
+  assertRefused(/Malformed PorcuPi receipts directory/);
+  rmSync(receipts);
+  renameSync(movedReceipts, receipts);
+
+  activation.active.compositionId = "f".repeat(64);
+  writeFileSync(activationPath, `${JSON.stringify(activation, null, 2)}\n`);
+  assertRefused(/Malformed Managed Pi Composition root/);
+});
+
+test("strict Composition receipts reject validly rebound platform, executable-path, and payload-path mismatches", () => {
+  const scenarios = [
+    {
+      name: "platform",
+      mutate: (receipt) => { receipt.platform = `${process.platform === "darwin" ? "linux" : "darwin"}-${process.arch}`; },
+      expected: /platform mismatch/,
+    },
+    {
+      name: "required-executable-path",
+      mutate: (receipt) => { receipt.requiredExecutable = { ...receipt.requiredExecutable, path: "../outside" }; },
+      expected: /Malformed Managed Pi Composition receipt/,
+    },
+    {
+      name: "duplicate-payload-path",
+      mutate: (receipt) => { receipt.payload.splice(1, 0, { ...receipt.payload[0] }); },
+      expected: /Malformed Managed Pi Composition receipt/,
+    },
+    {
+      name: "traversing-payload-path",
+      mutate: (receipt) => { receipt.payload[0] = { ...receipt.payload[0], path: "../outside" }; },
+      expected: /Malformed Managed Pi Composition receipt/,
+    },
+  ];
+  for (const scenario of scenarios) {
+    const scenarioRoot = join(temporaryRoot(), scenario.name);
+    const home = join(scenarioRoot, "home");
+    mkdirSync(home, { recursive: true });
+    const base = createPiBase(scenarioRoot);
+    const release = createReleaseFixture(scenarioRoot, base);
+    assert.equal(runInstaller(release, home).status, 0);
+    rebindActiveReceipt(home, scenario.mutate);
+    const launchLog = join(scenarioRoot, "must-not-launch.log");
+    const result = runPorcuPiProcess(home, ["hello"], { PI_FIXTURE_LAUNCH_LOG: launchLog });
+    assert.notEqual(result.status, 0, `${scenario.name} unexpectedly launched`);
+    assert.match(`${result.stdout}${result.stderr}`, scenario.expected);
+    assert.equal(existsSync(launchLog), false);
+  }
 });
 
 test("porcupi add pins and filters all four Pi resource kinds through Pi", async () => {

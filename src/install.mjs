@@ -15,13 +15,17 @@ import { fileURLToPath } from "node:url";
 import {
   atomicWrite,
   canonicalJson,
+  createLauncherReceipt,
   defaultBinDirectory,
   defaultDataRoot,
   fail,
   managedLayout,
+  managedRootOwner,
   platformIdentity,
   readActiveComposition,
   readJson,
+  shellLauncherContents,
+  verifyLauncher,
 } from "./runtime.mjs";
 import {
   buildComposition,
@@ -34,17 +38,16 @@ import {
 } from "./composition.mjs";
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
-const rootOwner = Object.freeze({ schemaVersion: 1, type: "porcupi-managed-root" });
 
 function initializeFreshRoot(paths) {
   if (pathExists(paths.root)) {
     const owner = readJson(paths.owner, "PorcuPi root ownership");
-    if (canonicalJson(owner) !== canonicalJson(rootOwner)) fail(`PorcuPi data root is foreign: ${paths.root}`);
+    if (canonicalJson(owner) !== canonicalJson(managedRootOwner)) fail(`PorcuPi data root is foreign: ${paths.root}`);
     if (existsSync(paths.activation)) fail(`PorcuPi is already installed at ${paths.root}`);
     removePreparedTree(paths.root);
   }
   mkdirSync(paths.root, { recursive: true, mode: 0o700 });
-  atomicWrite(paths.owner, rootOwner);
+  atomicWrite(paths.owner, managedRootOwner);
   for (const path of [paths.temporary, paths.compositions, paths.receipts, paths.state]) {
     mkdirSync(path, { recursive: true, mode: 0o700 });
   }
@@ -63,19 +66,11 @@ function checkpoint(name) {
   }
 }
 
-function shellQuote(value) {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
-function launcherContents(cliPath) {
-  return `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(cliPath)} "$@"\n`;
-}
-
 function publishLauncher(path, cliPath) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o755 });
   const temporary = join(dirname(path), `.${basename(path)}.tmp-${randomUUID()}`);
   try {
-    writeFileSync(temporary, launcherContents(cliPath), { mode: 0o755 });
+    writeFileSync(temporary, shellLauncherContents(cliPath), { mode: 0o755 });
     // A same-directory hard link is an atomic exclusive publication: EEXIST
     // refuses a command created during the long build instead of replacing it.
     linkSync(temporary, path);
@@ -163,7 +158,7 @@ export async function installManagedPi({
   if (pathExists(paths.root) && pathExists(paths.activation)) {
     const rootStat = lstatSync(paths.root);
     const owner = readJson(paths.owner, "PorcuPi root ownership");
-    if (rootStat.isSymbolicLink() || !rootStat.isDirectory() || canonicalJson(owner) !== canonicalJson(rootOwner)) {
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory() || canonicalJson(owner) !== canonicalJson(managedRootOwner)) {
       fail(`PorcuPi data root is foreign: ${paths.root}`);
     }
     const active = readActiveComposition(dataRoot);
@@ -172,25 +167,31 @@ export async function installManagedPi({
     if (!cliStat.isFile() || cliStat.isSymbolicLink()) fail("Installed PorcuPi runtime is malformed");
     recoverable = { active, installedCli };
   }
-  if (pathExists(launcher)) {
+  const hasLauncher = pathExists(launcher);
+  const hasLauncherReceipt = pathExists(paths.launcherReceipt);
+  if (hasLauncher) {
     const stat = lstatSync(launcher);
     if (
       !recoverable
       || !stat.isFile()
       || stat.isSymbolicLink()
-      || readFileSync(launcher, "utf8") !== launcherContents(recoverable.installedCli)
+      || readFileSync(launcher, "utf8") !== shellLauncherContents(recoverable.installedCli)
     ) {
       fail(`Refusing foreign porcupi command collision: ${launcher}`);
     }
-  }
+    if (hasLauncherReceipt) verifyLauncher(paths, environment);
+  } else if (hasLauncherReceipt) fail(`Receipt-owned PorcuPi launcher is missing: ${launcher}`);
   if (recoverable) {
-    if (!pathExists(launcher)) publishLauncher(launcher, recoverable.installedCli);
+    if (!hasLauncher) publishLauncher(launcher, recoverable.installedCli);
+    if (!hasLauncherReceipt) atomicWrite(paths.launcherReceipt, createLauncherReceipt(launcher));
+    verifyLauncher(paths, environment);
     output.write(`\nRecovered installed zero-Patch Managed Pi ${recoverable.active.receipt.piBase.tag}.\n`);
     output.write(`Command: ${launcher}\n`);
     output.write("Stock Pi and Pi user data were preserved.\n");
     return { installed: true, recovered: true, launcher, compositionId: recoverable.active.receipt.compositionId };
   }
   let initialized = false;
+  let publishedLauncher = false;
   try {
     initializeFreshRoot(paths);
     initialized = true;
@@ -210,6 +211,9 @@ export async function installManagedPi({
     });
     checkpoint("activation-written");
     publishLauncher(launcher, join(paths.runtime, "cli.mjs"));
+    publishedLauncher = true;
+    atomicWrite(paths.launcherReceipt, createLauncherReceipt(launcher));
+    verifyLauncher(paths, environment);
     checkpoint("launcher-published");
     removePreparedTree(temporaryRoot);
 
@@ -220,6 +224,18 @@ export async function installManagedPi({
     output.write("Stock Pi and Pi user data were preserved.\n");
     return { installed: true, launcher, compositionId: receipt.compositionId };
   } catch (error) {
+    if (publishedLauncher) {
+      try {
+        const stat = lstatSync(launcher);
+        if (
+          stat.isFile()
+          && !stat.isSymbolicLink()
+          && readFileSync(launcher, "utf8") === shellLauncherContents(join(paths.runtime, "cli.mjs"))
+        ) unlinkSync(launcher);
+      } catch (cleanupError) {
+        if (cleanupError?.code !== "ENOENT") throw cleanupError;
+      }
+    }
     if (initialized) removePreparedTree(paths.root);
     throw error;
   }

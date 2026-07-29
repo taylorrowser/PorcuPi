@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -95,15 +96,21 @@ else if (args[0] === "--help") console.log("Pi fixture help");
 else if (args[0] === "--list-models") console.log("fixture-model");
 else if (args[0] === "install" || args[0] === "remove") {
   const source = args[1];
+  const local = args.includes("-l") || args.includes("--local");
+  const scope = local ? "project" : "global";
   if (process.env.PI_FIXTURE_PACKAGE_LOG) appendFileSync(process.env.PI_FIXTURE_PACKAGE_LOG, JSON.stringify(args) + "\\\\n");
-  if (args[0] === "install" && (process.env.PI_FIXTURE_PACKAGE_FAIL || source.includes(process.env.PI_FIXTURE_PACKAGE_FAIL_SOURCE || "\0"))) {
+  if (local && process.env.PI_FIXTURE_PROJECT_TRUST_LOG) appendFileSync(process.env.PI_FIXTURE_PROJECT_TRUST_LOG, "Pi decided project trust\\\\n");
+  if (local && process.env.PI_FIXTURE_PROJECT_TRUST === "deny") {
+    console.error("Project is not trusted");
+    process.exitCode = 32;
+  } else if (args[0] === "install" && (process.env.PI_FIXTURE_PACKAGE_FAIL || scope === process.env.PI_FIXTURE_PACKAGE_FAIL_SCOPE || source.includes(process.env.PI_FIXTURE_PACKAGE_FAIL_SOURCE || "\0"))) {
     console.error("fixture Pi package install failed");
     process.exitCode = 31;
   } else {
     const agentDir = process.env.PI_CODING_AGENT_DIR || join(process.env.HOME, ".pi", "agent");
-    const settingsPath = join(agentDir, "settings.json");
+    const settingsPath = local ? join(process.cwd(), ".pi", "settings.json") : join(agentDir, "settings.json");
     const settings = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
-    const identity = (value) => (typeof value === "string" ? value : value.source).replace(/@[a-f0-9]{40}$/, "");
+    const identity = (value) => (typeof value === "string" ? value : value.source).replace(/@(?:[a-f0-9]{40}|[a-f0-9]{64})$/, "");
     const packages = Array.isArray(settings.packages) ? settings.packages : [];
     const index = packages.findIndex((value) => identity(value) === identity(source));
     if (args[0] === "remove") {
@@ -190,11 +197,12 @@ function dataRoot(home) {
     : join(home, ".local", "share", "porcupi");
 }
 
-function runPorcuPi(home, args, inputHex, extraEnvironment = {}) {
+function runPorcuPi(home, args, inputHex, extraEnvironment = {}, cwd) {
   return spawnSync(
     "python3",
     [join(repositoryRoot, "test", "support", "pty-driver.py"), inputHex, join(home, ".local", "bin", "porcupi"), ...args],
     {
+      cwd,
       encoding: "utf8",
       timeout: 30_000,
       env: {
@@ -555,6 +563,272 @@ test("porcupi add pins and filters all four Pi resource kinds through Pi", async
     ],
   }]);
   assert.deepEqual(JSON.parse(readFileSync(packageLog, "utf8").trim()), ["install", packageSource]);
+});
+
+test("porcupi add installs every resource kind in project scope without granting Pi project trust", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  const project = join(root, "project");
+  mkdirSync(home);
+  mkdirSync(join(project, ".pi"), { recursive: true });
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  const locator = await serveGitRepository(root, repository);
+  const packageSource = `git:${locator}@${repository.commit}`;
+  const globalSettingsPath = join(home, ".pi", "agent", "settings.json");
+  mkdirSync(dirname(globalSettingsPath), { recursive: true });
+  writeFileSync(globalSettingsPath, `${JSON.stringify({ packages: ["npm:global-foreign", packageSource], theme: "dark" }, null, 2)}\n`);
+  const projectSettingsPath = join(project, ".pi", "settings.json");
+  writeFileSync(projectSettingsPath, `${JSON.stringify({ packages: ["npm:project-foreign"], quietStartup: true }, null, 2)}\n`);
+  const globalBefore = readFileSync(globalSettingsPath);
+  const packageLog = join(root, "package.log");
+  const trustLog = join(root, "trust.log");
+
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e206a206a206a206e0d", {
+    PI_FIXTURE_PACKAGE_LOG: packageLog,
+    PI_FIXTURE_PROJECT_TRUST_LOG: trustLog,
+  }, project);
+
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  assert.match(add.stdout, /Project.*project/);
+  assert.deepEqual(readFileSync(globalSettingsPath), globalBefore);
+  const projectSettings = JSON.parse(readFileSync(projectSettingsPath, "utf8"));
+  assert.deepEqual(projectSettings, {
+    packages: [
+      "npm:project-foreign",
+      {
+        source: packageSource,
+        extensions: ["extensions/fixture.ts"],
+        skills: ["skills/fixture-skill/SKILL.md"],
+        prompts: ["prompts/fixture.md"],
+        themes: ["themes/fixture.json"],
+      },
+    ],
+    quietStartup: true,
+  });
+  const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
+  const canonicalProject = realpathSync(project);
+  assert.deepEqual(selections.sources[0].artifacts, [
+    { kind: "Extension", path: "extensions/fixture.ts", scope: "project", projectRoot: canonicalProject },
+    { kind: "Prompt", path: "prompts/fixture.md", scope: "project", projectRoot: canonicalProject },
+    { kind: "Skill", path: "skills/fixture-skill/SKILL.md", scope: "project", projectRoot: canonicalProject },
+    { kind: "Theme", path: "themes/fixture.json", scope: "project", projectRoot: canonicalProject },
+  ]);
+  assert.deepEqual(JSON.parse(readFileSync(packageLog, "utf8").trim()), ["install", packageSource, "-l"]);
+  assert.match(readFileSync(trustLog, "utf8"), /Pi decided project trust/);
+  assert.equal(existsSync(join(home, ".pi", "agent", "trust.json")), false);
+});
+
+test("declining Pi project trust saves no project Selection Intent", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  const project = join(root, "project");
+  mkdirSync(home);
+  mkdirSync(project);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  const locator = await serveGitRepository(root, repository);
+  const activationPath = join(dataRoot(home), "state", "activation.json");
+  const activationBefore = readFileSync(activationPath);
+
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "206e206e0d", {
+    PI_FIXTURE_PROJECT_TRUST: "deny",
+  }, project);
+
+  assert.notEqual(add.status, 0);
+  assert.match(add.stdout, /Project is not trusted/);
+  assert.match(add.stdout, /Pi package lifecycle failed with status 32/);
+  assert.equal(existsSync(join(project, ".pi", "settings.json")), false);
+  assert.equal(existsSync(join(dataRoot(home), "state", "selections.json")), false);
+  assert.equal(existsSync(join(home, ".pi", "agent", "trust.json")), false);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+});
+
+test("porcupi manage removes resources and moves retained intent between global and project scopes", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  const project = join(root, "project");
+  mkdirSync(home);
+  mkdirSync(join(project, ".pi"), { recursive: true });
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  const locator = await serveGitRepository(root, repository);
+  const packageLog = join(root, "package.log");
+  const environment = { PI_FIXTURE_PACKAGE_LOG: packageLog };
+  assert.equal(runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d", environment, project).status, 0);
+  const projectSettingsPath = join(project, ".pi", "settings.json");
+  writeFileSync(projectSettingsPath, `${JSON.stringify({ packages: ["npm:project-foreign"], quietStartup: true }, null, 2)}\n`);
+  const activationPath = join(dataRoot(home), "state", "activation.json");
+  const activationBefore = readFileSync(activationPath);
+
+  const manage = runPorcuPi(home, ["manage"], "6a206e206a6a206e0d", {
+    ...environment,
+    PTY_WAIT_FOR: "1 of 3 — Keep or remove",
+  }, project);
+
+  assert.equal(manage.status, 0, manage.stderr || manage.stdout);
+  assert.match(manage.stdout, /1 of 3 — Keep or remove current selections/);
+  assert.match(manage.stdout, /2 of 3 — Choose Installation Scope/);
+  assert.match(manage.stdout, /3 of 3 — Review and save/);
+  assert.match(manage.stdout, /Remove Prompt/);
+  assert.match(manage.stdout, /Move Extension to project/);
+  assert.match(manage.stdout, /Move Theme to project/);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+
+  const packageSource = `git:${locator}@${repository.commit}`;
+  const globalSettings = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8"));
+  assert.deepEqual(globalSettings.packages, [{
+    source: packageSource,
+    extensions: [],
+    skills: ["skills/fixture-skill/SKILL.md"],
+    prompts: [],
+    themes: [],
+  }]);
+  const projectSettings = JSON.parse(readFileSync(projectSettingsPath, "utf8"));
+  assert.deepEqual(projectSettings, {
+    packages: [
+      "npm:project-foreign",
+      {
+        source: packageSource,
+        autoload: false,
+        extensions: ["extensions/fixture.ts"],
+        skills: [],
+        prompts: [],
+        themes: ["themes/fixture.json"],
+      },
+    ],
+    quietStartup: true,
+  });
+  const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
+  assert.deepEqual(selections.sources[0].artifacts, [
+    { kind: "Extension", path: "extensions/fixture.ts", scope: "project", projectRoot: realpathSync(project) },
+    { kind: "Skill", path: "skills/fixture-skill/SKILL.md", scope: "global" },
+    { kind: "Theme", path: "themes/fixture.json", scope: "project", projectRoot: realpathSync(project) },
+  ]);
+  let calls = readFileSync(packageLog, "utf8").trim().split("\n").map(JSON.parse);
+  assert.deepEqual(calls.slice(-2), [["install", packageSource], ["install", packageSource, "-l"]]);
+
+  const moveBack = runPorcuPi(home, ["manage"], "6e206a6a206e0d", {
+    ...environment,
+    PTY_WAIT_FOR: "1 of 3 — Keep or remove",
+  }, project);
+  assert.equal(moveBack.status, 0, moveBack.stderr || moveBack.stdout);
+  const movedGlobalSettings = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8"));
+  assert.deepEqual(movedGlobalSettings.packages[0], {
+    source: packageSource,
+    extensions: ["extensions/fixture.ts"],
+    skills: ["skills/fixture-skill/SKILL.md"],
+    prompts: [],
+    themes: ["themes/fixture.json"],
+  });
+  assert.deepEqual(JSON.parse(readFileSync(projectSettingsPath, "utf8")), {
+    packages: ["npm:project-foreign"],
+    quietStartup: true,
+  });
+  calls = readFileSync(packageLog, "utf8").trim().split("\n").map(JSON.parse);
+  assert.deepEqual(calls.slice(-2), [["install", packageSource], ["remove", packageSource, "-l"]]);
+});
+
+test("porcupi manage lists every Source Repository and cancellation preserves reviewed state", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const sourceRootA = join(root, "source-a");
+  const sourceRootB = join(root, "source-b");
+  const serverRootA = join(root, "server-a");
+  const serverRootB = join(root, "server-b");
+  for (const path of [sourceRootA, sourceRootB, serverRootA, serverRootB]) mkdirSync(path);
+  const repositoryA = createResourceRepository(sourceRootA);
+  const repositoryB = createResourceRepository(sourceRootB);
+  writeFileSync(join(repositoryB.source, "prompts", "second-source.md"), "Second source.\n");
+  git(repositoryB.source, "add", ".");
+  git(repositoryB.source, "commit", "-m", "Distinguish second source");
+  repositoryB.commit = git(repositoryB.source, "rev-parse", "HEAD");
+  const locatorA = await serveGitRepository(serverRootA, repositoryA);
+  const locatorB = await serveGitRepository(serverRootB, repositoryB);
+  assert.equal(runPorcuPi(home, ["add", `${locatorA}@main`], "206e6e0d").status, 0);
+  assert.equal(runPorcuPi(home, ["add", `${locatorB}@main`], "206e6e0d").status, 0);
+  const settingsPath = join(home, ".pi", "agent", "settings.json");
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const activationPath = join(dataRoot(home), "state", "activation.json");
+  const settingsBefore = readFileSync(settingsPath);
+  const selectionsBefore = readFileSync(selectionsPath);
+  const activationBefore = readFileSync(activationPath);
+
+  const cancelled = runPorcuPi(home, ["manage"], "64616e6e68681b", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+
+  assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+  assert.match(cancelled.stdout, new RegExp(`127\\.0\\.0\\.1:${new URL(locatorA).port}/owner/resources`));
+  assert.match(cancelled.stdout, new RegExp(`127\\.0\\.0\\.1:${new URL(locatorB).port}/owner/resources`));
+  assert.match(cancelled.stdout, /Management cancelled/);
+  assert.match(cancelled.stdout, /\x1b\[\?25h/);
+  assert.deepEqual(readFileSync(settingsPath), settingsBefore);
+  assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+
+  const interrupted = runPorcuPi(home, ["manage"], "03", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+  assert.equal(interrupted.status, 0, interrupted.stderr || interrupted.stdout);
+  assert.match(interrupted.stdout, /Management cancelled/);
+  assert.match(interrupted.stdout, /\x1b\[\?25h/);
+  assert.deepEqual(readFileSync(settingsPath), settingsBefore);
+  assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+});
+
+test("a manage package failure restores both scopes and leaves Selection Intent and activation unchanged", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  const project = join(root, "project");
+  mkdirSync(home);
+  mkdirSync(join(project, ".pi"), { recursive: true });
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  const locator = await serveGitRepository(root, repository);
+  const packageLog = join(root, "package.log");
+  assert.equal(runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d", { PI_FIXTURE_PACKAGE_LOG: packageLog }, project).status, 0);
+  const projectSettingsPath = join(project, ".pi", "settings.json");
+  writeFileSync(projectSettingsPath, `${JSON.stringify({ packages: ["npm:project-foreign"], quietStartup: true }, null, 2)}\n`);
+  const globalSettingsPath = join(home, ".pi", "agent", "settings.json");
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const activationPath = join(dataRoot(home), "state", "activation.json");
+  const globalBefore = readFileSync(globalSettingsPath);
+  const projectBefore = readFileSync(projectSettingsPath);
+  const selectionsBefore = readFileSync(selectionsPath);
+  const activationBefore = readFileSync(activationPath);
+
+  const manage = runPorcuPi(home, ["manage"], "6e206e0d", {
+    PI_FIXTURE_PACKAGE_LOG: packageLog,
+    PI_FIXTURE_PACKAGE_FAIL_SCOPE: "project",
+    PTY_WAIT_FOR: "1 of 3 — Keep or remove",
+  }, project);
+
+  assert.notEqual(manage.status, 0);
+  assert.match(manage.stdout, /fixture Pi package install failed/);
+  assert.match(manage.stdout, /Pi package lifecycle failed with status 31/);
+  assert.match(manage.stdout, /\x1b\[\?25h/);
+  assert.deepEqual(readFileSync(globalSettingsPath), globalBefore);
+  assert.deepEqual(readFileSync(projectSettingsPath), projectBefore);
+  assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+  const packageSource = `git:${locator}@${repository.commit}`;
+  const calls = readFileSync(packageLog, "utf8").trim().split("\n").map(JSON.parse);
+  assert.deepEqual(calls.slice(-4), [
+    ["install", packageSource],
+    ["install", packageSource, "-l"],
+    ["remove", packageSource, "-l"],
+    ["install", packageSource],
+  ]);
 });
 
 test("porcupi add prompts and persists a credential-free case-preserving exact source identity", async () => {

@@ -1,0 +1,363 @@
+import { spawn } from "node:child_process";
+import { lstatSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
+import { atomicWrite, canonicalJson, fail, managedLayout } from "./runtime.mjs";
+import { isFullGitCommit, parseRequestedGitSource } from "./source-repository.mjs";
+
+const installationScopes = new Set(["global", "project"]);
+const resourceKeys = {
+  Extension: "extensions",
+  Skill: "skills",
+  Prompt: "prompts",
+  Theme: "themes",
+};
+
+export function artifactKey(artifact) {
+  return `${artifact.kind}\0${artifact.path}`;
+}
+
+function selectionStatePath(dataRoot) {
+  return join(managedLayout(dataRoot).state, "selections.json");
+}
+
+function emptySelections() {
+  return { schemaVersion: 1, sources: [] };
+}
+
+export function readSelections(dataRoot) {
+  const path = selectionStatePath(dataRoot);
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") return emptySelections();
+    fail("Malformed PorcuPi Selection Intent");
+  }
+  let value;
+  try {
+    if (!stat.isFile() || stat.isSymbolicLink()) fail("Malformed PorcuPi Selection Intent");
+    value = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    if (error instanceof Error && error.message === "Malformed PorcuPi Selection Intent") throw error;
+    fail("Malformed PorcuPi Selection Intent");
+  }
+  if (
+    value.schemaVersion !== 1
+    || !Array.isArray(value.sources)
+    || value.sources.some((source) => (
+      typeof source?.locator !== "string"
+      || !isFullGitCommit(source.commit)
+      || typeof source.packageSource !== "string"
+      || !Array.isArray(source.artifacts)
+      || source.artifacts.length === 0
+      || source.artifacts.some((artifact) => (
+        !Object.hasOwn(resourceKeys, artifact?.kind)
+        || typeof artifact.path !== "string"
+        || artifact.path.startsWith("/")
+        || artifact.path.includes("\\")
+        || /[\x00-\x1f\x7f]/.test(artifact.path)
+        || artifact.path.split("/").some((part) => part === "" || part === "." || part === "..")
+        || !installationScopes.has(artifact.scope)
+        || (artifact.scope === "global" && artifact.projectRoot !== undefined)
+        || (artifact.scope === "project" && (
+          typeof artifact.projectRoot !== "string"
+          || !isAbsolute(artifact.projectRoot)
+          || resolve(artifact.projectRoot) !== artifact.projectRoot
+          || /[\x00-\x1f\x7f]/.test(artifact.projectRoot)
+        ))
+      ))
+    ))
+  ) {
+    fail("Malformed PorcuPi Selection Intent");
+  }
+  const locators = new Set();
+  for (const source of value.sources) {
+    let packageSource;
+    try {
+      packageSource = parseRequestedGitSource(source.packageSource);
+    } catch {
+      fail("Malformed PorcuPi Selection Intent");
+    }
+    const artifactKeys = source.artifacts.map((artifact) => `${artifact.kind}\0${artifact.path}`);
+    if (
+      locators.has(source.locator)
+      || packageSource.locator !== source.locator
+      || packageSource.ref !== source.commit
+      || new Set(artifactKeys).size !== artifactKeys.length
+    ) {
+      fail("Malformed PorcuPi Selection Intent");
+    }
+    locators.add(source.locator);
+  }
+  return value;
+}
+
+function packageEntry(packageSource, artifacts, scope, projectDelta = false) {
+  const entry = { source: packageSource, ...(scope === "project" && projectDelta ? { autoload: false } : {}) };
+  for (const [kind, key] of Object.entries(resourceKeys)) {
+    entry[key] = artifacts
+      .filter((artifact) => artifact.kind === kind)
+      .map((artifact) => artifact.path)
+      .sort();
+  }
+  return entry;
+}
+
+function packageIdentity(value) {
+  const source = typeof value === "string" ? value : value?.source;
+  if (typeof source !== "string") return undefined;
+  try {
+    return parseRequestedGitSource(source).locator;
+  } catch {
+    return undefined;
+  }
+}
+
+function agentDirectory(environment) {
+  const home = environment.HOME || homedir();
+  if (!home) fail("HOME is required to select Pi's global package settings");
+  return environment.PI_CODING_AGENT_DIR || join(home, ".pi", "agent");
+}
+
+function contextKey(context) {
+  return context.scope === "global" ? "global" : `project\0${context.projectRoot}`;
+}
+
+function artifactContext(artifact) {
+  return artifact.scope === "project"
+    ? { scope: "project", projectRoot: artifact.projectRoot }
+    : { scope: "global" };
+}
+
+function groupByContext(artifacts) {
+  const groups = new Map();
+  for (const artifact of artifacts) {
+    const context = artifactContext(artifact);
+    const key = contextKey(context);
+    if (!groups.has(key)) groups.set(key, { context, artifacts: [] });
+    groups.get(key).artifacts.push(artifact);
+  }
+  return groups;
+}
+
+function settingsPathForContext(environment, context) {
+  return context.scope === "global"
+    ? join(agentDirectory(environment), "settings.json")
+    : join(context.projectRoot, ".pi", "settings.json");
+}
+
+function contextLabel(context) {
+  return context.scope === "global" ? "global" : `project (${context.projectRoot})`;
+}
+
+function readPiSettings(environment, context, { allowMissing = true } = {}) {
+  const path = settingsPathForContext(environment, context);
+  const label = contextLabel(context);
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    if (error?.code !== "ENOENT") fail(`Pi ${label} package settings are malformed`);
+    if (allowMissing) return { context, path, settings: {}, packages: [], existed: false };
+    fail(`Pi package installation did not create ${label} package settings`);
+  }
+  try {
+    const contents = readFileSync(path, "utf8");
+    const settings = JSON.parse(contents);
+    if (!stat.isFile() || stat.isSymbolicLink() || settings === null || typeof settings !== "object" || Array.isArray(settings)) {
+      fail(`Pi ${label} package settings are malformed`);
+    }
+    const packages = settings.packages ?? [];
+    if (!Array.isArray(packages)) fail(`Pi ${label} package settings are malformed`);
+    return { context, path, settings, packages, contents, existed: true };
+  } catch (error) {
+    if (error instanceof Error && error.message === `Pi ${label} package settings are malformed`) throw error;
+    fail(`Pi ${label} package settings are malformed`);
+  }
+}
+
+function matchingPackageIndexes(packages, locator) {
+  return packages.flatMap((value, index) => packageIdentity(value) === locator ? [index] : []);
+}
+
+function packageArgs(command, packageSource, context) {
+  return [command, packageSource, ...(context.scope === "project" ? ["-l"] : [])];
+}
+
+async function runManagedPi(executable, args, environment, context = { scope: "global" }) {
+  const cwd = context.scope === "project" ? context.projectRoot : agentDirectory(environment);
+  const child = spawn(process.execPath, [executable, ...args], { cwd, stdio: "inherit", env: environment });
+  const result = await new Promise((resolvePromise, rejectPromise) => {
+    child.once("error", rejectPromise);
+    child.once("exit", (code, signal) => resolvePromise({ code, signal }));
+  });
+  if (result.signal) fail(`Pi package lifecycle was interrupted by ${result.signal}`);
+  if (result.code !== 0) fail(`Pi package lifecycle failed with status ${String(result.code)}`);
+}
+
+function preparePackageTransaction(environment, changes) {
+  const contexts = new Map();
+  for (const change of changes) {
+    const previousGroups = groupByContext(change.previous?.artifacts ?? []);
+    const nextGroups = groupByContext(change.nextArtifacts);
+    const keys = [...new Set([...previousGroups.keys(), ...nextGroups.keys()])].sort();
+    const previousHasGlobal = previousGroups.has("global");
+    const nextHasGlobal = nextGroups.has("global");
+    for (const key of keys) {
+      const previousGroup = previousGroups.get(key);
+      const nextGroup = nextGroups.get(key);
+      const context = previousGroup?.context ?? nextGroup.context;
+      if (!contexts.has(key)) contexts.set(key, { context, snapshot: readPiSettings(environment, context), operations: [] });
+      const record = contexts.get(key);
+      const matches = matchingPackageIndexes(record.snapshot.packages, change.source.locator);
+      if (matches.length > 1) fail(`Pi has ambiguous ${contextLabel(context)} package configuration for ${change.source.locator}`);
+      if (!previousGroup && matches.length > 0) {
+        fail(`Pi already has a ${contextLabel(context)} package for ${change.source.locator} that PorcuPi does not own`);
+      }
+      if (previousGroup) {
+        if (matches.length !== 1) fail(`PorcuPi's prior ${contextLabel(context)} Pi package entry for ${change.source.locator} is missing`);
+        const expected = packageEntry(change.previous.packageSource, previousGroup.artifacts, context.scope, previousHasGlobal);
+        if (canonicalJson(record.snapshot.packages[matches[0]]) !== canonicalJson(expected)) {
+          fail(`PorcuPi's prior ${contextLabel(context)} Pi package entry for ${change.source.locator} was changed outside PorcuPi`);
+        }
+      }
+      record.operations.push({
+        change,
+        previousArtifacts: previousGroup?.artifacts ?? [],
+        nextArtifacts: nextGroup?.artifacts ?? [],
+        nextProjectDelta: context.scope === "project" && nextHasGlobal,
+      });
+    }
+  }
+  return [...contexts.values()].sort((left, right) => contextKey(left.context).localeCompare(contextKey(right.context)));
+}
+
+function stagePackageContexts(contexts) {
+  for (const record of contexts) {
+    const packages = [...record.snapshot.packages];
+    let changed = false;
+    for (const operation of record.operations.filter((candidate) => candidate.nextArtifacts.length > 0)) {
+      const matches = matchingPackageIndexes(packages, operation.change.source.locator);
+      const entry = packageEntry(
+        operation.change.source.packageSource,
+        operation.nextArtifacts,
+        record.context.scope,
+        operation.nextProjectDelta,
+      );
+      if (matches.length === 0) packages.push(entry);
+      else packages[matches[0]] = entry;
+      changed = true;
+    }
+    if (changed) atomicWrite(record.snapshot.path, { ...record.snapshot.settings, packages });
+  }
+}
+
+function verifyPackageTransaction(environment, contexts) {
+  for (const record of contexts) {
+    const current = readPiSettings(environment, record.context);
+    for (const operation of record.operations) {
+      const matches = matchingPackageIndexes(current.packages, operation.change.source.locator);
+      if (operation.nextArtifacts.length === 0) {
+        if (matches.length !== 0) fail(`Pi did not remove the reviewed ${contextLabel(record.context)} package for ${operation.change.source.locator}`);
+        continue;
+      }
+      const expected = packageEntry(
+        operation.change.source.packageSource,
+        operation.nextArtifacts,
+        record.context.scope,
+        operation.nextProjectDelta,
+      );
+      if (matches.length !== 1 || canonicalJson(current.packages[matches[0]]) !== canonicalJson(expected)) {
+        fail(`Pi did not retain the reviewed ${contextLabel(record.context)} package filters for ${operation.change.source.locator}`);
+      }
+    }
+  }
+}
+
+function restorePiSettings(snapshot) {
+  if (snapshot.existed) atomicWrite(snapshot.path, snapshot.contents);
+  else rmSync(snapshot.path, { force: true });
+}
+
+async function recoverPackageTransaction({ contexts, executable, environment, reconcile }) {
+  for (const record of contexts) {
+    for (const operation of record.operations.filter((candidate) => candidate.previousArtifacts.length === 0 && candidate.nextArtifacts.length > 0)) {
+      try {
+        await runManagedPi(
+          executable,
+          packageArgs("remove", operation.change.source.packageSource, record.context),
+          environment,
+          record.context,
+        );
+      } catch {
+        // A denied/failed new-scope install may leave no checkout for Pi to remove.
+      }
+    }
+  }
+  for (const record of contexts) restorePiSettings(record.snapshot);
+  for (const record of contexts) {
+    for (const operation of record.operations.filter((candidate) => reconcile.has(candidate))) {
+      try {
+        await runManagedPi(
+          executable,
+          packageArgs("install", operation.change.previous.packageSource, record.context),
+          environment,
+          record.context,
+        );
+      } catch {
+        fail(`Pi package update failed and the prior ${contextLabel(record.context)} checkout for ${operation.change.source.locator} could not be restored`);
+      }
+    }
+  }
+}
+
+export async function realizeResourceChanges({ executable, environment, changes, save }) {
+  const contexts = preparePackageTransaction(environment, changes);
+  const reconcile = new Set();
+  stagePackageContexts(contexts);
+  try {
+    for (const record of contexts) {
+      for (const operation of record.operations.filter((candidate) => candidate.nextArtifacts.length > 0)) {
+        if (operation.previousArtifacts.length > 0) reconcile.add(operation);
+        await runManagedPi(
+          executable,
+          packageArgs("install", operation.change.source.packageSource, record.context),
+          environment,
+          record.context,
+        );
+      }
+    }
+    for (const record of contexts) {
+      for (const operation of record.operations.filter((candidate) => candidate.previousArtifacts.length > 0 && candidate.nextArtifacts.length === 0)) {
+        await runManagedPi(
+          executable,
+          packageArgs("remove", operation.change.previous.packageSource, record.context),
+          environment,
+          record.context,
+        );
+        reconcile.add(operation);
+      }
+    }
+    verifyPackageTransaction(environment, contexts);
+    save();
+  } catch (error) {
+    await recoverPackageTransaction({ contexts, executable, environment, reconcile });
+    throw error;
+  }
+}
+
+export function saveSelectionSources(dataRoot, sources) {
+  const ordered = [...sources].sort((left, right) => left.locator.localeCompare(right.locator));
+  atomicWrite(selectionStatePath(dataRoot), { schemaVersion: 1, sources: ordered });
+}
+
+export function resolveProjectContext(cwd) {
+  try {
+    const root = realpathSync(cwd ?? process.cwd());
+    if (!lstatSync(root).isDirectory() || /[\x00-\x1f\x7f]/.test(root)) throw new Error("unsafe project directory");
+    return { available: true, root };
+  } catch {
+    return { available: false, reason: "the current working directory is unavailable" };
+  }
+}

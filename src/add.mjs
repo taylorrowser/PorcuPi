@@ -47,6 +47,7 @@ function readSelections(dataRoot) {
         || typeof artifact.path !== "string"
         || artifact.path.startsWith("/")
         || artifact.path.includes("\\")
+        || /[\x00-\x1f\x7f]/.test(artifact.path)
         || artifact.path.split("/").some((part) => part === "" || part === "." || part === "..")
         || artifact.scope !== "global"
       ))
@@ -242,18 +243,30 @@ function runAddWizard({ source, artifacts, diagnostics, currentPaths, previousCo
     const onSigint = () => onSignal("SIGINT");
     const onSigterm = () => onSignal("SIGTERM");
     const chosen = () => artifacts.filter((artifact) => selected.has(artifact.path));
+    const truncate = (value) => {
+      const width = Math.max(20, (output.columns || 100) - 1);
+      return value.length > width ? `${value.slice(0, width - 1)}…` : value;
+    };
+    const windowAround = (cursor, count, reservedRows) => {
+      const available = Math.max(4, (output.rows || 24) - reservedRows);
+      const start = Math.max(0, Math.min(cursor - Math.floor(available / 2), Math.max(0, count - available)));
+      return { start, end: Math.min(count, start + available) };
+    };
     const render = () => {
       output.write("\x1b[2J\x1b[H");
       if (page === 0) {
         output.write("1 of 3 — Select Artifacts\n");
         output.write(`Repository: ${source.locator}\nExact commit: ${source.commit}\n\n`);
         if (artifacts.length === 0) output.write("  No selectable Pi resources were discovered.\n");
-        for (const [index, artifact] of artifacts.entries()) {
+        const artifactWindow = windowAround(artifactCursor, artifacts.length, 13 + Math.min(5, diagnostics.length));
+        for (let index = artifactWindow.start; index < artifactWindow.end; index += 1) {
+          const artifact = artifacts[index];
           const pointer = index === artifactCursor ? "›" : " ";
           const mark = selected.has(artifact.path) ? "x" : " ";
-          output.write(`${pointer} [${mark}] ${artifact.kind.padEnd(9)} ${artifact.path}\n`);
+          output.write(`${truncate(`${pointer} [${mark}] ${artifact.kind.padEnd(9)} ${artifact.path}`)}\n`);
         }
-        for (const diagnostic of diagnostics.slice(0, 5)) output.write(`  Rejected ${diagnostic.path}: ${diagnostic.reason}\n`);
+        if (artifacts.length > 0) output.write(`  ${artifactWindow.start} above · ${artifacts.length - artifactWindow.end} below\n`);
+        for (const diagnostic of diagnostics.slice(0, 5)) output.write(`${truncate(`  Rejected ${diagnostic.path}: ${diagnostic.reason}`)}\n`);
         if (diagnostics.length > 5) output.write(`  … ${diagnostics.length - 5} more rejected candidates\n`);
         output.write("\n[↑/↓ j/k] move  [Space/Enter] toggle  [a] select all  [d] deselect all\n[n → l] Next  [Esc] cancel\n");
       } else if (page === 1) {
@@ -269,9 +282,12 @@ function runAddWizard({ source, artifacts, diagnostics, currentPaths, previousCo
         output.write(`Repository: ${source.locator}\nExact commit: ${source.commit}\n`);
         if (previousCommit && previousCommit !== source.commit) output.write(`Source-wide change: ${previousCommit} → ${source.commit}\n`);
         output.write(`Selections: ${selectedArtifacts.length} global Pi resource(s)\n\n`);
-        for (const [index, artifact] of selectedArtifacts.entries()) {
-          output.write(`${index === reviewCursor ? "›" : " "} ${artifact.kind.padEnd(9)} ${artifact.path}\n`);
+        const reviewWindow = windowAround(reviewCursor, selectedArtifacts.length, 16);
+        for (let index = reviewWindow.start; index < reviewWindow.end; index += 1) {
+          const artifact = selectedArtifacts[index];
+          output.write(`${truncate(`${index === reviewCursor ? "›" : " "} ${artifact.kind.padEnd(9)} ${artifact.path}`)}\n`);
         }
+        if (selectedArtifacts.length > 0) output.write(`  ${reviewWindow.start} above · ${selectedArtifacts.length - reviewWindow.end} below\n`);
         if (selectedArtifacts.length === 0) output.write("  Saving removes this Source Repository's prior PorcuPi selections.\n");
         output.write("\nSelecting this source trusts its code and dependencies with your user authority.\n");
         output.write("The exact commit supports reproducibility; it does not prove publisher identity.\n");

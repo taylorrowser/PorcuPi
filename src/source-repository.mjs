@@ -22,7 +22,7 @@ function normalizeRepositoryPath(value) {
     !path
     || path.split("/").length < 2
     || path.includes("\\")
-    || path.includes("\0")
+    || /[\x00-\x1f\x7f]/.test(path)
     || path.split("/").some((part) => part === "" || part === "." || part === "..")
   ) {
     fail("Git source has an unsafe or missing repository path");
@@ -50,7 +50,7 @@ export function parseRequestedGitSource(requested) {
     const { path: rawPath, ref } = splitPathRef(scp[3]);
     const path = normalizeRepositoryPath(rawPath);
     const host = scp[2];
-    if (!host || /[\\/\0]/.test(host)) fail("Git source has an unsafe host");
+    if (!host || /[\\/\x00-\x1f\x7f]/.test(host)) fail("Git source has an unsafe host");
     return {
       cloneRepository: `${scp[1]}@${host}:${rawPath.replace(/\/+$/, "")}`,
       packageRepository: `${scp[1]}@${host}:${rawPath.replace(/\/+$/, "")}`,
@@ -170,7 +170,9 @@ export function resolveSourceRepository(requested) {
 
 function relativePath(root, path) {
   const value = relative(root, path).split(sep).join("/");
-  if (!value || value === ".." || value.startsWith("../")) fail("Resource path escapes the Source Repository");
+  if (!value || value === ".." || value.startsWith("../") || /[\x00-\x1f\x7f]/.test(value)) {
+    fail("Resource path escapes the Source Repository or contains terminal control characters");
+  }
   return value;
 }
 

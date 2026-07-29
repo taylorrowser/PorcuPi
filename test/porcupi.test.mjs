@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -190,13 +191,21 @@ function createReleaseFixture(root, base, expectedVersion = "0.81.1") {
 }
 
 function runInstaller(release, home, inputHex = "0d", extraEnvironment = {}) {
+  const guidedInput = inputHex === "0d" ? "0d0d0d" : inputHex;
   return spawnSync(
     "python3",
-    [join(repositoryRoot, "test", "support", "pty-driver.py"), inputHex, join(release, "install.sh")],
+    [join(repositoryRoot, "test", "support", "pty-driver.py"), guidedInput, join(release, "install.sh")],
     {
       cwd: release,
       encoding: "utf8",
-      env: { ...process.env, HOME: home, XDG_DATA_HOME: join(home, ".local", "share"), NODE_ENV: "test", ...extraEnvironment },
+      env: {
+        ...process.env,
+        HOME: home,
+        XDG_DATA_HOME: join(home, ".local", "share"),
+        NODE_ENV: "test",
+        PTY_WAIT_FOR: "1 of 3 — Installation",
+        ...extraEnvironment,
+      },
     },
   );
 }
@@ -606,6 +615,31 @@ test("installation retry publishes the stable command after interruption followi
   assert.equal(launch.stdout.trim(), "0.81.1");
 });
 
+test("installation retry converges an interrupted pi alias publication to the latest ownership choice", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+
+  const interrupted = runInstaller(release, home, "0d790d0d", { PORCUPI_TEST_FAULT: "pi-alias-published" });
+  assert.equal(interrupted.signal, "SIGKILL");
+  const bin = join(home, ".local", "bin");
+  const managedRoot = dataRoot(home);
+  assert.equal(existsSync(join(bin, "porcupi")), true);
+  assert.equal(existsSync(join(bin, "pi")), true);
+  assert.equal(existsSync(join(managedRoot, "state", "pi-transition.json")), true);
+  assert.equal(existsSync(join(managedRoot, "state", "pi-launcher.json")), false);
+
+  const retryDefaultNo = runInstaller(release, home);
+  assert.equal(retryDefaultNo.status, 0, retryDefaultNo.stderr || retryDefaultNo.stdout);
+  assert.match(retryDefaultNo.stdout, /Recovered installed zero-Patch Managed Pi/);
+  assert.equal(existsSync(join(bin, "pi")), false);
+  assert.equal(existsSync(join(managedRoot, "state", "pi-transition.json")), false);
+  assert.equal(existsSync(join(managedRoot, "state", "pi-launcher.json")), false);
+  assert.equal(existsSync(join(bin, "porcupi")), true);
+});
+
 test("guided install builds, activates, and launches a zero-Patch Managed Pi without changing Stock Pi", () => {
   const root = temporaryRoot();
   const home = join(root, "home");
@@ -650,6 +684,243 @@ test("guided install builds, activates, and launches a zero-Patch Managed Pi wit
   });
   assert.equal(launch.status, 0, launch.stderr);
   assert.deepEqual(JSON.parse(readFileSync(launchLog, "utf8").trim()), ["--model", "fixture-model", "hello"]);
+});
+
+test("guided installation defaults pi ownership to no and preserves a Stock Pi target collision", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  const bin = join(home, ".local", "bin");
+  const stockPi = join(bin, "pi");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(stockPi, "#!/bin/sh\necho stock-at-target\n");
+  chmodSync(stockPi, 0o755);
+  const stockBefore = readFileSync(stockPi);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+
+  const install = runInstaller(release, home);
+
+  assert.equal(install.status, 0, install.stderr || install.stdout);
+  assert.match(install.stdout, /Should PorcuPi own the `pi` command\? \(default: No\)/);
+  assert.match(install.stdout, /does not own.*no change was needed/);
+  assert.deepEqual(readFileSync(stockPi), stockBefore);
+  assert.equal(existsSync(join(dataRoot(home), "state", "pi-launcher.json")), false);
+  assert.equal(existsSync(join(bin, "porcupi")), true);
+  const stock = spawnSync(stockPi, [], { encoding: "utf8" });
+  assert.equal(stock.status, 0, stock.stderr);
+  assert.equal(stock.stdout.trim(), "stock-at-target");
+});
+
+test("guided installation can explicitly own pi while preserving independently resolved Stock Pi", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  const stockBin = join(root, "stock-bin");
+  const stockPi = join(stockBin, "pi");
+  mkdirSync(home);
+  mkdirSync(stockBin);
+  writeFileSync(stockPi, "#!/bin/sh\necho stock-pi\n");
+  chmodSync(stockPi, 0o755);
+  const stockBefore = readFileSync(stockPi);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  const bin = join(home, ".local", "bin");
+  const environment = { PATH: `${stockBin}:${bin}:${process.env.PATH}` };
+
+  const install = runInstaller(release, home, "0d790d0d", environment);
+
+  assert.equal(install.status, 0, install.stderr || install.stdout);
+  assert.match(install.stdout, /1 of 3 — Installation/);
+  assert.match(install.stdout, /2 of 3 — Command ownership/);
+  assert.match(install.stdout, /3 of 3 — Review/);
+  assert.match(install.stdout, /Should PorcuPi own the `pi` command\? \(default: No\)/);
+  assert.match(install.stdout, /Own `pi`: Yes — reversible PorcuPi alias/);
+  assert.match(install.stdout, /Enabled PorcuPi ownership/);
+  assert.match(install.stdout, new RegExp(`PATH currently resolves.*${stockPi.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  const alias = join(bin, "pi");
+  const launcher = join(bin, "porcupi");
+  assert.equal(existsSync(alias), true);
+  assert.equal(existsSync(launcher), true);
+  assert.deepEqual(readFileSync(stockPi), stockBefore);
+  const managedRoot = dataRoot(home);
+  const receipt = JSON.parse(readFileSync(join(managedRoot, "state", "pi-launcher.json"), "utf8"));
+  assert.deepEqual(Object.keys(receipt).sort(), ["kind", "mode", "path", "schemaVersion", "sha256", "size", "type"]);
+  assert.equal(receipt.type, "porcupi-pi-launcher");
+  assert.equal(receipt.path, alias);
+  assert.equal(receipt.kind, "file");
+  assert.equal(receipt.size, lstatSync(alias).size);
+  assert.equal(receipt.sha256, createHash("sha256").update(readFileSync(alias)).digest("hex"));
+  const aliasLaunch = spawnSync(alias, ["--version"], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, XDG_DATA_HOME: join(home, ".local", "share"), PATH: `${bin}:${stockBin}:${process.env.PATH}` },
+  });
+  assert.equal(aliasLaunch.status, 0, aliasLaunch.stderr || aliasLaunch.stdout);
+  assert.equal(aliasLaunch.stdout.trim(), "0.81.1");
+
+  const disable = runPorcuPiProcess(home, ["pi", "disable"], environment);
+  assert.equal(disable.status, 0, disable.stderr || disable.stdout);
+  assert.match(disable.stdout, new RegExp(`pi.*resolves independently.*${stockPi.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assert.equal(existsSync(alias), false);
+  assert.equal(existsSync(join(managedRoot, "state", "pi-launcher.json")), false);
+  assert.equal(existsSync(launcher), true);
+  assert.deepEqual(readFileSync(stockPi), stockBefore);
+  const stockLaunch = spawnSync("pi", [], { encoding: "utf8", env: { ...process.env, PATH: environment.PATH } });
+  assert.equal(stockLaunch.status, 0, stockLaunch.stderr);
+  assert.equal(stockLaunch.stdout.trim(), "stock-pi");
+
+  const repeatedDisable = runPorcuPiProcess(home, ["pi", "disable"], environment);
+  assert.equal(repeatedDisable.status, 0, repeatedDisable.stderr || repeatedDisable.stdout);
+  assert.match(repeatedDisable.stdout, /does not own.*no change was needed/);
+  const enable = runPorcuPiProcess(home, ["pi", "enable"], environment);
+  assert.equal(enable.status, 0, enable.stderr || enable.stdout);
+  const repeatedEnable = runPorcuPiProcess(home, ["pi", "enable"], environment);
+  assert.equal(repeatedEnable.status, 0, repeatedEnable.stderr || repeatedEnable.stdout);
+  assert.match(repeatedEnable.stdout, /already owns.*no change was needed/);
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const activationBefore = readFileSync(activationPath);
+  const launcherBefore = readFileSync(launcher);
+  writeFileSync(activationPath, "malformed\n");
+  writeFileSync(launcher, `${launcherBefore.toString()}# locally changed\n`);
+  const recoveryDisable = runPorcuPiProcess(home, ["pi", "disable"], environment);
+  assert.equal(recoveryDisable.status, 0, recoveryDisable.stderr || recoveryDisable.stdout);
+  assert.equal(existsSync(alias), false);
+  assert.notDeepEqual(readFileSync(launcher), launcherBefore);
+  writeFileSync(activationPath, activationBefore);
+  writeFileSync(launcher, launcherBefore);
+  assert.deepEqual(readFileSync(stockPi), stockBefore);
+});
+
+test("pi ownership refuses foreign and modified aliases without adoption or removal", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const bin = join(home, ".local", "bin");
+  const alias = join(bin, "pi");
+  const foreign = join(root, "foreign-pi");
+  writeFileSync(foreign, "#!/bin/sh\necho foreign\n");
+  chmodSync(foreign, 0o755);
+  symlinkSync(foreign, alias);
+  const symbolicBefore = readlinkSync(alias);
+
+  const symbolicCollision = runPorcuPiProcess(home, ["pi", "enable"]);
+  assert.notEqual(symbolicCollision.status, 0);
+  assert.match(`${symbolicCollision.stdout}${symbolicCollision.stderr}`, /Refusing foreign pi command collision/);
+  assert.equal(lstatSync(alias).isSymbolicLink(), true);
+  assert.equal(readlinkSync(alias), symbolicBefore);
+  rmSync(alias);
+  writeFileSync(alias, "foreign command\n");
+  const foreignBefore = readFileSync(alias);
+  const regularCollision = runPorcuPiProcess(home, ["pi", "enable"]);
+  assert.notEqual(regularCollision.status, 0);
+  assert.deepEqual(readFileSync(alias), foreignBefore);
+  rmSync(alias);
+
+  const enabled = runPorcuPiProcess(home, ["pi", "enable"]);
+  assert.equal(enabled.status, 0, enabled.stderr || enabled.stdout);
+  const managedRoot = dataRoot(home);
+  const receiptPath = join(managedRoot, "state", "pi-launcher.json");
+  const receiptBefore = readFileSync(receiptPath);
+  const aliasBefore = readFileSync(alias);
+  writeFileSync(alias, `${aliasBefore.toString()}# modified\n`);
+  const modifiedBefore = readFileSync(alias);
+  const modifiedDisable = runPorcuPiProcess(home, ["pi", "disable"]);
+  assert.notEqual(modifiedDisable.status, 0);
+  assert.match(`${modifiedDisable.stdout}${modifiedDisable.stderr}`, /does not match its ownership receipt/);
+  assert.deepEqual(readFileSync(alias), modifiedBefore);
+  assert.deepEqual(readFileSync(receiptPath), receiptBefore);
+  const verifyModified = runPorcuPiProcess(home, ["verify"]);
+  assert.notEqual(verifyModified.status, 0);
+  assert.match(`${verifyModified.stdout}${verifyModified.stderr}`, /pi launcher does not match/);
+
+  writeFileSync(alias, aliasBefore);
+  const receipt = JSON.parse(receiptBefore.toString());
+  writeFileSync(receiptPath, `${JSON.stringify({ ...receipt, path: "../pi" }, null, 2)}\n`);
+  const traversingDisable = runPorcuPiProcess(home, ["pi", "disable"]);
+  assert.notEqual(traversingDisable.status, 0);
+  assert.match(`${traversingDisable.stdout}${traversingDisable.stderr}`, /Malformed PorcuPi pi launcher receipt/);
+  assert.deepEqual(readFileSync(alias), aliasBefore);
+  writeFileSync(receiptPath, receiptBefore);
+  rmSync(alias);
+  symlinkSync(foreign, alias);
+  const substitutedDisable = runPorcuPiProcess(home, ["pi", "disable"]);
+  assert.notEqual(substitutedDisable.status, 0);
+  assert.equal(lstatSync(alias).isSymbolicLink(), true);
+  assert.deepEqual(readFileSync(receiptPath), receiptBefore);
+});
+
+test("pi ownership retries converge across publication and removal interruptions without Stock Pi", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const bin = join(home, ".local", "bin");
+  const alias = join(bin, "pi");
+  const managedRoot = dataRoot(home);
+  const transition = join(managedRoot, "state", "pi-transition.json");
+  const receipt = join(managedRoot, "state", "pi-launcher.json");
+  const environment = { PATH: `${bin}:/usr/bin:/bin` };
+  const lifecycleLock = `${managedRoot}.lifecycle-lock`;
+  const holder = spawn(join(bin, "porcupi"), ["pi", "enable"], {
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      NODE_ENV: "test",
+      PATH: environment.PATH,
+      PORCUPI_TEST_HOLD_LOCK_MS: "1000",
+    },
+  });
+  let holderOutput = "";
+  holder.stdout.on("data", (chunk) => { holderOutput += chunk; });
+  holder.stderr.on("data", (chunk) => { holderOutput += chunk; });
+  for (let attempt = 0; attempt < 100 && !existsSync(lifecycleLock); attempt += 1) await delay(20);
+  assert.equal(existsSync(lifecycleLock), true, "pi ownership lifecycle lock was not acquired");
+  const contended = runPorcuPiProcess(home, ["pi", "disable"], environment);
+  assert.notEqual(contended.status, 0);
+  assert.match(`${contended.stdout}${contended.stderr}`, /lifecycle operation is already in progress: pi enable/);
+  const holderResult = await new Promise((resolvePromise) => holder.once("close", (code, signal) => resolvePromise({ code, signal })));
+  assert.equal(holderResult.code, 0, holderOutput);
+  assert.equal(holderResult.signal, null);
+  assert.equal(runPorcuPiProcess(home, ["pi", "disable"], environment).status, 0);
+
+  const interruptedEnable = runPorcuPiProcess(home, ["pi", "enable"], {
+    ...environment,
+    PORCUPI_TEST_FAULT: "pi-alias-published",
+  });
+  assert.equal(interruptedEnable.signal, "SIGKILL");
+  assert.equal(existsSync(alias), true);
+  assert.equal(existsSync(transition), true);
+  assert.equal(existsSync(receipt), false);
+  const retryEnable = runPorcuPiProcess(home, ["pi", "enable"], environment);
+  assert.equal(retryEnable.status, 0, retryEnable.stderr || retryEnable.stdout);
+  assert.equal(existsSync(transition), false);
+  assert.equal(existsSync(receipt), true);
+  const launch = spawnSync("pi", ["--version"], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, XDG_DATA_HOME: join(home, ".local", "share"), PATH: environment.PATH },
+  });
+  assert.equal(launch.status, 0, launch.stderr || launch.stdout);
+  assert.equal(launch.stdout.trim(), "0.81.1");
+
+  const interruptedDisable = runPorcuPiProcess(home, ["pi", "disable"], {
+    ...environment,
+    PORCUPI_TEST_FAULT: "pi-alias-removed",
+  });
+  assert.equal(interruptedDisable.signal, "SIGKILL");
+  assert.equal(existsSync(alias), false);
+  assert.equal(existsSync(receipt), true);
+  assert.equal(existsSync(transition), true);
+  const retryDisable = runPorcuPiProcess(home, ["pi", "disable"], environment);
+  assert.equal(retryDisable.status, 0, retryDisable.stderr || retryDisable.stdout);
+  assert.equal(existsSync(alias), false);
+  assert.equal(existsSync(receipt), false);
+  assert.equal(existsSync(transition), false);
+  assert.match(retryDisable.stdout, /No `pi` command is currently available on PATH/);
+  assert.equal(existsSync(join(bin, "porcupi")), true);
 });
 
 test("porcupi verify audits the complete Composition and owned launcher while normal launch stays cheap and fail closed", () => {
@@ -734,7 +1005,8 @@ test("porcupi verify audits the complete Composition and owned launcher while no
   assert.match(refusalOutput, /neither the previous Composition nor Stock Pi was run/);
   assert.match(refusalOutput, /porcupi verify/);
   assert.match(refusalOutput, /porcupi rollback/);
-  assert.match(refusalOutput, /Stock Pi command \(`pi`\)/);
+  assert.match(refusalOutput, /porcupi pi disable/);
+  assert.match(refusalOutput, /independently managed Stock Pi path/);
   assert.equal(existsSync(launchLog), false);
   writeFileSync(executable, executableBefore);
   chmodSync(executable, executableMode);

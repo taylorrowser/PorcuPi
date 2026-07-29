@@ -7,7 +7,7 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "check": "node --check scripts/install.mjs && node --check src/add.mjs && node --check src/apply.mjs && node --check src/cli.mjs && node --check src/composition.mjs && node --check src/guided-terminal.mjs && node --check src/install.mjs && node --check src/lifecycle.mjs && node --check src/manage.mjs && node --check src/resource-intent.mjs && node --check src/rollback.mjs && node --check src/runtime.mjs && node --check src/source-repository.mjs && node --check test/porcupi.test.mjs",
+    "check": "node --check scripts/install.mjs && node --check src/add.mjs && node --check src/apply.mjs && node --check src/cli.mjs && node --check src/composition.mjs && node --check src/guided-terminal.mjs && node --check src/install.mjs && node --check src/lifecycle.mjs && node --check src/manage.mjs && node --check src/pi-ownership.mjs && node --check src/resource-intent.mjs && node --check src/rollback.mjs && node --check src/runtime.mjs && node --check src/source-repository.mjs && node --check test/porcupi.test.mjs",
     "test": "node --test test/*.test.mjs"
   }
 }

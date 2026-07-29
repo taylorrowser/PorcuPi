@@ -7,6 +7,7 @@ import { verifyManagedInstallation } from "./composition.mjs";
 import { rollbackComposition } from "./rollback.mjs";
 import { defaultDataRoot, fail, readLeasedActiveComposition, verifyLauncher } from "./runtime.mjs";
 import { manageResources } from "./manage.mjs";
+import { setPiOwnership } from "./pi-ownership.mjs";
 
 async function launch(args) {
   const active = readLeasedActiveComposition(defaultDataRoot());
@@ -43,6 +44,9 @@ try {
   } else if (args[0] === "apply") {
     if (args.length !== 1) fail("Usage: porcupi apply");
     await applyPatches();
+  } else if (args[0] === "pi") {
+    if (args.length !== 2 || !new Set(["enable", "disable"]).has(args[1])) fail("Usage: porcupi pi enable|disable");
+    await setPiOwnership(args[1] === "enable");
   } else if (args[0] === "rollback") {
     if (args.length !== 1) fail("Usage: porcupi rollback");
     await rollbackComposition();
@@ -61,7 +65,8 @@ try {
     console.error("Managed Pi launch was refused; neither the previous Composition nor Stock Pi was run.");
     console.error("Run `porcupi verify` for a complete integrity check.");
     console.error("Run `porcupi rollback` to request the retained previous Composition.");
-    console.error("For direct recovery, run your independently installed Stock Pi command (`pi`) outside PorcuPi.");
+    console.error("Run `porcupi pi disable` to remove an unchanged PorcuPi-owned `pi` alias.");
+    console.error("For direct recovery, use your independently managed Stock Pi path; `pi` may currently resolve to PorcuPi.");
   }
   process.exitCode = 1;
 }

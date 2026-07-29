@@ -14,13 +14,14 @@ From a trusted PorcuPi checkout, run:
 ./install.sh
 ```
 
-The guided installer shows the exact Pi Base commit before doing work. Press Enter to install or Escape to cancel. It:
+The three-page guided installer shows the exact Pi Base commit, asks whether PorcuPi should own the `pi` command, and reviews the result. The choice defaults to No; use arrows or `y`/`n`, press Enter to continue/install, or Escape to cancel. It:
 
-1. preserves Stock Pi and does not create or replace a `pi` command;
+1. preserves Stock Pi and, by default, does not create or replace a `pi` command;
 2. verifies official Pi v0.81.1 at commit `20be4b18d4c57487f8993d2762bace129f0cf7c6`;
 3. installs the exact npm lock with lifecycle scripts disabled, hydrates and validates release-pinned model data from the exact official Pi AI package, builds offline, and runs fixed public CLI checks in an isolated home;
 4. publishes an immutable, receipt-bound Managed Pi Composition and atomically activates it; and
-5. creates a receipt-bound `~/.local/bin/porcupi`, refusing any existing file or symlink at that path.
+5. creates a receipt-bound `~/.local/bin/porcupi`, refusing any existing file or symlink at that path; and
+6. only after that complete launch path exists, optionally publishes a receipt-bound `~/.local/bin/pi` alias.
 
 Add `~/.local/bin` to `PATH` if the installer reports that it is missing. Then launch Managed Pi with:
 
@@ -33,6 +34,21 @@ Ordinary Pi arguments are forwarded unchanged:
 ```sh
 porcupi --version
 ```
+
+## Choose `pi` command ownership
+
+The installer defaults to preserving normal shell ownership of `pi`. Change the choice later with immediate explicit lifecycle commands:
+
+```sh
+porcupi pi enable
+porcupi pi disable
+```
+
+Enable publishes only `~/.local/bin/pi`, and only after verifying the stable `porcupi` launcher and active Managed Pi. The alias invokes that exact stable launcher, so it follows the same fail-closed Composition checks and process-lease path. PorcuPi refuses every existing unowned file, symlink, directory, or other collision at the alias path without overwrite, backup, rename, adoption, or force behavior.
+
+The alias has a strict receipt binding its absolute path, regular-file kind, mode, size, SHA-256, and PorcuPi ownership type. Disable removes only the unchanged matching alias and receipt. Modified, malformed, traversing, foreign, or symlink-substituted entries are reported and untouched. Owner-marked transitions make interrupted enable and disable retries converge without treating location or matching bytes alone as ownership.
+
+Disabling never removes `porcupi`. Afterward, the shell may resolve an independently installed Stock Pi normally; PorcuPi neither stores nor executes Stock Pi as fallback. If another `pi` appears earlier on PATH while ownership is enabled, PorcuPi reports the resolved path and advises placing `~/.local/bin` earlier rather than editing PATH itself.
 
 ## Add Pi resources from Git
 
@@ -100,9 +116,9 @@ Run the complete on-demand check with:
 porcupi verify
 ```
 
-Verification recomputes the active Composition's normalized complete payload inventory and reruns the required executable identity, exact version, public conformance, and isolated-home smoke checks. It also checks the launcher's exact path, regular-file kind, mode, size, digest, ownership marker, and expected command bytes. It reports a modified or foreign launcher without overwriting it.
+Verification recomputes the active Composition's normalized complete payload inventory and reruns the required executable identity, exact version, public conformance, and isolated-home smoke checks. It also checks the stable launcher's exact path, regular-file kind, mode, size, digest, ownership marker, and expected command bytes, plus the optional `pi` alias whenever PorcuPi has an ownership receipt for it. It reports a modified or foreign owned launcher without overwriting it.
 
-Malformed state, receipt disagreement, platform/path mismatch, or a changed required executable makes normal launch exit nonzero. PorcuPi never silently runs the previous Composition or Stock Pi. The error points to `porcupi verify`, retained-composition rollback, and the independently installed Stock Pi `pi` command for recovery.
+Malformed state, receipt disagreement, platform/path mismatch, or a changed required executable makes normal launch exit nonzero. PorcuPi never silently runs the previous Composition or Stock Pi. The error points to `porcupi verify`, retained-composition rollback, `porcupi pi disable` for an unchanged owned alias, and the independently managed Stock Pi path for direct recovery because `pi` may currently resolve to PorcuPi.
 
 These checks provide local-corruption and reproducibility evidence only. They do not establish publisher identity or provenance, and they do not sandbox Pi or Patch-modified code.
 
@@ -114,6 +130,6 @@ Run the external-process acceptance suite with one command:
 npm test
 ```
 
-The tests drive the guided installer and public `porcupi add`, `porcupi manage`, `porcupi apply`, `porcupi rollback`, launch, and `porcupi verify` commands as external processes through pseudo-terminals and isolated homes/projects, using deterministic local Git Pi Base, mixed resource/Patch Source Repository, metadata, project-trust, integrity-corruption, composition, lifecycle-lock, process-lease, cleanup, interruption, and Pi package-lifecycle fixtures.
+The tests drive the guided installer and public `porcupi add`, `porcupi manage`, `porcupi apply`, `porcupi rollback`, `porcupi pi enable|disable`, launch, and `porcupi verify` commands as external processes through pseudo-terminals and isolated homes/projects, using deterministic local Git Pi Base, mixed resource/Patch Source Repository, metadata, project-trust, integrity-corruption, composition, lifecycle-lock, process-lease, cleanup, interruption, and Pi package-lifecycle fixtures.
 
 The build specification and remaining tracer bullets are tracked in [PorcuPi v1 issue #12](https://github.com/taylorrowser/PorcuPi/issues/12).

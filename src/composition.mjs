@@ -15,16 +15,20 @@ import { fileURLToPath } from "node:url";
 import {
   atomicWrite,
   canonicalJson,
+  compositionIdentity,
   compositionReceiptName,
   createPayloadInventory,
   fail,
   managedExecutablePath,
   platformIdentity,
+  readActiveComposition,
+  readBoundComposition,
   readJson,
   run,
   sha256Bytes,
   sha256File,
   validateRequiredExecutable,
+  verifyLauncher,
 } from "./runtime.mjs";
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
@@ -197,10 +201,10 @@ function hydratePinnedModelData(payloadRoot, lock) {
   cpSync(source, destination, { recursive: true, errorOnExist: true });
 }
 
-function smokeEnvironment(stageRoot) {
+function smokeEnvironment(stageRoot, environment = process.env) {
   const home = join(stageRoot, "smoke-home");
   mkdirSync(home, { mode: 0o700 });
-  return { ...process.env, HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: join(home, ".pi", "agent") };
+  return { ...environment, HOME: home, USERPROFILE: home, PI_CODING_AGENT_DIR: join(home, ".pi", "agent") };
 }
 
 function executeBuildRecipe(payloadRoot, stageRoot, lock) {
@@ -231,7 +235,7 @@ function createReceipt(payloadRoot, lock, patches) {
   const payload = createPayloadInventory(payloadRoot);
   const executable = payload.find((entry) => entry.path === managedExecutablePath && entry.kind === "file");
   if (!executable) fail("Managed Pi payload inventory is missing its required executable");
-  const identity = {
+  const identity = compositionIdentity({
     schemaVersion: 1,
     porcupiVersion,
     piBase: lock,
@@ -240,7 +244,7 @@ function createReceipt(payloadRoot, lock, patches) {
     platform: platformIdentity(),
     requiredExecutable: executable,
     payload,
-  };
+  });
   return { ...identity, compositionId: sha256Bytes(canonicalJson(identity)) };
 }
 
@@ -263,19 +267,6 @@ export function buildComposition({ candidateRoot, stageRoot, patches, lock }) {
   return receipt;
 }
 
-function receiptIdentity(receipt) {
-  return {
-    schemaVersion: receipt.schemaVersion,
-    porcupiVersion: receipt.porcupiVersion,
-    piBase: receipt.piBase,
-    patches: receipt.patches,
-    recipe: receipt.recipe,
-    platform: receipt.platform,
-    requiredExecutable: receipt.requiredExecutable,
-    payload: receipt.payload,
-  };
-}
-
 function verifyCompositionContents(compositionRoot, receipt) {
   const stat = lstatSync(compositionRoot);
   if (!stat.isDirectory() || stat.isSymbolicLink()) fail("Managed Pi Composition root is malformed");
@@ -286,19 +277,38 @@ function verifyCompositionContents(compositionRoot, receipt) {
   if (!requiredExecutable || canonicalJson(requiredExecutable) !== canonicalJson(receipt.requiredExecutable)) {
     fail("Managed Pi Composition required executable receipt mismatch");
   }
-  if (sha256Bytes(canonicalJson(receiptIdentity(receipt))) !== receipt.compositionId) fail("Managed Pi Composition identity mismatch");
+  if (sha256Bytes(canonicalJson(compositionIdentity(receipt))) !== receipt.compositionId) {
+    fail("Managed Pi Composition identity mismatch");
+  }
   validateRequiredExecutable(payloadRoot, receipt.requiredExecutable);
 }
 
 export function verifyPublishedComposition(paths, compositionId) {
-  const central = readJson(join(paths.receipts, `${compositionId}.json`), "central Composition receipt");
-  const compositionRoot = join(paths.compositions, compositionId);
-  const embedded = readJson(join(compositionRoot, compositionReceiptName), "embedded Composition receipt");
-  if (canonicalJson(central) !== canonicalJson(embedded) || central.compositionId !== compositionId) {
-    fail("Managed Pi Composition receipt mismatch");
+  const { compositionRoot, receipt } = readBoundComposition(paths, compositionId);
+  verifyCompositionContents(compositionRoot, receipt);
+  return receipt;
+}
+
+export function verifyManagedInstallation({ dataRoot, environment = process.env } = {}) {
+  verifyHostNode();
+  const active = readActiveComposition(dataRoot);
+  verifyLauncher(active.paths, environment);
+  verifyCompositionContents(active.compositionRoot, active.receipt);
+  const stageRoot = join(active.paths.temporary, `verify-${randomUUID()}`);
+  mkdirSync(stageRoot, { mode: 0o700 });
+  writeFileSync(join(stageRoot, "owner.json"), `${JSON.stringify({ schemaVersion: 1, type: "porcupi-verify-stage" })}\n`, { mode: 0o600 });
+  try {
+    const smoke = smokeEnvironment(stageRoot, environment);
+    run(process.execPath, [active.executable, "--help"], { cwd: active.payloadRoot, environment: smoke, capture: true });
+    const version = run(process.execPath, [active.executable, "--version"], { cwd: active.payloadRoot, environment: smoke, capture: true });
+    const expectedVersion = active.receipt.piBase.packages
+      .find((entry) => entry.name === "@earendil-works/pi-coding-agent")?.version;
+    if (version !== expectedVersion) fail(`Managed Pi version: expected ${String(expectedVersion)}, found ${version}`);
+    run(process.execPath, [active.executable, "--list-models"], { cwd: active.payloadRoot, environment: smoke, capture: true });
+  } finally {
+    removePreparedTree(stageRoot);
   }
-  verifyCompositionContents(compositionRoot, central);
-  return central;
+  return active.receipt;
 }
 
 export function publishComposition(paths, candidateRoot, receipt) {

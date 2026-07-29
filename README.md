@@ -20,7 +20,7 @@ The guided installer shows the exact Pi Base commit before doing work. Press Ent
 2. verifies official Pi v0.81.1 at commit `20be4b18d4c57487f8993d2762bace129f0cf7c6`;
 3. installs the exact npm lock with lifecycle scripts disabled, hydrates and validates release-pinned model data from the exact official Pi AI package, builds offline, and runs fixed public CLI checks in an isolated home;
 4. publishes an immutable, receipt-bound Managed Pi Composition and atomically activates it; and
-5. creates `~/.local/bin/porcupi`, refusing any existing file or symlink at that path.
+5. creates a receipt-bound `~/.local/bin/porcupi`, refusing any existing file or symlink at that path.
 
 Add `~/.local/bin` to `PATH` if the installer reports that it is missing. Then launch Managed Pi with:
 
@@ -76,6 +76,22 @@ A successful candidate receives matching embedded and central receipts binding t
 
 Git content and fixed build commands run with your user authority. Exact commits, SHA-256 values, and receipts support reproducibility and local integrity checks; they do not authenticate a publisher or provide a sandbox. Use an OS, VM, or container boundary when isolation is required.
 
+## Verify Managed Pi integrity
+
+Every normal Managed Pi launch performs cheap fail-closed checks of PorcuPi ownership and Activation state, matching Composition receipts and identity, platform and owned paths, the committed Patch snapshot, the required executable's exact identity, and the stable launcher's ownership receipt. It does not hash every payload file and is not a complete audit.
+
+Run the complete on-demand check with:
+
+```sh
+porcupi verify
+```
+
+Verification recomputes the active Composition's normalized complete payload inventory and reruns the required executable identity, exact version, public conformance, and isolated-home smoke checks. It also checks the launcher's exact path, regular-file kind, mode, size, digest, ownership marker, and expected command bytes. It reports a modified or foreign launcher without overwriting it.
+
+Malformed state, receipt disagreement, platform/path mismatch, or a changed required executable makes normal launch exit nonzero. PorcuPi never silently runs the previous Composition or Stock Pi. The error points to `porcupi verify`, retained-composition rollback, and the independently installed Stock Pi `pi` command for recovery.
+
+These checks provide local-corruption and reproducibility evidence only. They do not establish publisher identity or provenance, and they do not sandbox Pi or Patch-modified code.
+
 ## Development
 
 Run the external-process acceptance suite with one command:
@@ -84,6 +100,6 @@ Run the external-process acceptance suite with one command:
 npm test
 ```
 
-The tests drive the guided installer and public `porcupi add`, `porcupi manage`, and `porcupi apply` commands through pseudo-terminals in isolated homes and projects, using deterministic local Git Pi Base, mixed resource/Patch Source Repository, metadata, project-trust, composition, interruption, and Pi package-lifecycle fixtures.
+The tests drive the guided installer and public `porcupi add`, `porcupi manage`, `porcupi apply`, launch, and `porcupi verify` commands as external processes through pseudo-terminals and isolated homes/projects, using deterministic local Git Pi Base, mixed resource/Patch Source Repository, metadata, project-trust, integrity-corruption, composition, interruption, and Pi package-lifecycle fixtures.
 
 The build specification and remaining tracer bullets are tracked in [PorcuPi v1 issue #12](https://github.com/taylorrowser/PorcuPi/issues/12).

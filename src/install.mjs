@@ -3,12 +3,14 @@ import {
   chmodSync,
   cpSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   renameSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -99,6 +101,13 @@ function verifyBaseLock(value) {
   return value;
 }
 
+function verifyHostNode() {
+  const [major, minor] = process.versions.node.split(".").map(Number);
+  if (major < 22 || (major === 22 && minor < 19)) {
+    fail(`PorcuPi requires Node.js 22.19 or newer; found ${process.versions.node}`);
+  }
+}
+
 function loadBaseLock() {
   return verifyBaseLock(readJson(join(projectRoot, "upstream", "pi-base.json"), "Pi Base lock"));
 }
@@ -124,7 +133,7 @@ function verifyBaseCheckout(source, lock) {
 }
 
 function prepareBase(destination, lock) {
-  run("git", ["clone", "--branch", lock.tag, "--single-branch", lock.repository, destination]);
+  run("git", ["clone", "--depth", "1", "--branch", lock.tag, "--single-branch", lock.repository, destination]);
   verifyBaseCheckout(destination, lock);
 }
 
@@ -279,8 +288,18 @@ function shellQuote(value) {
 function publishLauncher(path, cliPath) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o755 });
   const temporary = join(dirname(path), `.${basename(path)}.tmp-${randomUUID()}`);
-  writeFileSync(temporary, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(cliPath)} "$@"\n`, { mode: 0o755 });
-  renameSync(temporary, path);
+  try {
+    writeFileSync(temporary, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(cliPath)} "$@"\n`, { mode: 0o755 });
+    // A same-directory hard link is an atomic exclusive publication: EEXIST
+    // refuses a command created during the long build instead of replacing it.
+    linkSync(temporary, path);
+  } finally {
+    try {
+      unlinkSync(temporary);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
 }
 
 async function confirmInstallation(lock, input, output) {
@@ -296,8 +315,14 @@ async function confirmInstallation(lock, input, output) {
   input.setRawMode(true);
   input.resume();
   return await new Promise((resolvePromise, rejectPromise) => {
+    let restored = false;
     const restore = () => {
+      if (restored) return;
+      restored = true;
       input.off("data", onData);
+      input.off("error", onError);
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
       input.setRawMode(false);
       input.pause();
       output.write("\x1b[?25h");
@@ -312,11 +337,20 @@ async function confirmInstallation(lock, input, output) {
         resolvePromise(false);
       }
     };
-    input.on("data", onData);
-    input.once("error", (error) => {
+    const onError = (error) => {
       restore();
       rejectPromise(error);
-    });
+    };
+    const onSignal = (signal) => {
+      restore();
+      process.kill(process.pid, signal);
+    };
+    const onSigint = () => onSignal("SIGINT");
+    const onSigterm = () => onSignal("SIGTERM");
+    input.on("data", onData);
+    input.once("error", onError);
+    process.once("SIGINT", onSigint);
+    process.once("SIGTERM", onSigterm);
   });
 }
 
@@ -326,6 +360,7 @@ export async function installManagedPi({
   environment = process.env,
   platform = process.platform,
 } = {}) {
+  verifyHostNode();
   platformIdentity(platform, process.arch);
   const lock = loadBaseLock();
   const confirmed = await confirmInstallation(lock, input, output);

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
 import { atomicWrite, canonicalJson, defaultDataRoot, fail, managedLayout, readActiveComposition } from "./runtime.mjs";
@@ -45,11 +45,33 @@ function readSelections(dataRoot) {
       || source.artifacts.some((artifact) => (
         !Object.hasOwn(resourceKeys, artifact?.kind)
         || typeof artifact.path !== "string"
+        || artifact.path.startsWith("/")
+        || artifact.path.includes("\\")
+        || artifact.path.split("/").some((part) => part === "" || part === "." || part === "..")
         || artifact.scope !== "global"
       ))
     ))
   ) {
     fail("Malformed PorcuPi Selection Intent");
+  }
+  const locators = new Set();
+  for (const source of value.sources) {
+    let packageSource;
+    try {
+      packageSource = parseRequestedGitSource(source.packageSource);
+    } catch {
+      fail("Malformed PorcuPi Selection Intent");
+    }
+    const artifactKeys = source.artifacts.map((artifact) => `${artifact.kind}\0${artifact.path}`);
+    if (
+      locators.has(source.locator)
+      || packageSource.locator !== source.locator
+      || packageSource.ref !== source.commit
+      || new Set(artifactKeys).size !== artifactKeys.length
+    ) {
+      fail("Malformed PorcuPi Selection Intent");
+    }
+    locators.add(source.locator);
   }
   return value;
 }
@@ -59,7 +81,7 @@ function packageEntry(packageSource, artifacts) {
   for (const [kind, key] of Object.entries(resourceKeys)) {
     entry[key] = artifacts
       .filter((artifact) => artifact.kind === kind)
-      .map((artifact) => `+${artifact.path}`)
+      .map((artifact) => artifact.path)
       .sort();
   }
   return entry;
@@ -188,7 +210,7 @@ function runAddWizard({ source, artifacts, diagnostics, currentPaths, previousCo
   let artifactCursor = 0;
   let reviewCursor = 0;
 
-  return new Promise((resolvePromise) => {
+  return new Promise((resolvePromise, rejectPromise) => {
     let restored = false;
     const restore = () => {
       if (restored) return;
@@ -197,7 +219,11 @@ function runAddWizard({ source, artifacts, diagnostics, currentPaths, previousCo
       input.off("error", onError);
       process.off("SIGINT", onSigint);
       process.off("SIGTERM", onSigterm);
-      input.setRawMode(false);
+      try {
+        input.setRawMode(false);
+      } catch {
+        // Continue restoring listeners and cursor when raw-mode teardown is unavailable.
+      }
       input.pause();
       output.write("\x1b[?25h");
     };
@@ -205,7 +231,10 @@ function runAddWizard({ source, artifacts, diagnostics, currentPaths, previousCo
       restore();
       resolvePromise(value);
     };
-    const onError = () => finish(null);
+    const onError = (error) => {
+      restore();
+      rejectPromise(error);
+    };
     const onSignal = (signal) => {
       restore();
       process.kill(process.pid, signal);
@@ -250,7 +279,7 @@ function runAddWizard({ source, artifacts, diagnostics, currentPaths, previousCo
         output.write("[↑/↓ j/k] review  [← h] Back  [Esc] cancel\n[Space/Enter] Save selections\n");
       }
     };
-    const onKeypress = (_character, key) => {
+    const handleKeypress = (_character, key) => {
       if (key.name === "escape" || (key.ctrl && key.name === "c")) return finish(null);
       if (key.name === "left" || key.name === "h") page = Math.max(0, page - 1);
       else if (key.name === "right" || key.name === "l" || key.name === "n") page = Math.min(2, page + 1);
@@ -271,16 +300,29 @@ function runAddWizard({ source, artifacts, diagnostics, currentPaths, previousCo
       } else if (page === 0 && key.name === "d") selected.clear();
       render();
     };
+    const onKeypress = (...args) => {
+      try {
+        handleKeypress(...args);
+      } catch (error) {
+        restore();
+        rejectPromise(error);
+      }
+    };
 
-    emitKeypressEvents(input);
-    input.setRawMode(true);
-    input.resume();
-    input.on("keypress", onKeypress);
-    input.once("error", onError);
-    process.once("SIGINT", onSigint);
-    process.once("SIGTERM", onSigterm);
-    output.write("\x1b[?25l");
-    render();
+    try {
+      emitKeypressEvents(input);
+      input.setRawMode(true);
+      input.resume();
+      input.on("keypress", onKeypress);
+      input.once("error", onError);
+      process.once("SIGINT", onSigint);
+      process.once("SIGTERM", onSigterm);
+      output.write("\x1b[?25l");
+      render();
+    } catch (error) {
+      restore();
+      rejectPromise(error);
+    }
   });
 }
 
@@ -314,8 +356,20 @@ export async function addResources(requestedSource, {
 
     const piSettings = preflightPiPackageOwnership(environment, resolved, previous);
     if (result.length === 0) {
-      if (previous) await runManagedPi(active.executable, ["remove", previous.packageSource], environment);
-      saveSelections(dataRoot, selections, resolved, []);
+      try {
+        if (previous) await runManagedPi(active.executable, ["remove", previous.packageSource], environment);
+        saveSelections(dataRoot, selections, resolved, []);
+      } catch (error) {
+        if (previous) {
+          restorePiSettings(piSettings);
+          try {
+            await runManagedPi(active.executable, ["install", previous.packageSource], environment);
+          } catch {
+            fail(`Pi package removal failed and the prior checkout for ${resolved.locator} could not be restored`);
+          }
+        }
+        throw error;
+      }
       output.write("\nSaved 0 global Pi resource selections. Managed Pi activation is unchanged.\n");
       return { saved: true, count: 0 };
     }
@@ -327,6 +381,13 @@ export async function addResources(requestedSource, {
       saveSelections(dataRoot, selections, resolved, result);
     } catch (error) {
       restorePiSettings(piSettings);
+      if (previous) {
+        try {
+          await runManagedPi(active.executable, ["install", previous.packageSource], environment);
+        } catch {
+          fail(`Pi package update failed and the prior checkout for ${resolved.locator} could not be restored`);
+        }
+      }
       throw error;
     }
     output.write(`\nSaved ${result.length} global Pi resource selections from ${resolved.locator}@${resolved.commit}.\n`);

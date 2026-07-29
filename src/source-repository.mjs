@@ -96,11 +96,11 @@ export function parseRequestedGitSource(requested) {
   };
 }
 
-function git(args, { cwd, capture = true } = {}) {
+function git(args, { cwd } = {}) {
   const result = spawnSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
     cwd,
     encoding: "utf8",
-    stdio: capture ? "pipe" : "inherit",
+    stdio: "pipe",
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -122,9 +122,6 @@ function peelCommit(checkout, ref) {
 function resolveRequestedCommit(checkout, requestedRef) {
   if (!requestedRef) return peelCommit(checkout, "refs/remotes/origin/HEAD");
   if (/^[a-fA-F0-9]{40}$/.test(requestedRef)) return peelCommit(checkout, requestedRef);
-  if (/^[a-fA-F0-9]{4,39}$/.test(requestedRef)) {
-    fail("Abbreviated commit IDs are ambiguous; provide the full commit");
-  }
 
   let candidates;
   if (requestedRef === "HEAD") candidates = ["refs/remotes/origin/HEAD"];
@@ -135,6 +132,9 @@ function resolveRequestedCommit(checkout, requestedRef) {
   else candidates = [`refs/remotes/origin/${requestedRef}`, `refs/tags/${requestedRef}`];
 
   const matches = candidates.filter((candidate) => refExists(checkout, candidate));
+  if (matches.length === 0 && /^[a-fA-F0-9]{4,39}$/.test(requestedRef)) {
+    fail("Abbreviated commit IDs are ambiguous; provide the full commit");
+  }
   if (matches.length === 0) fail(`Git ref '${requestedRef}' does not exist`);
   if (matches.length > 1) fail(`Git ref '${requestedRef}' is ambiguous between a branch and tag`);
   return peelCommit(checkout, matches[0]);
@@ -348,7 +348,8 @@ function validTheme(contents) {
       && value.colors !== null
       && typeof value.colors === "object"
       && !Array.isArray(value.colors)
-      && themeColors.every((name) => Object.hasOwn(value.colors, name) && validLiteral(value.colors[name]));
+      && themeColors.every((name) => Object.hasOwn(value.colors, name) && validLiteral(value.colors[name]))
+      && (!Object.hasOwn(value.colors, "thinkingMax") || validLiteral(value.colors.thinkingMax));
   } catch {
     return false;
   }
@@ -399,14 +400,15 @@ function globPatternMatches(path, pattern) {
 }
 
 function applyManifestOverrides(paths, entries) {
-  let selected = [...paths];
-  for (const entry of entries.filter((value) => /^[!+-]/.test(value))) {
-    const operation = entry[0];
-    const pattern = entry.slice(1).replace(/^\.\//, "");
-    if (operation === "!") selected = selected.filter((path) => !globPatternMatches(path, pattern));
-    else if (operation === "-") selected = selected.filter((path) => path !== pattern);
-    else if (operation === "+" && paths.includes(pattern) && !selected.includes(pattern)) selected.push(pattern);
+  const overrides = entries.filter((value) => /^[!+-]/.test(value));
+  const excludes = overrides.filter((value) => value.startsWith("!")).map((value) => value.slice(1).replace(/^\.\//, ""));
+  const forceIncludes = overrides.filter((value) => value.startsWith("+")).map((value) => value.slice(1).replace(/^\.\//, ""));
+  const forceExcludes = overrides.filter((value) => value.startsWith("-")).map((value) => value.slice(1).replace(/^\.\//, ""));
+  let selected = paths.filter((path) => !excludes.some((pattern) => globPatternMatches(path, pattern)));
+  for (const path of forceIncludes) {
+    if (paths.includes(path) && !selected.includes(path)) selected.push(path);
   }
+  selected = selected.filter((path) => !forceExcludes.includes(path));
   return selected;
 }
 

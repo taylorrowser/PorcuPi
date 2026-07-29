@@ -12,7 +12,7 @@ Calling `pi install` first and adding filters afterward would briefly persist an
 
 ## Decision
 
-After final user confirmation, PorcuPi stages one exact-commit Pi package settings object with all four filter arrays and exact `+path` entries for the selected resources. It then invokes the active Managed Pi's public global `install` command for that exact source. Pi therefore owns checkout, npm, and package realization while retaining the already narrowed object form. A Pi package failure restores the prior settings bytes and saves no PorcuPi Selection Intent.
+After final user confirmation, PorcuPi stages one exact-commit Pi package settings object with all four filter arrays and exact source-relative paths for the selected resources. It then invokes the active Managed Pi's public global `install` command for that exact source. Pi therefore owns checkout, npm, and package realization while retaining the already narrowed object form. A Pi package failure restores the prior settings bytes and saves no PorcuPi Selection Intent; when replacing an existing selection, PorcuPi also asks Pi to reconcile the checkout back to its prior exact commit.
 
 PorcuPi separately retains only the Selection Intent needed to identify its source-wide choices: credential-free canonical Source Repository locator, exact commit, package source, Artifact kind, structural path, and global Installation Scope. Re-adding that locator verifies the prior filtered entry before replacing it. A matching Pi package entry that PorcuPi did not create is treated as foreign and is not adopted or overwritten.
 

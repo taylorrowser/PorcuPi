@@ -94,11 +94,12 @@ if (args[0] === "--version") console.log("${version}");
 else if (args[0] === "--help") console.log("Pi fixture help");
 else if (args[0] === "--list-models") console.log("fixture-model");
 else if (args[0] === "install" || args[0] === "remove") {
-  if (args[0] === "install" && process.env.PI_FIXTURE_PACKAGE_FAIL) {
+  const source = args[1];
+  if (process.env.PI_FIXTURE_PACKAGE_LOG) appendFileSync(process.env.PI_FIXTURE_PACKAGE_LOG, JSON.stringify(args) + "\\\\n");
+  if (args[0] === "install" && (process.env.PI_FIXTURE_PACKAGE_FAIL || source.includes(process.env.PI_FIXTURE_PACKAGE_FAIL_SOURCE || "\0"))) {
     console.error("fixture Pi package install failed");
     process.exitCode = 31;
   } else {
-    const source = args[1];
     const agentDir = process.env.PI_CODING_AGENT_DIR || join(process.env.HOME, ".pi", "agent");
     const settingsPath = join(agentDir, "settings.json");
     const settings = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
@@ -113,7 +114,6 @@ else if (args[0] === "install" || args[0] === "remove") {
     settings.packages = packages;
     mkdirSync(dirname(settingsPath), { recursive: true });
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\\\\n");
-    if (process.env.PI_FIXTURE_PACKAGE_LOG) appendFileSync(process.env.PI_FIXTURE_PACKAGE_LOG, JSON.stringify(args) + "\\\\n");
     console.log((args[0] === "remove" ? "Removed " : "Installed ") + source);
   }
 } else if (process.env.PI_FIXTURE_LAUNCH_LOG) appendFileSync(process.env.PI_FIXTURE_LAUNCH_LOG, JSON.stringify(args) + "\\\\n");
@@ -536,10 +536,10 @@ test("porcupi add pins and filters all four Pi resource kinds through Pi", async
   const settings = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8"));
   assert.deepEqual(settings.packages, [{
     source: packageSource,
-    extensions: ["+extensions/fixture.ts"],
-    skills: ["+skills/fixture-skill/SKILL.md"],
-    prompts: ["+prompts/fixture.md"],
-    themes: ["+themes/fixture.json"],
+    extensions: ["extensions/fixture.ts"],
+    skills: ["skills/fixture-skill/SKILL.md"],
+    prompts: ["prompts/fixture.md"],
+    themes: ["themes/fixture.json"],
   }]);
   const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
   assert.equal(selections.schemaVersion, 1);
@@ -609,10 +609,10 @@ test("porcupi add follows the Pi package manifest and rejects unloadable candida
   assert.match(add.stdout, /Rejected bundle\/bad-theme\.json: Theme does not satisfy/);
   assert.doesNotMatch(add.stdout, /must-not-be-scanned/);
   const settings = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8"));
-  assert.deepEqual(settings.packages[0].extensions, ["+bundle/extension.js"]);
-  assert.deepEqual(settings.packages[0].skills, ["+bundle/good/SKILL.md"]);
-  assert.deepEqual(settings.packages[0].prompts, ["+bundle/prompt.md"]);
-  assert.deepEqual(settings.packages[0].themes, ["+bundle/theme.json"]);
+  assert.deepEqual(settings.packages[0].extensions, ["bundle/extension.js"]);
+  assert.deepEqual(settings.packages[0].skills, ["bundle/good/SKILL.md"]);
+  assert.deepEqual(settings.packages[0].prompts, ["bundle/prompt.md"]);
+  assert.deepEqual(settings.packages[0].themes, ["bundle/theme.json"]);
 });
 
 test("cancelling porcupi add preserves Pi settings, Selection Intent, activation, and cursor state", async () => {
@@ -717,29 +717,47 @@ test("re-adding a Source Repository reviews and replaces its commit and complete
 
   const first = runPorcuPi(home, ["add", `${locator}@old-selection`], "616e6e0d", environment);
   assert.equal(first.status, 0, first.stderr || first.stdout);
-  const second = runPorcuPi(home, ["add", `${locator}@main`], "64206e6e0d", environment);
+  const settingsPath = join(home, ".pi", "agent", "settings.json");
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const activationPath = join(dataRoot(home), "state", "activation.json");
+  const settingsBeforeFailure = readFileSync(settingsPath);
+  const selectionsBeforeFailure = readFileSync(selectionsPath);
+  const activationBeforeFailure = readFileSync(activationPath);
 
+  const failedUpdate = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d", {
+    ...environment,
+    PI_FIXTURE_PACKAGE_FAIL_SOURCE: repository.commit,
+  });
+  assert.notEqual(failedUpdate.status, 0);
+  assert.deepEqual(readFileSync(settingsPath), settingsBeforeFailure);
+  assert.deepEqual(readFileSync(selectionsPath), selectionsBeforeFailure);
+  assert.deepEqual(readFileSync(activationPath), activationBeforeFailure);
+
+  const second = runPorcuPi(home, ["add", `${locator}@main`], "64206e6e0d", environment);
   assert.equal(second.status, 0, second.stderr || second.stdout);
   assert.match(second.stdout, new RegExp(`Source-wide change: ${oldCommit} → ${repository.commit}`));
-  const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
+  const selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
   assert.equal(selections.sources.length, 1);
   assert.equal(selections.sources[0].commit, repository.commit);
   assert.deepEqual(selections.sources[0].artifacts, [{ kind: "Extension", path: "extensions/fixture.ts", scope: "global" }]);
-  const settings = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8"));
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
   assert.equal(settings.packages.length, 1);
   assert.match(settings.packages[0].source, new RegExp(`@${repository.commit}$`));
-  assert.deepEqual(settings.packages[0].extensions, ["+extensions/fixture.ts"]);
+  assert.deepEqual(settings.packages[0].extensions, ["extensions/fixture.ts"]);
   assert.deepEqual(settings.packages[0].skills, []);
   assert.deepEqual(settings.packages[0].prompts, []);
   assert.deepEqual(settings.packages[0].themes, []);
+
   const removal = runPorcuPi(home, ["add", `${locator}@main`], "646e6e0d", environment);
   assert.equal(removal.status, 0, removal.stderr || removal.stdout);
-  assert.deepEqual(JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8")).packages, []);
-  assert.deepEqual(JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8")).sources, []);
+  assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")).packages, []);
+  assert.deepEqual(JSON.parse(readFileSync(selectionsPath, "utf8")).sources, []);
 
   const lifecycleCalls = readFileSync(packageLog, "utf8").trim().split("\n").map(JSON.parse);
-  assert.equal(lifecycleCalls.length, 3);
+  assert.equal(lifecycleCalls.length, 5);
   assert.match(lifecycleCalls[0][1], new RegExp(`@${oldCommit}$`));
   assert.match(lifecycleCalls[1][1], new RegExp(`@${repository.commit}$`));
-  assert.deepEqual(lifecycleCalls[2], ["remove", settings.packages[0].source]);
+  assert.match(lifecycleCalls[2][1], new RegExp(`@${oldCommit}$`));
+  assert.match(lifecycleCalls[3][1], new RegExp(`@${repository.commit}$`));
+  assert.deepEqual(lifecycleCalls[4], ["remove", settings.packages[0].source]);
 });

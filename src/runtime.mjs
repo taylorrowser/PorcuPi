@@ -11,6 +11,7 @@ import {
   readlinkSync,
   realpathSync,
   renameSync,
+  unlinkSync,
   writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -34,6 +35,8 @@ const recipeFields = new Set(["id", "commands"]);
 const payloadEntryFields = new Set(["path", "kind", "mode", "size", "sha256"]);
 const payloadKinds = new Set(["file", "symlink"]);
 const launcherReceiptFields = new Set(["schemaVersion", "type", "path", "kind", "mode", "size", "sha256"]);
+const leaseDirectoryOwnerFields = new Set(["schemaVersion", "type", "compositionId"]);
+const leaseFields = new Set(["schemaVersion", "type", "compositionId", "pid", "nonce"]);
 
 export function fail(message) {
   throw new Error(message);
@@ -96,6 +99,7 @@ export function managedLayout(dataRoot) {
     runtime: join(root, "runtime"),
     compositions: join(root, "compositions"),
     receipts: join(root, "receipts"),
+    leases: join(root, "leases"),
     state: join(root, "state"),
     activation: join(root, "state", "activation.json"),
     launcherReceipt: join(root, "state", "launcher.json"),
@@ -168,6 +172,7 @@ export function validateManagedRoot(paths) {
     [paths.state, "PorcuPi state directory"],
     [paths.compositions, "PorcuPi compositions directory"],
     [paths.receipts, "PorcuPi receipts directory"],
+    [paths.leases, "PorcuPi leases directory"],
     [paths.runtime, "PorcuPi runtime directory"],
     [paths.temporary, "PorcuPi temporary directory"],
   ]) validateOwnedDirectory(paths.root, path, label);
@@ -319,7 +324,7 @@ function validatePayloadEntry(entry) {
     && /^[a-f0-9]{64}$/.test(entry.sha256 || "");
 }
 
-function validateReceipt(value, expectedCompositionId) {
+export function validateCompositionReceipt(value, expectedCompositionId) {
   if (
     !exactObject(value, receiptFields)
     || value.schemaVersion !== 1
@@ -398,9 +403,102 @@ export function readBoundComposition(paths, compositionId) {
     || centralValue?.compositionId !== compositionId
     || embeddedValue?.compositionId !== compositionId
   ) fail("Managed Pi Composition receipt mismatch");
-  const receipt = validateReceipt(centralValue, compositionId);
+  const receipt = validateCompositionReceipt(centralValue, compositionId);
   if (receipt.platform !== platformIdentity()) fail(`Managed Pi Composition platform mismatch: ${receipt.platform}`);
   return { receipt, compositionRoot, payloadRoot };
+}
+
+function leaseDirectoryOwner(compositionId) {
+  return { schemaVersion: 1, type: "porcupi-composition-leases", compositionId };
+}
+
+export function compositionLeaseDirectory(paths, compositionId) {
+  if (!/^[a-f0-9]{64}$/.test(compositionId || "")) fail("Malformed Managed Pi Composition identity");
+  return join(paths.leases, compositionId);
+}
+
+export function validateCompositionLeaseDirectory(paths, compositionId) {
+  const directory = compositionLeaseDirectory(paths, compositionId);
+  validateOwnedDirectory(paths.root, directory, "Managed Pi Composition lease directory");
+  const owner = readJson(join(directory, "owner.json"), "Managed Pi Composition lease ownership");
+  if (
+    !exactObject(owner, leaseDirectoryOwnerFields)
+    || canonicalJson(owner) !== canonicalJson(leaseDirectoryOwner(compositionId))
+  ) fail("Malformed Managed Pi Composition lease ownership");
+  return directory;
+}
+
+export function ensureCompositionLeaseDirectory(paths, compositionId) {
+  const directory = compositionLeaseDirectory(paths, compositionId);
+  try {
+    mkdirSync(directory, { mode: 0o700 });
+    atomicWrite(join(directory, "owner.json"), leaseDirectoryOwner(compositionId));
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+  }
+  return validateCompositionLeaseDirectory(paths, compositionId);
+}
+
+function writeExclusiveJson(path, value) {
+  const descriptor = openSync(path, "wx", 0o600);
+  try {
+    writeSync(descriptor, `${JSON.stringify(value, null, 2)}\n`);
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+export function claimCompositionLease(paths, compositionId) {
+  const directory = compositionLeaseDirectory(paths, compositionId);
+  try {
+    lstatSync(directory);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    validateCompositionLeaseDirectory(paths, compositionId);
+  } catch (error) {
+    try {
+      lstatSync(directory);
+    } catch (statError) {
+      if (statError?.code === "ENOENT") return null;
+    }
+    throw error;
+  }
+  const nonce = randomUUID();
+  const path = join(directory, `${nonce}.json`);
+  const value = { schemaVersion: 1, type: "porcupi-composition-lease", compositionId, pid: process.pid, nonce };
+  try {
+    writeExclusiveJson(path, value);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  let released = false;
+  return {
+    path,
+    value,
+    release() {
+      if (released) return;
+      try {
+        lstatSync(path);
+      } catch (error) {
+        if (error?.code === "ENOENT") {
+          released = true;
+          return;
+        }
+        throw error;
+      }
+      const current = readJson(path, "Managed Pi Composition lease");
+      if (!exactObject(current, leaseFields) || canonicalJson(current) !== canonicalJson(value)) {
+        fail(`Managed Pi Composition lease changed while held: ${path}`);
+      }
+      unlinkSync(path);
+      released = true;
+    },
+  };
 }
 
 export function validateRequiredExecutable(payloadRoot, expected) {
@@ -476,13 +574,39 @@ export function verifyLauncher(paths, environment = process.env) {
   return receipt;
 }
 
-export function readActiveComposition(dataRoot = defaultDataRoot()) {
-  const paths = validateManagedRoot(managedLayout(dataRoot));
-  const activation = readActivation(paths);
+function readActivatedComposition(paths, activation) {
   const bound = readBoundComposition(paths, activation.active.compositionId);
   if (canonicalJson(bound.receipt.patches) !== canonicalJson(activation.active.patches)) {
     fail("Managed Pi activation and Composition Patch receipts disagree");
   }
   const executable = validateRequiredExecutable(bound.payloadRoot, bound.receipt.requiredExecutable);
   return { paths, activation, executable, ...bound };
+}
+
+export function readActiveComposition(dataRoot = defaultDataRoot()) {
+  const paths = validateManagedRoot(managedLayout(dataRoot));
+  return readActivatedComposition(paths, readActivation(paths));
+}
+
+export function readLeasedActiveComposition(dataRoot = defaultDataRoot()) {
+  const paths = validateManagedRoot(managedLayout(dataRoot));
+  let lastActivation;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const activation = readActivation(paths);
+    lastActivation = activation;
+    const lease = claimCompositionLease(paths, activation.active.compositionId);
+    if (!lease) continue;
+    try {
+      return { ...readActivatedComposition(paths, activation), lease };
+    } catch (error) {
+      lease.release();
+      throw error;
+    }
+  }
+  const current = readActivation(paths);
+  if (current.active.compositionId !== lastActivation?.active.compositionId) {
+    fail("Managed Pi activation changed during launch; retry the command");
+  }
+  readActivatedComposition(paths, current);
+  fail("Managed Pi Composition lease directory is unavailable; retry the command");
 }

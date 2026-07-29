@@ -130,7 +130,10 @@ else if (args[0] === "install" || args[0] === "remove") {
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\\\\n");
     console.log((args[0] === "remove" ? "Removed " : "Installed ") + source);
   }
-} else if (process.env.PI_FIXTURE_LAUNCH_LOG) appendFileSync(process.env.PI_FIXTURE_LAUNCH_LOG, JSON.stringify(args) + "\\\\n");
+} else {
+  if (process.env.PI_FIXTURE_LAUNCH_LOG) appendFileSync(process.env.PI_FIXTURE_LAUNCH_LOG, JSON.stringify(args) + "\\\\n");
+  if (process.env.PI_FIXTURE_HOLD_MS) await new Promise((resolve) => setTimeout(resolve, Number(process.env.PI_FIXTURE_HOLD_MS)));
+}
 \`);
 chmodSync(cli, 0o755);
 `,
@@ -1128,6 +1131,247 @@ test("porcupi apply builds and atomically activates the exact ordered Patch seri
   assert.match(corruptNoOp.stdout, /payload inventory mismatch/);
   assert.doesNotMatch(corruptNoOp.stdout, /npm ci|git clone/);
   assert.deepEqual(readFileSync(activationPath), beforeNoOp);
+});
+
+test("porcupi rollback verifies and swaps the retained Composition without changing Selection Intent", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const managedRoot = dataRoot(home);
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const initialActivation = JSON.parse(readFileSync(activationPath, "utf8"));
+
+  const noTarget = runPorcuPi(home, ["rollback"], "0d", { PTY_WAIT_FOR: "Roll back Managed Pi" });
+  assert.equal(noTarget.status, 0, noTarget.stderr || noTarget.stdout);
+  assert.match(noTarget.stdout, /Previous: \(none retained\)/);
+  assert.match(noTarget.stdout, /No previous Managed Pi Composition is retained/);
+  assert.deepEqual(JSON.parse(readFileSync(activationPath, "utf8")), initialActivation);
+
+  const repository = createApplicablePatchRepository(root, [[
+    "patches/one.patch",
+    textPatch("series.txt", "base", "patched"),
+  ]]);
+  const locator = await serveGitRepository(root, repository);
+  assert.equal(runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d").status, 0);
+  assert.equal(runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" }).status, 0);
+  const patchedActivation = JSON.parse(readFileSync(activationPath, "utf8"));
+  const selectionsPath = join(managedRoot, "state", "selections.json");
+  const selectionsBefore = readFileSync(selectionsPath);
+
+  const cancelled = runPorcuPi(home, ["rollback"], "1b", { PTY_WAIT_FOR: "Roll back Managed Pi" });
+  assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+  assert.match(cancelled.stdout, /Rollback cancelled/);
+  assert.match(cancelled.stdout, /\x1b\[\?25h/);
+  assert.deepEqual(JSON.parse(readFileSync(activationPath, "utf8")), patchedActivation);
+
+  const rolledBack = runPorcuPi(home, ["rollback"], "0d", { PTY_WAIT_FOR: "Roll back Managed Pi" });
+  assert.equal(rolledBack.status, 0, rolledBack.stderr || rolledBack.stdout);
+  assert.match(rolledBack.stdout, /uses only this retained local Composition/);
+  assert.match(rolledBack.stdout, /Activated retained Managed Pi Composition/);
+  assert.match(rolledBack.stdout, /Selection Intent is unchanged/);
+  assert.doesNotMatch(rolledBack.stdout, /git clone|npm ci|build:offline/);
+  const baseActivation = JSON.parse(readFileSync(activationPath, "utf8"));
+  assert.deepEqual(baseActivation.active, initialActivation.active);
+  assert.deepEqual(baseActivation.previous, patchedActivation.active);
+  assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
+
+  const previousSeries = join(managedRoot, "compositions", baseActivation.previous.compositionId, "payload", "series.txt");
+  const previousSeriesBytes = readFileSync(previousSeries);
+  const previousSeriesMode = lstatSync(previousSeries).mode & 0o777;
+  chmodSync(previousSeries, 0o644);
+  writeFileSync(previousSeries, "corrupt\n");
+  const activationBeforeInvalid = readFileSync(activationPath);
+  const invalid = runPorcuPi(home, ["rollback"], "0d", { PTY_WAIT_FOR: "Roll back Managed Pi" });
+  assert.notEqual(invalid.status, 0);
+  assert.match(`${invalid.stdout}${invalid.stderr}`, /payload inventory mismatch/);
+  assert.deepEqual(readFileSync(activationPath), activationBeforeInvalid);
+  writeFileSync(previousSeries, previousSeriesBytes);
+  chmodSync(previousSeries, previousSeriesMode);
+
+  const failedWrite = runPorcuPi(home, ["rollback"], "0d", {
+    PTY_WAIT_FOR: "Roll back Managed Pi",
+    PORCUPI_TEST_FAILURE: "rollback-activation-write",
+  });
+  assert.notEqual(failedWrite.status, 0);
+  assert.match(`${failedWrite.stdout}${failedWrite.stderr}`, /Injected failure/);
+  assert.deepEqual(readFileSync(activationPath), activationBeforeInvalid);
+
+  const interrupted = runPorcuPi(home, ["rollback"], "0d", {
+    PTY_WAIT_FOR: "Roll back Managed Pi",
+    PORCUPI_TEST_FAULT: "rollback-activation-written",
+  });
+  assert.equal(interrupted.signal, "SIGKILL");
+  const afterInterruption = JSON.parse(readFileSync(activationPath, "utf8"));
+  assert.deepEqual(afterInterruption.active, patchedActivation.active);
+  assert.deepEqual(afterInterruption.previous, initialActivation.active);
+  assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
+  assert.equal(existsSync(join(managedRoot, "compositions", afterInterruption.active.compositionId)), true);
+  assert.equal(existsSync(join(managedRoot, "compositions", afterInterruption.previous.compositionId)), true);
+});
+
+test("lifecycle locking and process leases defer cleanup until running Managed Pi exits", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const managedRoot = dataRoot(home);
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const initialId = JSON.parse(readFileSync(activationPath, "utf8")).active.compositionId;
+  const launchLog = join(root, "held-launch.log");
+  const heldLaunch = spawn(join(home, ".local", "bin", "porcupi"), ["held"], {
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      NODE_ENV: "test",
+      PI_FIXTURE_LAUNCH_LOG: launchLog,
+      PI_FIXTURE_HOLD_MS: "12000",
+    },
+  });
+  childProcesses.push(heldLaunch);
+  for (let attempt = 0; attempt < 100 && !existsSync(launchLog); attempt += 1) await delay(20);
+  assert.equal(existsSync(launchLog), true, "held Managed Pi did not start");
+  assert.ok(readdirSync(join(managedRoot, "leases", initialId)).some((name) => name !== "owner.json"));
+
+  const firstRepository = createApplicablePatchRepository(root, [[
+    "patches/first.patch",
+    textPatch("series.txt", "base", "first"),
+  ]]);
+  const firstLocator = await serveGitRepository(root, firstRepository);
+  assert.equal(runPorcuPi(home, ["add", `${firstLocator}@main`], "616e6e0d").status, 0);
+  assert.equal(runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" }).status, 0);
+
+  const secondRoot = join(root, "second");
+  const secondRepository = createApplicablePatchRepository(secondRoot, [[
+    "patches/second.patch",
+    newFilePatch("second.txt", "second"),
+  ]]);
+  const secondServer = join(root, "second-server");
+  mkdirSync(secondServer);
+  const secondLocator = await serveGitRepository(secondServer, secondRepository);
+  assert.equal(runPorcuPi(home, ["add", `${secondLocator}@main`], "616e6e0d").status, 0);
+  const secondApply = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(secondApply.status, 0, secondApply.stderr || secondApply.stdout);
+  assert.match(secondApply.stdout, /Deferred cleanup.*process lease/);
+  assert.equal(existsSync(join(managedRoot, "compositions", initialId)), true);
+
+  await new Promise((resolvePromise) => heldLaunch.once("exit", resolvePromise));
+  const lock = `${managedRoot}.lifecycle-lock`;
+  const driver = join(repositoryRoot, "test", "support", "pty-driver.py");
+  const holder = spawn("python3", [driver, "0d", join(home, ".local", "bin", "porcupi"), "rollback"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      NODE_ENV: "test",
+      PTY_WAIT_FOR: "Roll back Managed Pi",
+      PORCUPI_TEST_HOLD_LOCK_MS: "1500",
+    },
+  });
+  let holderOutput = "";
+  holder.stdout.on("data", (chunk) => { holderOutput += chunk; });
+  holder.stderr.on("data", (chunk) => { holderOutput += chunk; });
+  for (let attempt = 0; attempt < 100 && !existsSync(lock); attempt += 1) await delay(20);
+  assert.equal(existsSync(lock), true, "lifecycle lock was not acquired");
+
+  const ordinaryLaunch = runPorcuPiProcess(home, ["--version"]);
+  assert.equal(ordinaryLaunch.status, 0, ordinaryLaunch.stderr || ordinaryLaunch.stdout);
+  const contended = runPorcuPi(home, ["rollback"], "0d", { PTY_WAIT_FOR: "Roll back Managed Pi" });
+  assert.notEqual(contended.status, 0);
+  assert.match(`${contended.stdout}${contended.stderr}`, /lifecycle operation is already in progress/);
+  const holderResult = await new Promise((resolvePromise) => holder.once("close", (code, signal) => resolvePromise({ code, signal })));
+  assert.equal(holderResult.code, 0, holderOutput);
+  assert.equal(holderResult.signal, null);
+  assert.equal(existsSync(join(managedRoot, "compositions", initialId)), false);
+  assert.equal(existsSync(join(managedRoot, "receipts", `${initialId}.json`)), false);
+  assert.equal(existsSync(join(managedRoot, "leases", initialId)), false);
+  assert.deepEqual(readdirSync(join(managedRoot, "compositions")).sort(), [
+    JSON.parse(readFileSync(activationPath, "utf8")).active.compositionId,
+    JSON.parse(readFileSync(activationPath, "utf8")).previous.compositionId,
+  ].sort());
+});
+
+test("interrupted receipt-proven cleanup converges and leaves foreign paths untouched", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const managedRoot = dataRoot(home);
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const initialId = JSON.parse(readFileSync(activationPath, "utf8")).active.compositionId;
+
+  const firstRepository = createApplicablePatchRepository(root, [[
+    "patches/first.patch",
+    textPatch("series.txt", "base", "first"),
+  ]]);
+  const firstLocator = await serveGitRepository(root, firstRepository);
+  assert.equal(runPorcuPi(home, ["add", `${firstLocator}@main`], "616e6e0d").status, 0);
+  assert.equal(runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" }).status, 0);
+
+  const secondRoot = join(root, "second");
+  const secondRepository = createApplicablePatchRepository(secondRoot, [[
+    "patches/second.patch",
+    newFilePatch("second.txt", "second"),
+  ]]);
+  const secondServer = join(root, "second-server");
+  mkdirSync(secondServer);
+  const secondLocator = await serveGitRepository(secondServer, secondRepository);
+  assert.equal(runPorcuPi(home, ["add", `${secondLocator}@main`], "616e6e0d").status, 0);
+  const interrupted = runPorcuPi(home, ["apply"], "0d", {
+    PTY_WAIT_FOR: "Apply selected Patches",
+    PORCUPI_TEST_FAULT: "cleanup-composition-staged",
+  });
+  assert.equal(interrupted.signal, "SIGKILL");
+  const interruptedActivation = JSON.parse(readFileSync(activationPath, "utf8"));
+  assert.notEqual(interruptedActivation.active.compositionId, initialId);
+  assert.notEqual(interruptedActivation.previous.compositionId, initialId);
+  assert.equal(existsSync(join(managedRoot, "compositions", initialId)), false);
+  assert.equal(existsSync(join(managedRoot, "receipts", `${initialId}.json`)), true);
+  assert.ok(readdirSync(join(managedRoot, "tmp")).some((name) => name.startsWith(`cleanup-${initialId}-`)));
+
+  const foreignId = "f".repeat(64);
+  symlinkSync(interruptedActivation.active.compositionId, join(managedRoot, "compositions", foreignId));
+  const recovered = runPorcuPi(home, ["rollback"], "0d", { PTY_WAIT_FOR: "Roll back Managed Pi" });
+  assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+  assert.match(recovered.stdout, /Left unproven Composition untouched/);
+  assert.equal(existsSync(join(managedRoot, "receipts", `${initialId}.json`)), false);
+  assert.equal(readdirSync(join(managedRoot, "tmp")).some((name) => name.startsWith("cleanup-")), false);
+  assert.equal(lstatSync(join(managedRoot, "compositions", foreignId)).isSymbolicLink(), true);
+
+  const beforeThird = JSON.parse(readFileSync(activationPath, "utf8"));
+  const thirdRoot = join(root, "third");
+  const thirdRepository = createApplicablePatchRepository(thirdRoot, [[
+    "patches/third.patch",
+    newFilePatch("third.txt", "third"),
+  ]]);
+  const thirdServer = join(root, "third-server");
+  mkdirSync(thirdServer);
+  const thirdLocator = await serveGitRepository(thirdServer, thirdRepository);
+  assert.equal(runPorcuPi(home, ["add", `${thirdLocator}@main`], "616e6e0d").status, 0);
+  const receiptRemoved = runPorcuPi(home, ["apply"], "0d", {
+    PTY_WAIT_FOR: "Apply selected Patches",
+    PORCUPI_TEST_FAULT: "cleanup-receipt-removed",
+  });
+  assert.equal(receiptRemoved.signal, "SIGKILL");
+  const stagedId = beforeThird.previous.compositionId;
+  assert.equal(existsSync(join(managedRoot, "compositions", stagedId)), false);
+  assert.equal(existsSync(join(managedRoot, "receipts", `${stagedId}.json`)), false);
+  assert.ok(readdirSync(join(managedRoot, "tmp")).some((name) => name.startsWith(`cleanup-${stagedId}-`)));
+
+  const recoveredAfterReceipt = runPorcuPi(home, ["rollback"], "0d", { PTY_WAIT_FOR: "Roll back Managed Pi" });
+  assert.equal(recoveredAfterReceipt.status, 0, recoveredAfterReceipt.stderr || recoveredAfterReceipt.stdout);
+  assert.equal(readdirSync(join(managedRoot, "tmp")).some((name) => name.startsWith("cleanup-")), false);
+  assert.equal(existsSync(join(managedRoot, "compositions", stagedId)), false);
+  assert.equal(lstatSync(join(managedRoot, "compositions", foreignId)).isSymbolicLink(), true);
 });
 
 test("porcupi apply rejects digest drift and sequential preflight failure without publishing or activating", async () => {

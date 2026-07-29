@@ -12,6 +12,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -250,6 +251,34 @@ function createResourceRepository(root) {
   git(source, "add", ".");
   git(source, "commit", "-m", "Resource fixture");
   return { source, commit: git(source, "rev-parse", "HEAD") };
+}
+
+function createPatchRepository(root) {
+  const source = join(root, "patch-source");
+  mkdirSync(join(source, "patches", "nested"), { recursive: true });
+  writeFileSync(join(source, "patches", "alpha.patch"), "alpha patch\n");
+  writeFileSync(join(source, "patches", "nested", "beta.patch"), "beta patch\n");
+  writeFileSync(join(source, "patches", "nested", "not-a-patch.txt"), "ignored\n");
+  symlinkSync("../../outside.patch", join(source, "patches", "symbolic.patch"));
+  git(source, "init", "--initial-branch=main");
+  git(source, "config", "user.name", "PorcuPi Test");
+  git(source, "config", "user.email", "porcupi@example.test");
+  git(source, "add", ".");
+  git(source, "commit", "-m", "Patch fixture");
+  const gitlinkCommit = git(source, "rev-parse", "HEAD");
+  git(source, "update-index", "--add", "--cacheinfo", `160000,${gitlinkCommit},patches/submodule`);
+  git(source, "commit", "-m", "Add rejected submodule");
+  return { source, commit: git(source, "rev-parse", "HEAD") };
+}
+
+function createMixedArtifactRepository(root) {
+  const repository = createResourceRepository(root);
+  mkdirSync(join(repository.source, "patches", "nested"), { recursive: true });
+  writeFileSync(join(repository.source, "patches", "nested", "mixed.patch"), "mixed patch\n");
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Add Patch beside Pi resources");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  return repository;
 }
 
 function createManifestResourceRepository(root) {
@@ -563,6 +592,260 @@ test("porcupi add pins and filters all four Pi resource kinds through Pi", async
     ],
   }]);
   assert.deepEqual(JSON.parse(readFileSync(packageLog, "utf8").trim()), ["install", packageSource]);
+});
+
+test("porcupi add saves Patches and Pi resources together while delegating only resources to Pi", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createMixedArtifactRepository(root);
+  const locator = await serveGitRepository(root, repository);
+  const activationPath = join(dataRoot(home), "state", "activation.json");
+  const activationBefore = readFileSync(activationPath);
+
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  assert.match(add.stdout, /4 Pi resource\(s\), 1 Patch\(es\) selected/);
+  const settings = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8"));
+  assert.deepEqual(settings.packages[0].extensions, ["extensions/fixture.ts"]);
+  assert.deepEqual(settings.packages[0].skills, ["skills/fixture-skill/SKILL.md"]);
+  assert.deepEqual(settings.packages[0].prompts, ["prompts/fixture.md"]);
+  assert.deepEqual(settings.packages[0].themes, ["themes/fixture.json"]);
+  const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
+  assert.equal(selections.sources[0].artifacts.length, 5);
+  const patch = selections.sources[0].artifacts.find((artifact) => artifact.kind === "Patch");
+  assert.deepEqual(Object.keys(patch).sort(), ["kind", "path", "sha256"]);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+});
+
+test("porcupi add discovers only exact regular nested Patches and leaves them pending", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createPatchRepository(root);
+  const locator = await serveGitRepository(root, repository);
+  const activationPath = join(dataRoot(home), "state", "activation.json");
+  const activationBefore = readFileSync(activationPath);
+
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  assert.match(add.stdout, /Patch\s+patches\/alpha\.patch/);
+  assert.match(add.stdout, /Patch\s+patches\/nested\/beta\.patch/);
+  assert.match(add.stdout, /Rejected patches\/symbolic\.patch: Patch candidate is symbolic/);
+  assert.match(add.stdout, /Rejected patches\/submodule: Patch candidate is a Git submodule/);
+  assert.doesNotMatch(add.stdout, /not-a-patch\.txt/);
+  assert.match(add.stdout, /2 Patch\(es\).*no Installation Scope|Patches do not have an Installation Scope/);
+  assert.match(add.stdout, /Patch Selection Intent is pending `porcupi apply`/);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+  assert.equal(existsSync(join(home, ".pi", "agent", "settings.json")), false);
+
+  const canonicalLocator = `127.0.0.1:${new URL(locator).port}/owner/resources`;
+  const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
+  assert.deepEqual(selections.sources, [{
+    locator: canonicalLocator,
+    commit: repository.commit,
+    packageSource: `git:${locator}@${repository.commit}`,
+    artifacts: [
+      { kind: "Patch", path: "patches/alpha.patch", sha256: "15adc195c931723b85b314beb297d55a1cab3becf2ed2f2e8cca653297c45d8f" },
+      { kind: "Patch", path: "patches/nested/beta.patch", sha256: "fa01de4182e25ce6287e9f1bfda7196c0f36438b19b244c3938497a8f970bf03" },
+    ],
+  }]);
+});
+
+test("porcupi manage removes Patch intent without giving Patches an Installation Scope", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createPatchRepository(root);
+  const locator = await serveGitRepository(root, repository);
+  assert.equal(runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d").status, 0);
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const activationPath = join(dataRoot(home), "state", "activation.json");
+  const activationBefore = readFileSync(activationPath);
+
+  const manage = runPorcuPi(home, ["manage"], "6a206e6e0d", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+
+  assert.equal(manage.status, 0, manage.stderr || manage.stdout);
+  assert.match(manage.stdout, /Patches do not have an Installation Scope and are not listed on this page/);
+  assert.match(manage.stdout, /Remove Patch.*patches\/nested\/beta\.patch/);
+  assert.match(manage.stdout, /Patch Selection Intent is pending `porcupi apply`/);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+  assert.equal(existsSync(join(home, ".pi", "agent", "settings.json")), false);
+  let selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
+  assert.deepEqual(selections.sources[0].artifacts, [{
+    kind: "Patch",
+    path: "patches/alpha.patch",
+    sha256: "15adc195c931723b85b314beb297d55a1cab3becf2ed2f2e8cca653297c45d8f",
+  }]);
+
+  const selectionsBeforeCancellation = readFileSync(selectionsPath);
+  const cancelled = runPorcuPi(home, ["manage"], "206e1b", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+  assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+  assert.match(cancelled.stdout, /Management cancelled/);
+  assert.deepEqual(readFileSync(selectionsPath), selectionsBeforeCancellation);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+});
+
+test("re-adding a Patch source reviews exact commit and digest replacement without retargeting silently", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createPatchRepository(root);
+  mkdirSync(join(repository.source, "extensions"));
+  writeFileSync(join(repository.source, "extensions", "alongside.ts"), "export default function alongside() {}\n");
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Add Pi resource beside Patches");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const oldCommit = repository.commit;
+  git(repository.source, "tag", "old-patches");
+  writeFileSync(join(repository.source, "patches", "alpha.patch"), "alpha patch revision two\n");
+  git(repository.source, "add", "patches/alpha.patch");
+  git(repository.source, "commit", "-m", "Revise selected Patch bytes");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+  assert.equal(runPorcuPi(home, ["add", `${locator}@old-patches`], "616e6e0d").status, 0);
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const activationPath = join(dataRoot(home), "state", "activation.json");
+  const selectionsBefore = readFileSync(selectionsPath);
+  const activationBefore = readFileSync(activationPath);
+
+  const cancelled = runPorcuPi(home, ["add", `${locator}@main`], "1b");
+  assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+  assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+
+  const replacement = runPorcuPi(home, ["add", `${locator}@main`], "6e6e6a0d");
+  assert.equal(replacement.status, 0, replacement.stderr || replacement.stdout);
+  assert.match(replacement.stdout, new RegExp(`Source-wide change: ${oldCommit} → ${repository.commit}`));
+  assert.match(replacement.stdout, /Patch bytes changed: patches\/alpha\.patch .*15adc195c931.*a56651b16b4c/);
+  let selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
+  assert.equal(selections.sources[0].commit, repository.commit);
+  assert.equal(selections.sources[0].artifacts.find((artifact) => artifact.path === "patches/alpha.patch").sha256, "a56651b16b4c629952286285ac23b9a490bd10e88bcf2430b079bbc917b3b449");
+  const settings = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8"));
+  assert.match(settings.packages[0].source, new RegExp(`@${repository.commit}$`));
+  assert.deepEqual(settings.packages[0].extensions, ["extensions/alongside.ts"]);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+
+  const patchIndex = selections.sources[0].artifacts.findIndex((artifact) => artifact.path === "patches/alpha.patch");
+  selections.sources[0].artifacts[patchIndex].sha256 = "0".repeat(64);
+  writeFileSync(selectionsPath, `${JSON.stringify(selections, null, 2)}\n`);
+  const mismatch = runPorcuPi(home, ["add", `${locator}@main`], "");
+  assert.notEqual(mismatch.status, 0);
+  assert.match(mismatch.stdout, /saved Patch digest does not match its exact Source Repository commit/i);
+  assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].artifacts[patchIndex].sha256, "0".repeat(64));
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+});
+
+test("invalid Patch metadata is prominently ignored as a whole without suppressing convention discovery", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createPatchRepository(root);
+  writeFileSync(join(repository.source, "porcupi.json"), "{\n");
+  git(repository.source, "add", "porcupi.json");
+  git(repository.source, "commit", "-m", "Malformed metadata");
+  git(repository.source, "tag", "malformed-metadata");
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    patches: [{ path: "patches/alpha.patch", scripts: ["./configure.sh"] }],
+  })}\n`);
+  git(repository.source, "add", "porcupi.json");
+  git(repository.source, "commit", "-m", "Unsupported metadata");
+  git(repository.source, "tag", "unsupported-metadata");
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    patches: [
+      { path: "patches/alpha.patch", displayName: "First claim" },
+      { path: "patches/alpha.patch", displayName: "Contradictory claim" },
+    ],
+  })}\n`);
+  git(repository.source, "add", "porcupi.json");
+  git(repository.source, "commit", "-m", "Contradictory metadata");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+
+  const malformed = runPorcuPi(home, ["add", `${locator}@malformed-metadata`], "1b");
+  const unsupported = runPorcuPi(home, ["add", `${locator}@unsupported-metadata`], "1b");
+  const contradictory = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+
+  assert.equal(malformed.status, 0, malformed.stderr || malformed.stdout);
+  assert.match(malformed.stdout, /Patch metadata is invalid and ignored as a whole: malformed JSON/);
+  assert.equal(unsupported.status, 0, unsupported.stderr || unsupported.stdout);
+  assert.match(unsupported.stdout, /unsupported field or unsafe Patch path/);
+  assert.equal(contradictory.status, 0, contradictory.stderr || contradictory.stdout);
+  assert.match(contradictory.stdout, /duplicate Patch entry patches\/alpha\.patch/);
+  assert.doesNotMatch(contradictory.stdout, /First claim|Contradictory claim/);
+  const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
+  assert.deepEqual(selections.sources[0].artifacts.map((artifact) => artifact.path), [
+    "patches/alpha.patch",
+    "patches/nested/beta.patch",
+  ]);
+});
+
+test("valid Patch metadata overlays display and blocks declared Pi Base incompatibility", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createPatchRepository(root);
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    patches: [
+      {
+        path: "patches/alpha.patch",
+        displayName: "Alpha improvement",
+        description: "Improves alpha behavior.",
+        supportedPiBaseVersions: ["v0.81.1"],
+        supportedPiBaseCommits: [base.commit],
+      },
+      {
+        path: "patches/nested/beta.patch",
+        displayName: "Future beta",
+        supportedPiBaseCommits: ["f".repeat(40)],
+      },
+      {
+        path: "patches/missing.patch",
+        displayName: "Missing Patch",
+      },
+    ],
+  }, null, 2)}\n`);
+  git(repository.source, "add", "porcupi.json");
+  git(repository.source, "commit", "-m", "Add narrow Patch metadata");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  assert.match(add.stdout, /Alpha improvement/);
+  assert.match(add.stdout, /Improves alpha behavior/);
+  assert.match(add.stdout, /Future beta.*not supported by this Pi Base/);
+  assert.match(add.stdout, /Patch metadata entry patches\/missing\.patch does not address a discovered regular Patch/);
+  const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
+  assert.deepEqual(selections.sources[0].artifacts, [{
+    kind: "Patch",
+    path: "patches/alpha.patch",
+    sha256: "15adc195c931723b85b314beb297d55a1cab3becf2ed2f2e8cca653297c45d8f",
+  }]);
 });
 
 test("porcupi add installs every resource kind in project scope without granting Pi project trust", async () => {

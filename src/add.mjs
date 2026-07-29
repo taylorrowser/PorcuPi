@@ -179,6 +179,16 @@ function restorePiSettings(snapshot) {
   else rmSync(snapshot.path, { force: true });
 }
 
+async function restorePreviousPiPackage({ settings, executable, previous, environment, locator, operation }) {
+  restorePiSettings(settings);
+  if (!previous) return;
+  try {
+    await runManagedPi(executable, ["install", previous.packageSource], environment);
+  } catch {
+    fail(`Pi package ${operation} failed and the prior checkout for ${locator} could not be restored`);
+  }
+}
+
 function saveSelections(dataRoot, selections, source, artifacts) {
   const withoutSource = selections.sources.filter((candidate) => candidate.locator !== source.locator);
   const sources = artifacts.length === 0
@@ -377,12 +387,14 @@ export async function addResources(requestedSource, {
         saveSelections(dataRoot, selections, resolved, []);
       } catch (error) {
         if (previous) {
-          restorePiSettings(piSettings);
-          try {
-            await runManagedPi(active.executable, ["install", previous.packageSource], environment);
-          } catch {
-            fail(`Pi package removal failed and the prior checkout for ${resolved.locator} could not be restored`);
-          }
+          await restorePreviousPiPackage({
+            settings: piSettings,
+            executable: active.executable,
+            previous,
+            environment,
+            locator: resolved.locator,
+            operation: "removal",
+          });
         }
         throw error;
       }
@@ -396,14 +408,14 @@ export async function addResources(requestedSource, {
       verifyFilteredPackage(environment, resolved, result);
       saveSelections(dataRoot, selections, resolved, result);
     } catch (error) {
-      restorePiSettings(piSettings);
-      if (previous) {
-        try {
-          await runManagedPi(active.executable, ["install", previous.packageSource], environment);
-        } catch {
-          fail(`Pi package update failed and the prior checkout for ${resolved.locator} could not be restored`);
-        }
-      }
+      await restorePreviousPiPackage({
+        settings: piSettings,
+        executable: active.executable,
+        previous,
+        environment,
+        locator: resolved.locator,
+        operation: "update",
+      });
       throw error;
     }
     output.write(`\nSaved ${result.length} global Pi resource selections from ${resolved.locator}@${resolved.commit}.\n`);

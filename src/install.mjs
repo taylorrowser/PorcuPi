@@ -285,11 +285,15 @@ function shellQuote(value) {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+function launcherContents(cliPath) {
+  return `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(cliPath)} "$@"\n`;
+}
+
 function publishLauncher(path, cliPath) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o755 });
   const temporary = join(dirname(path), `.${basename(path)}.tmp-${randomUUID()}`);
   try {
-    writeFileSync(temporary, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(cliPath)} "$@"\n`, { mode: 0o755 });
+    writeFileSync(temporary, launcherContents(cliPath), { mode: 0o755 });
     // A same-directory hard link is an atomic exclusive publication: EEXIST
     // refuses a command created during the long build instead of replacing it.
     linkSync(temporary, path);
@@ -372,8 +376,8 @@ export async function installManagedPi({
   const dataRoot = defaultDataRoot(environment, platform);
   const binDirectory = defaultBinDirectory(environment);
   const launcher = join(binDirectory, "porcupi");
-  if (pathExists(launcher)) fail(`Refusing foreign porcupi command collision: ${launcher}`);
   const paths = managedLayout(dataRoot);
+  let recoverable;
   if (pathExists(paths.root) && pathExists(paths.activation)) {
     const rootStat = lstatSync(paths.root);
     const owner = readJson(paths.owner, "PorcuPi root ownership");
@@ -384,11 +388,25 @@ export async function installManagedPi({
     const installedCli = join(paths.runtime, "cli.mjs");
     const cliStat = lstatSync(installedCli);
     if (!cliStat.isFile() || cliStat.isSymbolicLink()) fail("Installed PorcuPi runtime is malformed");
-    publishLauncher(launcher, installedCli);
-    output.write(`\nRecovered installed zero-Patch Managed Pi ${active.receipt.piBase.tag}.\n`);
+    recoverable = { active, installedCli };
+  }
+  if (pathExists(launcher)) {
+    const stat = lstatSync(launcher);
+    if (
+      !recoverable
+      || !stat.isFile()
+      || stat.isSymbolicLink()
+      || readFileSync(launcher, "utf8") !== launcherContents(recoverable.installedCli)
+    ) {
+      fail(`Refusing foreign porcupi command collision: ${launcher}`);
+    }
+  }
+  if (recoverable) {
+    if (!pathExists(launcher)) publishLauncher(launcher, recoverable.installedCli);
+    output.write(`\nRecovered installed zero-Patch Managed Pi ${recoverable.active.receipt.piBase.tag}.\n`);
     output.write(`Command: ${launcher}\n`);
     output.write("Stock Pi and Pi user data were preserved.\n");
-    return { installed: true, recovered: true, launcher, compositionId: active.receipt.compositionId };
+    return { installed: true, recovered: true, launcher, compositionId: recoverable.active.receipt.compositionId };
   }
   let initialized = false;
   try {
@@ -422,6 +440,7 @@ export async function installManagedPi({
     });
     checkpoint("activation-written");
     publishLauncher(launcher, join(paths.runtime, "cli.mjs"));
+    checkpoint("launcher-published");
     removeOwnedTree(temporaryRoot);
 
     output.write(`\nInstalled zero-Patch Managed Pi ${lock.tag}.\n`);

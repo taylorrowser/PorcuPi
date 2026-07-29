@@ -261,6 +261,25 @@ test("installation retry discards an unactivated published composition after int
   assert.equal(existsSync(join(home, ".local", "bin", "porcupi")), true);
 });
 
+test("installation retry accepts its unchanged stable command after launcher publication", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+
+  const interrupted = runInstaller(release, home, "0d", { PORCUPI_TEST_FAULT: "launcher-published" });
+  assert.equal(interrupted.signal, "SIGKILL");
+  const launcher = join(home, ".local", "bin", "porcupi");
+  const launcherBefore = readFileSync(launcher);
+
+  const retry = runInstaller(release, home);
+
+  assert.equal(retry.status, 0, retry.stderr || retry.stdout);
+  assert.match(retry.stdout, /Recovered installed zero-Patch Managed Pi/);
+  assert.deepEqual(readFileSync(launcher), launcherBefore);
+});
+
 test("installation retry publishes the stable command after interruption following activation", () => {
   const root = temporaryRoot();
   const home = join(root, "home");

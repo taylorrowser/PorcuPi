@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
 import { atomicWrite, canonicalJson, defaultDataRoot, fail, managedLayout, readActiveComposition } from "./runtime.mjs";
-import { discoverPiArtifacts, parseRequestedGitSource, resolveSourceRepository } from "./source-repository.mjs";
+import { discoverPiArtifacts, isFullGitCommit, parseRequestedGitSource, resolveSourceRepository } from "./source-repository.mjs";
 
 const resourceKeys = {
   Extension: "extensions",
@@ -13,6 +13,10 @@ const resourceKeys = {
   Prompt: "prompts",
   Theme: "themes",
 };
+
+function artifactKey(artifact) {
+  return `${artifact.kind}\0${artifact.path}`;
+}
 
 function selectionStatePath(dataRoot) {
   return join(managedLayout(dataRoot).state, "selections.json");
@@ -39,7 +43,7 @@ function readSelections(dataRoot) {
     || !Array.isArray(value.sources)
     || value.sources.some((source) => (
       typeof source?.locator !== "string"
-      || !/^[a-f0-9]{40}$/.test(source.commit || "")
+      || !isFullGitCommit(source.commit)
       || typeof source.packageSource !== "string"
       || !Array.isArray(source.artifacts)
       || source.artifacts.some((artifact) => (
@@ -212,11 +216,12 @@ async function promptForSource(input, output) {
   }
 }
 
-function runAddWizard({ source, artifacts, diagnostics, currentPaths, previousCommit, input, output }) {
+function runAddWizard({ source, artifacts, diagnostics, currentArtifacts, previousCommit, input, output }) {
   if (!input.isTTY || !output.isTTY || typeof input.setRawMode !== "function") {
     fail("porcupi add requires an interactive terminal");
   }
-  const selected = new Set(currentPaths.filter((path) => artifacts.some((artifact) => artifact.path === path)));
+  const availableKeys = new Set(artifacts.map(artifactKey));
+  const selected = new Set(currentArtifacts.map(artifactKey).filter((key) => availableKeys.has(key)));
   let page = 0;
   let artifactCursor = 0;
   let reviewCursor = 0;
@@ -252,7 +257,7 @@ function runAddWizard({ source, artifacts, diagnostics, currentPaths, previousCo
     };
     const onSigint = () => onSignal("SIGINT");
     const onSigterm = () => onSignal("SIGTERM");
-    const chosen = () => artifacts.filter((artifact) => selected.has(artifact.path));
+    const chosen = () => artifacts.filter((artifact) => selected.has(artifactKey(artifact)));
     const truncate = (value) => {
       const width = Math.max(20, (output.columns || 100) - 1);
       return value.length > width ? `${value.slice(0, width - 1)}…` : value;
@@ -272,7 +277,7 @@ function runAddWizard({ source, artifacts, diagnostics, currentPaths, previousCo
         for (let index = artifactWindow.start; index < artifactWindow.end; index += 1) {
           const artifact = artifacts[index];
           const pointer = index === artifactCursor ? "›" : " ";
-          const mark = selected.has(artifact.path) ? "x" : " ";
+          const mark = selected.has(artifactKey(artifact)) ? "x" : " ";
           output.write(`${truncate(`${pointer} [${mark}] ${artifact.kind.padEnd(9)} ${artifact.path}`)}\n`);
         }
         if (artifacts.length > 0) output.write(`  ${artifactWindow.start} above · ${artifacts.length - artifactWindow.end} below\n`);
@@ -317,12 +322,12 @@ function runAddWizard({ source, artifacts, diagnostics, currentPaths, previousCo
         else if (page === 2) reviewCursor = Math.min(Math.max(0, chosen().length - 1), reviewCursor + 1);
       } else if (key.name === "space" || key.name === "return") {
         if (page === 0 && artifacts[artifactCursor]) {
-          const path = artifacts[artifactCursor].path;
-          if (selected.has(path)) selected.delete(path);
-          else selected.add(path);
+          const keyValue = artifactKey(artifacts[artifactCursor]);
+          if (selected.has(keyValue)) selected.delete(keyValue);
+          else selected.add(keyValue);
         } else if (page === 2) return finish(chosen());
       } else if (page === 0 && key.name === "a") {
-        for (const artifact of artifacts) selected.add(artifact.path);
+        for (const artifact of artifacts) selected.add(artifactKey(artifact));
       } else if (page === 0 && key.name === "d") selected.clear();
       render();
     };
@@ -370,7 +375,7 @@ export async function addResources(requestedSource, {
       source: resolved,
       artifacts: discovery.artifacts,
       diagnostics: discovery.diagnostics,
-      currentPaths: previous?.artifacts.map((artifact) => artifact.path) ?? [],
+      currentArtifacts: previous?.artifacts ?? [],
       previousCommit: previous?.commit,
       input,
       output,

@@ -5,6 +5,11 @@ import { join, relative, resolve, sep } from "node:path";
 import { fail } from "./runtime.mjs";
 
 const artifactKinds = ["Extension", "Prompt", "Skill", "Theme"];
+const fullCommitPattern = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
+export function isFullGitCommit(value) {
+  return typeof value === "string" && fullCommitPattern.test(value);
+}
+
 const themeColors = [
   "accent", "border", "borderAccent", "borderMuted", "success", "error", "warning", "muted", "dim", "text",
   "thinkingText", "selectedBg", "userMessageBg", "userMessageText", "customMessageBg", "customMessageText",
@@ -115,13 +120,13 @@ function refExists(checkout, ref) {
 
 function peelCommit(checkout, ref) {
   const commit = git(["rev-parse", "--verify", `${ref}^{commit}`], { cwd: checkout });
-  if (!/^[a-f0-9]{40}$/.test(commit)) fail("Git ref did not resolve to one full commit");
+  if (!isFullGitCommit(commit)) fail("Git ref did not resolve to one full commit");
   return commit;
 }
 
 function resolveRequestedCommit(checkout, requestedRef) {
   if (!requestedRef) return peelCommit(checkout, "refs/remotes/origin/HEAD");
-  if (/^[a-fA-F0-9]{40}$/.test(requestedRef)) return peelCommit(checkout, requestedRef);
+  if (isFullGitCommit(requestedRef)) return peelCommit(checkout, requestedRef);
 
   let candidates;
   if (requestedRef === "HEAD") candidates = ["refs/remotes/origin/HEAD"];
@@ -132,7 +137,7 @@ function resolveRequestedCommit(checkout, requestedRef) {
   else candidates = [`refs/remotes/origin/${requestedRef}`, `refs/tags/${requestedRef}`];
 
   const matches = candidates.filter((candidate) => refExists(checkout, candidate));
-  if (matches.length === 0 && /^[a-fA-F0-9]{4,39}$/.test(requestedRef)) {
+  if (matches.length === 0 && /^[a-fA-F0-9]{4,63}$/.test(requestedRef)) {
     fail("Abbreviated commit IDs are ambiguous; provide the full commit");
   }
   if (matches.length === 0) fail(`Git ref '${requestedRef}' does not exist`);

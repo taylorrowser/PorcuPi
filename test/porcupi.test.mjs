@@ -615,6 +615,38 @@ test("porcupi add follows the Pi package manifest and rejects unloadable candida
   assert.deepEqual(settings.packages[0].themes, ["bundle/theme.json"]);
 });
 
+test("Artifact selection distinguishes resource kind when structural paths are equal", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const source = join(root, "same-path-source");
+  mkdirSync(source);
+  writeFileSync(join(source, "shared.md"), "---\ndescription: Shared resource.\n---\nShared.\n");
+  writeFileSync(join(source, "package.json"), `${JSON.stringify({
+    name: "same-path-fixture",
+    pi: { skills: ["shared.md"], prompts: ["shared.md"] },
+  }, null, 2)}\n`);
+  git(source, "init", "--initial-branch=main");
+  git(source, "config", "user.name", "PorcuPi Test");
+  git(source, "config", "user.email", "porcupi@example.test");
+  git(source, "add", ".");
+  git(source, "commit", "-m", "Same path fixture");
+  const repository = { source, commit: git(source, "rev-parse", "HEAD") };
+  const locator = await serveGitRepository(root, repository);
+
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "206e6e0d");
+
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  const settings = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8"));
+  assert.deepEqual(settings.packages[0].prompts, ["shared.md"]);
+  assert.deepEqual(settings.packages[0].skills, []);
+  const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
+  assert.deepEqual(selections.sources[0].artifacts, [{ kind: "Prompt", path: "shared.md", scope: "global" }]);
+});
+
 test("cancelling porcupi add preserves Pi settings, Selection Intent, activation, and cursor state", async () => {
   const root = temporaryRoot();
   const home = join(root, "home");

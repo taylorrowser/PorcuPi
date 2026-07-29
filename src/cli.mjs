@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import { addResources } from "./add.mjs";
 import { defaultDataRoot, fail, readActiveComposition } from "./runtime.mjs";
+import { manageResources } from "./manage.mjs";
 
 async function launch(args) {
   const { executable } = readActiveComposition(defaultDataRoot());
@@ -26,6 +27,9 @@ try {
   if (args[0] === "add") {
     if (args.length > 2) fail("Usage: porcupi add [git-source]");
     await addResources(args[1]);
+  } else if (args[0] === "manage") {
+    if (args.length !== 1) fail("Usage: porcupi manage");
+    await manageResources();
   } else {
     await launch(args);
   }

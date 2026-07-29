@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { defaultDataRoot, readActiveComposition } from "./runtime.mjs";
+import { addResources } from "./add.mjs";
+import { defaultDataRoot, fail, readActiveComposition } from "./runtime.mjs";
 
 async function launch(args) {
   const { executable } = readActiveComposition(defaultDataRoot());
@@ -21,7 +22,13 @@ async function launch(args) {
 }
 
 try {
-  await launch(process.argv.slice(2));
+  const args = process.argv.slice(2);
+  if (args[0] === "add") {
+    if (args.length > 2) fail("Usage: porcupi add [git-source]");
+    await addResources(args[1]);
+  } else {
+    await launch(args);
+  }
 } catch (error) {
   console.error(`porcupi: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;

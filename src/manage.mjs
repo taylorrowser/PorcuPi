@@ -1,6 +1,8 @@
 import { canonicalJson, defaultDataRoot, readActiveComposition } from "./runtime.mjs";
 import {
   artifactKey,
+  patchIntentPending,
+  patchPendingMessage,
   readSelections,
   realizeResourceChanges,
   resolveProjectContext,
@@ -21,9 +23,9 @@ function flattenedSelections(selections) {
   }))).sort((left, right) => managedArtifactKey(left).localeCompare(managedArtifactKey(right)));
 }
 
-function runManageWizard({ items, project, input, output }) {
+function runManageWizard({ items, project, patchPending, input, output }) {
   const kept = new Set(items.map(managedArtifactKey));
-  const scopes = new Map(items.map((item) => [managedArtifactKey(item), {
+  const scopes = new Map(items.filter((item) => item.kind !== "Patch").map((item) => [managedArtifactKey(item), {
     scope: item.scope,
     ...(item.scope === "project" ? { projectRoot: item.projectRoot } : {}),
   }]));
@@ -38,10 +40,14 @@ function runManageWizard({ items, project, input, output }) {
     output,
     createController: ({ finish }) => {
       const retained = () => items.filter((item) => kept.has(managedArtifactKey(item)));
-      const retainedWithScopes = () => retained().map((item) => ({ ...item, ...scopes.get(managedArtifactKey(item)) }));
+      const retainedResources = () => retained().filter((item) => item.kind !== "Patch");
+      const retainedWithScopes = () => retained().map((item) => item.kind === "Patch"
+        ? item
+        : ({ ...item, ...scopes.get(managedArtifactKey(item)) }));
       const changes = () => items.flatMap((item) => {
         const key = managedArtifactKey(item);
         if (!kept.has(key)) return [`Remove ${item.kind}: ${item.locator} :: ${item.path}`];
+        if (item.kind === "Patch") return [];
         const next = scopes.get(key);
         if (next.scope === item.scope && next.projectRoot === item.projectRoot) return [];
         const context = next.scope === "project" ? `project — ${next.projectRoot}` : "global";
@@ -52,7 +58,7 @@ function runManageWizard({ items, project, input, output }) {
         if (page === 0) {
           output.write("1 of 3 — Keep or remove current selections\n");
           output.write(`${kept.size} kept; ${items.length - kept.size} marked for removal.\n\n`);
-          const itemWindow = windowAround(output, itemCursor, items.length, 12);
+          const itemWindow = windowAround(output, itemCursor, items.length, 13);
           for (let index = itemWindow.start; index < itemWindow.end; index += 1) {
             const item = items[index];
             const pointer = index === itemCursor ? "›" : " ";
@@ -60,12 +66,16 @@ function runManageWizard({ items, project, input, output }) {
             output.write(`${truncateForTerminal(output, `${pointer} [${mark}] ${item.kind.padEnd(9)} ${item.locator} :: ${item.path}`)}\n`);
           }
           output.write(`  ${itemWindow.start} above · ${items.length - itemWindow.end} below\n`);
-          if (items[itemCursor]) output.write(`Focused exact source: ${items[itemCursor].locator}@${items[itemCursor].commit}\n`);
+          if (items[itemCursor]) {
+            output.write(`Focused exact source: ${items[itemCursor].locator}@${items[itemCursor].commit}\n`);
+            if (items[itemCursor].kind === "Patch") output.write(`Focused Patch digest: sha256:${items[itemCursor].sha256}\n`);
+          }
           output.write("\n[↑/↓ j/k] move  [Space/Enter] keep/remove  [a] keep all  [d] remove all\n[n → l] Next  [Esc] cancel\n");
         } else if (page === 1) {
-          const selectedItems = retainedWithScopes();
+          const selectedItems = retainedResources().map((item) => ({ ...item, ...scopes.get(managedArtifactKey(item)) }));
           scopeCursor = Math.min(scopeCursor, Math.max(0, selectedItems.length - 1));
           output.write("2 of 3 — Choose Installation Scope\n");
+          output.write("Patches do not have an Installation Scope and are not listed on this page.\n");
           if (project.available) output.write(`Current project context: ${project.root}\n\n`);
           else output.write(`Project scope unavailable: ${project.reason}.\n\n`);
           const scopeWindow = windowAround(output, scopeCursor, selectedItems.length, 13);
@@ -82,8 +92,11 @@ function runManageWizard({ items, project, input, output }) {
           reviewCursor = Math.min(reviewCursor, Math.max(0, pending.length - 1));
           output.write("3 of 3 — Review and save\n");
           output.write(`Result: keep ${kept.size}, remove ${items.length - kept.size}.\n`);
-          output.write("Pi resource changes take effect through Pi. Managed Pi activation is unchanged.\n\n");
-          const reviewWindow = windowAround(output, reviewCursor, pending.length, 13);
+          output.write("Pi resource changes take effect through Pi; Patch changes remain pending until apply.\n");
+          output.write("Managed Pi activation is unchanged.\n");
+          output.write(patchPendingMessage(patchPending));
+          output.write("\n");
+          const reviewWindow = windowAround(output, reviewCursor, pending.length, 14);
           for (let index = reviewWindow.start; index < reviewWindow.end; index += 1) {
             output.write(`${truncateForTerminal(output, `${index === reviewCursor ? "›" : " "} ${pending[index]}`)}\n`);
           }
@@ -103,7 +116,7 @@ function runManageWizard({ items, project, input, output }) {
           else reviewCursor = Math.max(0, reviewCursor - 1);
         } else if (key.name === "down" || key.name === "j") {
           if (page === 0) itemCursor = Math.min(Math.max(0, items.length - 1), itemCursor + 1);
-          else if (page === 1) scopeCursor = Math.min(Math.max(0, retained().length - 1), scopeCursor + 1);
+          else if (page === 1) scopeCursor = Math.min(Math.max(0, retainedResources().length - 1), scopeCursor + 1);
           else reviewCursor = Math.min(Math.max(0, changes().length - 1), reviewCursor + 1);
         } else if (key.name === "space" || key.name === "return") {
           if (page === 0) {
@@ -111,7 +124,7 @@ function runManageWizard({ items, project, input, output }) {
             if (kept.has(keyValue)) kept.delete(keyValue);
             else kept.add(keyValue);
           } else if (page === 1) {
-            const item = retained()[scopeCursor];
+            const item = retainedResources()[scopeCursor];
             if (item) {
               const keyValue = managedArtifactKey(item);
               const current = scopes.get(keyValue);
@@ -150,11 +163,12 @@ export async function manageResources({
   const selections = readSelections(dataRoot);
   const items = flattenedSelections(selections);
   if (items.length === 0) {
-    output.write("There are no retained Pi resource selections to manage. Use `porcupi add [git-source]` first.\n");
+    output.write("There are no retained Artifact selections to manage. Use `porcupi add [git-source]` first.\n");
     return { saved: false, count: 0 };
   }
   const project = resolveProjectContext(cwd);
-  const result = await runManageWizard({ items, project, input, output });
+  const patchPending = patchIntentPending(selections.sources, active.activation.active.patches);
+  const result = await runManageWizard({ items, project, patchPending, input, output });
   if (result === null) {
     output.write("\nManagement cancelled; saved Selection Intent, Pi configuration, and Managed Pi activation are unchanged.\n");
     return { saved: false, cancelled: true };
@@ -171,16 +185,27 @@ export async function manageResources({
   });
   if (changes.length === 0) {
     output.write("\nNo reviewed Selection Intent changes; Pi configuration and Managed Pi activation are unchanged.\n");
+    output.write(patchPendingMessage(patchPending));
     return { saved: false, count: result.length };
   }
 
+  const resourceChanges = changes.flatMap((change) => {
+    const previousArtifacts = change.previous.artifacts.filter((artifact) => artifact.kind !== "Patch");
+    const nextArtifacts = change.nextArtifacts.filter((artifact) => artifact.kind !== "Patch");
+    return canonicalJson(previousArtifacts) === canonicalJson(nextArtifacts)
+      ? []
+      : [{ ...change, previous: { ...change.previous, artifacts: previousArtifacts }, nextArtifacts }];
+  });
   await realizeResourceChanges({
     executable: active.executable,
     environment,
-    changes,
+    changes: resourceChanges,
     save: () => saveSelectionSources(dataRoot, nextSources),
   });
-  output.write(`\nSaved ${result.length} retained Pi resource selections. Pi owns package lifecycle and project trust.\n`);
+  const resourceCount = result.filter((artifact) => artifact.kind !== "Patch").length;
+  const patchCount = result.length - resourceCount;
+  output.write(`\nSaved ${resourceCount} Pi resource and ${patchCount} Patch selections. Pi owns package lifecycle and project trust.\n`);
   output.write("Managed Pi activation is unchanged.\n");
+  output.write(patchPendingMessage(patchIntentPending(nextSources, active.activation.active.patches)));
   return { saved: true, count: result.length };
 }

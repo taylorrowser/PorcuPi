@@ -1,10 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { globSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { globSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
-import { fail } from "./runtime.mjs";
+import { fail, sha256File } from "./runtime.mjs";
 
 const artifactKinds = ["Extension", "Prompt", "Skill", "Theme"];
+const regularGitModes = new Set(["100644", "100755"]);
 const fullCommitPattern = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
 export function isFullGitCommit(value) {
   return typeof value === "string" && fullCommitPattern.test(value);
@@ -458,7 +459,148 @@ function manifestArtifacts(root, manifest, diagnostics) {
   return artifacts;
 }
 
-export function discoverPiArtifacts(root) {
+function exactObjectKeys(value, allowed) {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.keys(value).every((key) => allowed.has(key));
+}
+
+function metadataText(value) {
+  return typeof value === "string" && value.length > 0 && !/[\x00-\x1f\x7f]/.test(value);
+}
+
+function exactVersion(value) {
+  return typeof value === "string" && /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value);
+}
+
+function readPatchMetadata(checkout, patches, piBase, diagnostics) {
+  const path = join(checkout, "porcupi.json");
+  let value;
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("must be a regular file");
+    value = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return patches;
+    const reason = error instanceof SyntaxError ? "malformed JSON" : "metadata root is not a readable regular file";
+    diagnostics.push({ path: "porcupi.json", reason: `Patch metadata is invalid and ignored as a whole: ${reason}` });
+    return patches;
+  }
+
+  const rootKeys = new Set(["schemaVersion", "patches"]);
+  const entryKeys = new Set([
+    "path",
+    "displayName",
+    "description",
+    "supportedPiBaseVersions",
+    "supportedPiBaseCommits",
+  ]);
+  const invalid = (reason) => {
+    diagnostics.push({ path: "porcupi.json", reason: `Patch metadata is invalid and ignored as a whole: ${reason}` });
+    return patches;
+  };
+  if (!exactObjectKeys(value, rootKeys) || value.schemaVersion !== 1 || !Array.isArray(value.patches)) {
+    return invalid("expected only schemaVersion 1 and a patches array");
+  }
+  const seen = new Set();
+  for (const entry of value.patches) {
+    if (
+      !exactObjectKeys(entry, entryKeys)
+      || !metadataText(entry.path)
+      || !entry.path.startsWith("patches/")
+      || !entry.path.endsWith(".patch")
+      || entry.path.includes("\\")
+      || entry.path.split("/").some((part) => part === "" || part === "." || part === "..")
+    ) {
+      return invalid("unsupported field or unsafe Patch path");
+    }
+    if (seen.has(entry.path)) return invalid(`duplicate Patch entry ${entry.path}`);
+    seen.add(entry.path);
+    if (entry.displayName !== undefined && !metadataText(entry.displayName)) return invalid(`invalid displayName for ${entry.path}`);
+    if (entry.description !== undefined && !metadataText(entry.description)) return invalid(`invalid description for ${entry.path}`);
+    for (const [key, validator] of [["supportedPiBaseVersions", exactVersion], ["supportedPiBaseCommits", isFullGitCommit]]) {
+      const values = entry[key];
+      if (values !== undefined && (
+        !Array.isArray(values)
+        || values.length === 0
+        || values.some((candidate) => !validator(candidate))
+        || new Set(values).size !== values.length
+      )) return invalid(`${key} for ${entry.path} must contain unique exact values`);
+    }
+  }
+
+  const entries = new Map(value.patches.map((entry) => [entry.path, entry]));
+  const discovered = new Set(patches.map((patch) => patch.path));
+  for (const entry of value.patches) {
+    if (!discovered.has(entry.path)) diagnostics.push({
+      path: "porcupi.json",
+      reason: `Patch metadata entry ${entry.path} does not address a discovered regular Patch and is ignored`,
+    });
+  }
+  return patches.map((patch) => {
+    const entry = entries.get(patch.path);
+    if (!entry) return patch;
+    const versionCompatible = entry.supportedPiBaseVersions === undefined
+      || entry.supportedPiBaseVersions.includes(piBase?.tag);
+    const commitCompatible = entry.supportedPiBaseCommits === undefined
+      || entry.supportedPiBaseCommits.includes(piBase?.commit);
+    return {
+      ...patch,
+      ...(entry.displayName === undefined ? {} : { displayName: entry.displayName }),
+      ...(entry.description === undefined ? {} : { description: entry.description }),
+      compatible: versionCompatible && commitCompatible,
+      compatibilityDeclared: entry.supportedPiBaseVersions !== undefined || entry.supportedPiBaseCommits !== undefined,
+    };
+  });
+}
+
+function discoverPatchArtifacts(checkout, diagnostics, piBase) {
+  const realCheckout = realpathSync(checkout);
+  const inventory = git(["ls-files", "--stage", "-z", "--", "patches"], { cwd: checkout });
+  if (!inventory) return [];
+  const artifacts = [];
+  for (const record of inventory.split("\0").filter(Boolean)) {
+    const match = record.match(/^([0-9]{6}) [a-f0-9]+ [0-9]\t(.+)$/);
+    if (!match) {
+      diagnostics.push({ path: "patches", reason: "Patch Git inventory is malformed" });
+      continue;
+    }
+    const [, mode, path] = match;
+    if (/[\x00-\x1f\x7f]/.test(path)) {
+      diagnostics.push({ path: "patches/[unsafe path]", reason: "Patch path contains terminal control characters" });
+      continue;
+    }
+    if (mode === "120000") {
+      diagnostics.push({ path, reason: "Patch candidate is symbolic" });
+      continue;
+    }
+    if (mode === "160000") {
+      diagnostics.push({ path, reason: "Patch candidate is a Git submodule" });
+      continue;
+    }
+    if (!path.endsWith(".patch")) continue;
+    const absolute = join(checkout, path);
+    try {
+      const stat = lstatSync(absolute);
+      const real = realpathSync(absolute);
+      if (
+        !regularGitModes.has(mode)
+        || !stat.isFile()
+        || stat.isSymbolicLink()
+        || (real !== realCheckout && !real.startsWith(`${realCheckout}${sep}`))
+      ) {
+        throw new Error("not a repository-bounded regular file");
+      }
+      artifacts.push({ kind: "Patch", path, sha256: sha256File(absolute) });
+    } catch {
+      diagnostics.push({ path, reason: "Patch candidate is not a repository-bounded regular file" });
+    }
+  }
+  return readPatchMetadata(checkout, artifacts, piBase, diagnostics);
+}
+
+export function discoverPiArtifacts(root, { piBase } = {}) {
   const checkout = resolve(root);
   const diagnostics = [];
   let manifest;
@@ -485,6 +627,7 @@ export function discoverPiArtifacts(root) {
       .filter((path) => validateArtifact(checkout, kind, path, diagnostics))
       .map((path) => ({ kind, path: relativePath(checkout, path) })));
   }
+  artifacts.push(...discoverPatchArtifacts(checkout, diagnostics, piBase));
   artifacts.sort((left, right) => `${left.kind}\0${left.path}`.localeCompare(`${right.kind}\0${right.path}`));
   diagnostics.sort((left, right) => left.path.localeCompare(right.path));
   return { artifacts, diagnostics };

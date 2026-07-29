@@ -2,7 +2,7 @@
 
 PorcuPi adds individual resource selection to Pi's Git package lifecycle and builds an isolated Managed Pi from explicitly selected source patches, without modifying Stock Pi.
 
-PorcuPi v1 targets macOS and Linux. The current implementation installs and launches the release-pinned, zero-Patch Managed Pi foundation and manages individually selected Pi resources from exact Git commits. Patch selection arrives in a subsequent v1 tracer bullet.
+PorcuPi v1 targets macOS and Linux. The current implementation installs and launches the release-pinned, zero-Patch Managed Pi foundation and manages individually selected Pi resources and Patches from exact Git commits. Applying selected Patches into a new composition arrives in the next v1 tracer bullet.
 
 ## Install the zero-Patch Managed Pi
 
@@ -48,6 +48,10 @@ PorcuPi resolves the requested ref to one full commit before showing the three-p
 
 Confirmed Skills, Extensions, Prompts, and Themes become exact-commit, minimally filtered Pi Git packages in Pi's documented global or `.pi/settings.json` project configuration. When the same Source Repository has both global and project selections, the project entry is a delta so selected global resources continue to load under Pi's scope and deduplication rules. PorcuPi invokes Pi with `-l` for project realization but never supplies `--approve`, writes `trust.json`, or otherwise answers project trust. Pi owns checkout, npm dependencies, updates, loading, precedence, and trust. Full commit refs remain pinned during ordinary Pi package updates; advancing a source requires another explicit add/review operation.
 
+PorcuPi also recursively discovers tracked regular `*.patch` files beneath the Source Repository's root `patches/`. It rejects symbolic links, Git submodules, unsafe paths, non-regular files, and boundary escapes, and saves each selected Patch's full structural path and SHA-256 at the exact source commit. Patches appear beside Pi resources in add and manage, but never receive an Installation Scope or enter Pi package settings. Saving Patch intent reports it as pending and never rebuilds or changes the active Managed Pi Composition; only the forthcoming `porcupi apply` flow will do that.
+
+A source may optionally add display text and exact Pi Base compatibility through the versioned, unknown-field-rejecting root `porcupi.json` schema documented in [ADR 0004](docs/adr/0004-narrow-patch-metadata.md). Missing or invalid metadata leaves convention-discovered Patches available under PorcuPi's fixed pipeline. Metadata cannot add Patch paths, dependencies, hooks, scripts, ordering, build recipes, verifiers, Artifact Sets, or solver behavior.
+
 Re-adding the same Source Repository reviews and replaces its complete prior PorcuPi selection. To remove retained resources or move them between scopes without resolving a new source commit, run:
 
 ```sh
@@ -66,6 +70,6 @@ Run the external-process acceptance suite with one command:
 npm test
 ```
 
-The tests drive the guided installer and public `porcupi add`/`porcupi manage` commands through pseudo-terminals in isolated homes and projects, using deterministic local Git Pi Base, Source Repository, project-trust, and Pi package-lifecycle fixtures.
+The tests drive the guided installer and public `porcupi add`/`porcupi manage` commands through pseudo-terminals in isolated homes and projects, using deterministic local Git Pi Base, mixed resource/Patch Source Repository, metadata, project-trust, and Pi package-lifecycle fixtures.
 
 The build specification and remaining tracer bullets are tracked in [PorcuPi v1 issue #12](https://github.com/taylorrowser/PorcuPi/issues/12).

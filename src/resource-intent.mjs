@@ -6,6 +6,11 @@ import { atomicWrite, canonicalJson, fail, managedLayout } from "./runtime.mjs";
 import { isFullGitCommit, parseRequestedGitSource } from "./source-repository.mjs";
 
 const installationScopes = new Set(["global", "project"]);
+const selectionRootFields = new Set(["schemaVersion", "sources"]);
+const selectionSourceFields = new Set(["locator", "commit", "packageSource", "artifacts"]);
+const patchFields = new Set(["kind", "path", "sha256"]);
+const globalResourceFields = new Set(["kind", "path", "scope"]);
+const projectResourceFields = new Set(["kind", "path", "scope", "projectRoot"]);
 const resourceKeys = {
   Extension: "extensions",
   Skill: "skills",
@@ -17,12 +22,36 @@ export function artifactKey(artifact) {
   return `${artifact.kind}\0${artifact.path}`;
 }
 
+export function patchSelectionSnapshot(sources) {
+  return sources.flatMap((source) => source.artifacts
+    .filter((artifact) => artifact.kind === "Patch")
+    .map((artifact) => ({ locator: source.locator, commit: source.commit, path: artifact.path, sha256: artifact.sha256 })))
+    .sort((left, right) => `${left.locator}\0${left.path}`.localeCompare(`${right.locator}\0${right.path}`));
+}
+
+export function patchIntentPending(sources, activePatches) {
+  return canonicalJson(patchSelectionSnapshot(sources)) !== canonicalJson(activePatches ?? []);
+}
+
+export function patchPendingMessage(pending) {
+  return pending
+    ? "Patch Selection Intent is pending `porcupi apply`; active Managed Pi Composition is unchanged.\n"
+    : "Patch Selection Intent matches the active Managed Pi Composition.\n";
+}
+
 function selectionStatePath(dataRoot) {
   return join(managedLayout(dataRoot).state, "selections.json");
 }
 
 function emptySelections() {
   return { schemaVersion: 1, sources: [] };
+}
+
+function hasOnlyKeys(value, keys) {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.keys(value).every((key) => keys.has(key));
 }
 
 export function readSelections(dataRoot) {
@@ -43,30 +72,43 @@ export function readSelections(dataRoot) {
     fail("Malformed PorcuPi Selection Intent");
   }
   if (
-    value.schemaVersion !== 1
+    !hasOnlyKeys(value, selectionRootFields)
+    || value.schemaVersion !== 1
     || !Array.isArray(value.sources)
     || value.sources.some((source) => (
-      typeof source?.locator !== "string"
+      !hasOnlyKeys(source, selectionSourceFields)
+      || typeof source.locator !== "string"
       || !isFullGitCommit(source.commit)
       || typeof source.packageSource !== "string"
       || !Array.isArray(source.artifacts)
       || source.artifacts.length === 0
-      || source.artifacts.some((artifact) => (
-        !Object.hasOwn(resourceKeys, artifact?.kind)
-        || typeof artifact.path !== "string"
-        || artifact.path.startsWith("/")
-        || artifact.path.includes("\\")
-        || /[\x00-\x1f\x7f]/.test(artifact.path)
-        || artifact.path.split("/").some((part) => part === "" || part === "." || part === "..")
-        || !installationScopes.has(artifact.scope)
-        || (artifact.scope === "global" && artifact.projectRoot !== undefined)
-        || (artifact.scope === "project" && (
-          typeof artifact.projectRoot !== "string"
-          || !isAbsolute(artifact.projectRoot)
-          || resolve(artifact.projectRoot) !== artifact.projectRoot
-          || /[\x00-\x1f\x7f]/.test(artifact.projectRoot)
-        ))
-      ))
+      || source.artifacts.some((artifact) => {
+        const invalidPath = typeof artifact?.path !== "string"
+          || artifact.path.startsWith("/")
+          || artifact.path.includes("\\")
+          || /[\x00-\x1f\x7f]/.test(artifact.path)
+          || artifact.path.split("/").some((part) => part === "" || part === "." || part === "..");
+        if (invalidPath) return true;
+        if (artifact.kind === "Patch") {
+          return !hasOnlyKeys(artifact, patchFields)
+            || !artifact.path.startsWith("patches/")
+            || !artifact.path.endsWith(".patch")
+            || !/^[a-f0-9]{64}$/.test(artifact.sha256 || "")
+            || artifact.scope !== undefined
+            || artifact.projectRoot !== undefined;
+        }
+        const resourceFields = artifact.scope === "project" ? projectResourceFields : globalResourceFields;
+        return !hasOnlyKeys(artifact, resourceFields)
+          || !Object.hasOwn(resourceKeys, artifact.kind)
+          || !installationScopes.has(artifact.scope)
+          || (artifact.scope === "global" && artifact.projectRoot !== undefined)
+          || (artifact.scope === "project" && (
+            typeof artifact.projectRoot !== "string"
+            || !isAbsolute(artifact.projectRoot)
+            || resolve(artifact.projectRoot) !== artifact.projectRoot
+            || /[\x00-\x1f\x7f]/.test(artifact.projectRoot)
+          ));
+      })
     ))
   ) {
     fail("Malformed PorcuPi Selection Intent");

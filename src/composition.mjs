@@ -29,6 +29,7 @@ import {
   sha256File,
   validateRequiredExecutable,
   verifyLauncher,
+  verifyOptionalPiLauncher,
 } from "./runtime.mjs";
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
@@ -293,6 +294,7 @@ export function verifyManagedInstallation({ dataRoot, environment = process.env 
   verifyHostNode();
   const active = readActiveComposition(dataRoot);
   verifyLauncher(active.paths, environment);
+  verifyOptionalPiLauncher(active.paths, environment);
   verifyCompositionContents(active.compositionRoot, active.receipt);
   const stageRoot = join(active.paths.temporary, `verify-${randomUUID()}`);
   mkdirSync(stageRoot, { mode: 0o700 });

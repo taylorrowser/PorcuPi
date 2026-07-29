@@ -37,7 +37,9 @@ import {
   removePreparedTree,
   verifyHostNode,
 } from "./composition.mjs";
+import { runGuidedTerminal } from "./guided-terminal.mjs";
 import { withLifecycleLock } from "./lifecycle.mjs";
+import { reconcilePiOwnershipLocked } from "./pi-ownership.mjs";
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 
@@ -85,55 +87,46 @@ function publishLauncher(path, cliPath) {
   }
 }
 
-async function confirmInstallation(lock, input, output) {
-  if (!input.isTTY || !output.isTTY || typeof input.setRawMode !== "function") {
-    fail("Guided installation requires an interactive terminal");
-  }
-  output.write("\x1b[?25l");
-  output.write("\nInstall PorcuPi\n\n");
-  output.write(`Pi Base: ${lock.tag} (${lock.commit})\n`);
-  output.write("Stock Pi: preserved\n");
-  output.write("Patches: none\n\n");
-  output.write("Enter  Install    Esc  Cancel\n");
-  input.setRawMode(true);
-  input.resume();
-  return await new Promise((resolvePromise, rejectPromise) => {
-    let restored = false;
-    const restore = () => {
-      if (restored) return;
-      restored = true;
-      input.off("data", onData);
-      input.off("error", onError);
-      process.off("SIGINT", onSigint);
-      process.off("SIGTERM", onSigterm);
-      input.setRawMode(false);
-      input.pause();
-      output.write("\x1b[?25h");
-    };
-    const onData = (data) => {
-      const byte = data[0];
-      if (byte === 0x0d || byte === 0x0a) {
-        restore();
-        resolvePromise(true);
-      } else if (byte === 0x1b || byte === 0x03) {
-        restore();
-        resolvePromise(false);
-      }
-    };
-    const onError = (error) => {
-      restore();
-      rejectPromise(error);
-    };
-    const onSignal = (signal) => {
-      restore();
-      process.kill(process.pid, signal);
-    };
-    const onSigint = () => onSignal("SIGINT");
-    const onSigterm = () => onSignal("SIGTERM");
-    input.on("data", onData);
-    input.once("error", onError);
-    process.once("SIGINT", onSigint);
-    process.once("SIGTERM", onSigterm);
+function confirmInstallation(lock, input, output) {
+  let page = 0;
+  let ownPi = false;
+  return runGuidedTerminal({
+    command: "PorcuPi installation",
+    input,
+    output,
+    createController: ({ finish }) => {
+      const render = () => {
+        output.write("\x1b[2J\x1b[H");
+        output.write(`Install PorcuPi — ${page + 1} of 3 — ${["Installation", "Command ownership", "Review"][page]}\n\n`);
+        if (page === 0) {
+          output.write(`Pi Base: ${lock.tag} (${lock.commit})\n`);
+          output.write("Stock Pi files: preserved\n");
+          output.write("Patches: none\n\n");
+          output.write("[Enter/→] Continue  [Esc] cancel\n");
+        } else if (page === 1) {
+          output.write("Should PorcuPi own the `pi` command? (default: No)\n\n");
+          output.write(`${ownPi ? "○" : "●"} No  — keep \`pi\` independently resolved\n`);
+          output.write(`${ownPi ? "●" : "○"} Yes — publish a reversible ~/.local/bin/pi alias\n\n`);
+          output.write("[↑/↓ y/n] choose  [Enter/→] Continue  [←] back  [Esc] cancel\n");
+        } else {
+          output.write(`Pi Base: ${lock.tag} (${lock.commit})\n`);
+          output.write(`Own \`pi\`: ${ownPi ? "Yes — reversible PorcuPi alias" : "No — independent resolution"}\n`);
+          output.write("Stock Pi files: preserved\n\n");
+          output.write("[Enter] Install  [←] back  [Esc] cancel\n");
+        }
+      };
+      const handleKeypress = (character, key) => {
+        if (key.name === "escape" || (key.ctrl && key.name === "c")) return finish(null);
+        if (key.name === "left" || key.name === "h") page = Math.max(0, page - 1);
+        else if (page === 0 && (key.name === "right" || key.name === "return" || key.name === "l")) page = 1;
+        else if (page === 1 && (key.name === "up" || key.name === "n" || character === "n")) ownPi = false;
+        else if (page === 1 && (key.name === "down" || key.name === "y" || character === "y")) ownPi = true;
+        else if (page === 1 && (key.name === "right" || key.name === "return" || key.name === "l")) page = 2;
+        else if (page === 2 && key.name === "return") return finish(ownPi);
+        render();
+      };
+      return { render, handleKeypress };
+    },
   });
 }
 
@@ -146,8 +139,8 @@ async function installManagedPiLocked({
   verifyHostNode();
   platformIdentity(platform, process.arch);
   const lock = loadBaseLock();
-  const confirmed = await confirmInstallation(lock, input, output);
-  if (!confirmed) {
+  const ownPi = await confirmInstallation(lock, input, output);
+  if (ownPi === null) {
     output.write("\nInstallation cancelled. No changes were made.\n");
     return { installed: false };
   }
@@ -187,6 +180,7 @@ async function installManagedPiLocked({
     if (!hasLauncher) publishLauncher(launcher, recoverable.installedCli);
     if (!hasLauncherReceipt) atomicWrite(paths.launcherReceipt, createLauncherReceipt(launcher));
     verifyLauncher(paths, environment);
+    reconcilePiOwnershipLocked(paths, ownPi, environment, output);
     output.write(`\nRecovered installed zero-Patch Managed Pi ${recoverable.active.receipt.piBase.tag}.\n`);
     output.write(`Command: ${launcher}\n`);
     output.write("Stock Pi and Pi user data were preserved.\n");
@@ -218,6 +212,7 @@ async function installManagedPiLocked({
     atomicWrite(paths.launcherReceipt, createLauncherReceipt(launcher));
     verifyLauncher(paths, environment);
     checkpoint("launcher-published");
+    reconcilePiOwnershipLocked(paths, ownPi, environment, output);
     removePreparedTree(temporaryRoot);
 
     output.write(`\nInstalled zero-Patch Managed Pi ${lock.tag}.\n`);
@@ -227,6 +222,9 @@ async function installManagedPiLocked({
     output.write("Stock Pi and Pi user data were preserved.\n");
     return { installed: true, launcher, compositionId: receipt.compositionId };
   } catch (error) {
+    if (initialized && pathExists(paths.activation)) {
+      reconcilePiOwnershipLocked(paths, false, environment, { write() {} });
+    }
     if (publishedLauncher) {
       try {
         const stat = lstatSync(launcher);

@@ -103,6 +103,8 @@ export function managedLayout(dataRoot) {
     state: join(root, "state"),
     activation: join(root, "state", "activation.json"),
     launcherReceipt: join(root, "state", "launcher.json"),
+    piLauncherReceipt: join(root, "state", "pi-launcher.json"),
+    piTransition: join(root, "state", "pi-transition.json"),
   };
 }
 
@@ -525,12 +527,17 @@ export function shellLauncherContents(cliPath) {
   return `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(cliPath)} "$@"\n`;
 }
 
-export function createLauncherReceipt(path) {
+export function shellPiLauncherContents(porcupiPath) {
+  const quote = (value) => `'${value.replaceAll("'", `'"'"'`)}'`;
+  return `#!/bin/sh\nexec ${quote(porcupiPath)} "$@"\n`;
+}
+
+export function createLauncherReceipt(path, type = "porcupi-launcher") {
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink()) fail("PorcuPi launcher is not a regular owned file");
   return {
     schemaVersion: 1,
-    type: "porcupi-launcher",
+    type,
     path,
     kind: "file",
     mode: stat.mode & 0o777,
@@ -539,14 +546,12 @@ export function createLauncherReceipt(path) {
   };
 }
 
-export function verifyLauncher(paths, environment = process.env) {
-  const expectedPath = join(defaultBinDirectory(environment), "porcupi");
-  const receipt = readJson(paths.launcherReceipt, "PorcuPi launcher receipt");
+export function validateLauncherReceipt(receipt, { type, path, label }) {
   if (
     !exactObject(receipt, launcherReceiptFields)
     || receipt.schemaVersion !== 1
-    || receipt.type !== "porcupi-launcher"
-    || receipt.path !== expectedPath
+    || receipt.type !== type
+    || receipt.path !== path
     || !validText(receipt.path)
     || resolve(receipt.path) !== receipt.path
     || receipt.kind !== "file"
@@ -556,22 +561,66 @@ export function verifyLauncher(paths, environment = process.env) {
     || !Number.isSafeInteger(receipt.size)
     || receipt.size < 0
     || !/^[a-f0-9]{64}$/.test(receipt.sha256 || "")
-  ) fail("Malformed PorcuPi launcher receipt");
+  ) fail(`Malformed ${label}`);
+  return receipt;
+}
+
+export function verifyLauncherReceipt(receipt, expectedContents, label) {
   let stat;
   try {
-    stat = lstatSync(expectedPath);
+    stat = lstatSync(receipt.path);
   } catch {
-    fail(`PorcuPi launcher is missing: ${expectedPath}`);
+    fail(`${label} is missing: ${receipt.path}`);
   }
   if (
     !stat.isFile()
     || stat.isSymbolicLink()
     || (stat.mode & 0o777) !== receipt.mode
     || stat.size !== receipt.size
-    || sha256File(expectedPath) !== receipt.sha256
-    || readFileSync(expectedPath, "utf8") !== shellLauncherContents(join(paths.runtime, "cli.mjs"))
-  ) fail(`PorcuPi launcher does not match its ownership receipt: ${expectedPath}`);
+    || sha256File(receipt.path) !== receipt.sha256
+    || readFileSync(receipt.path, "utf8") !== expectedContents
+  ) fail(`${label} does not match its ownership receipt: ${receipt.path}`);
   return receipt;
+}
+
+export function verifyLauncher(paths, environment = process.env) {
+  const expectedPath = join(defaultBinDirectory(environment), "porcupi");
+  const receipt = validateLauncherReceipt(readJson(paths.launcherReceipt, "PorcuPi launcher receipt"), {
+    type: "porcupi-launcher",
+    path: expectedPath,
+    label: "PorcuPi launcher receipt",
+  });
+  return verifyLauncherReceipt(receipt, shellLauncherContents(join(paths.runtime, "cli.mjs")), "PorcuPi launcher");
+}
+
+export function verifyPiLauncher(paths, environment = process.env) {
+  const binDirectory = defaultBinDirectory(environment);
+  const expectedPath = join(binDirectory, "pi");
+  const receipt = validateLauncherReceipt(readJson(paths.piLauncherReceipt, "PorcuPi pi launcher receipt"), {
+    type: "porcupi-pi-launcher",
+    path: expectedPath,
+    label: "PorcuPi pi launcher receipt",
+  });
+  return verifyLauncherReceipt(
+    receipt,
+    shellPiLauncherContents(join(binDirectory, "porcupi")),
+    "PorcuPi-owned pi launcher",
+  );
+}
+
+function pathIsPresent(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+export function verifyOptionalPiLauncher(paths, environment = process.env) {
+  if (pathIsPresent(paths.piTransition)) fail("PorcuPi pi ownership transition requires recovery");
+  return pathIsPresent(paths.piLauncherReceipt) ? verifyPiLauncher(paths, environment) : null;
 }
 
 function readActivatedComposition(paths, activation) {

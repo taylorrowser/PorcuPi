@@ -79,6 +79,7 @@ function createPiBase(root, { version = "0.81.1", buildFails = false } = {}) {
       },
     }, null, 2)}\n`,
   );
+  writeFileSync(join(source, "series.txt"), "base\n");
   writeFileSync(join(source, "scripts", "check-model-data.mjs"), "console.log('fixture pinned model data is valid');\n");
   writeFileSync(join(source, "scripts", "fail-build.mjs"), "console.error('fixture build failed'); process.exit(23);\n");
   writeFileSync(
@@ -268,6 +269,53 @@ function createPatchRepository(root) {
   const gitlinkCommit = git(source, "rev-parse", "HEAD");
   git(source, "update-index", "--add", "--cacheinfo", `160000,${gitlinkCommit},patches/submodule`);
   git(source, "commit", "-m", "Add rejected submodule");
+  return { source, commit: git(source, "rev-parse", "HEAD") };
+}
+
+function textPatch(path, from, to) {
+  return `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-${from}\n+${to}\n`;
+}
+
+function newFilePatch(path, contents) {
+  return `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1 @@\n+${contents}\n`;
+}
+
+function escapingSymlinkPatch(path) {
+  return `diff --git a/${path} b/${path}\nnew file mode 120000\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1 @@\n+../../outside\n\\ No newline at end of file\n`;
+}
+
+function patchFromBase(source, path, transform) {
+  const absolute = join(source, path);
+  const original = readFileSync(absolute, "utf8");
+  writeFileSync(absolute, transform(original));
+  const contents = `${git(source, "diff", "--", path)}\n`;
+  writeFileSync(absolute, original);
+  assert.equal(git(source, "status", "--porcelain"), "");
+  return contents;
+}
+
+function buildCommandPatch(source, command) {
+  return patchFromBase(source, "package.json", (contents) => {
+    const manifest = JSON.parse(contents);
+    manifest.scripts["build:offline"] = command;
+    return `${JSON.stringify(manifest, null, 2)}\n`;
+  });
+}
+
+function createApplicablePatchRepository(root, patches = [
+  ["patches/0002-first.patch", textPatch("series.txt", "base", "first")],
+  ["patches/nested/0001-second.patch", textPatch("series.txt", "first", "second")],
+]) {
+  const source = join(root, "applicable-patch-source");
+  for (const [path, contents] of patches) {
+    mkdirSync(dirname(join(source, path)), { recursive: true });
+    writeFileSync(join(source, path), contents);
+  }
+  git(source, "init", "--initial-branch=main");
+  git(source, "config", "user.name", "PorcuPi Test");
+  git(source, "config", "user.email", "porcupi@example.test");
+  git(source, "add", ".");
+  git(source, "commit", "-m", "Applicable Patch fixture");
   return { source, commit: git(source, "rev-parse", "HEAD") };
 }
 
@@ -658,6 +706,293 @@ test("porcupi add discovers only exact regular nested Patches and leaves them pe
       { kind: "Patch", path: "patches/nested/beta.patch", sha256: "fa01de4182e25ce6287e9f1bfda7196c0f36438b19b244c3938497a8f970bf03" },
     ],
   }]);
+});
+
+test("porcupi apply builds and atomically activates the exact ordered Patch series", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createApplicablePatchRepository(root);
+  const locator = await serveGitRepository(root, repository);
+  assert.equal(runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d").status, 0);
+  const secondRoot = join(root, "second-source");
+  const secondRepository = createApplicablePatchRepository(secondRoot, [[
+    "patches/independent.patch",
+    newFilePatch("second-source.txt", "second source"),
+  ]]);
+  const secondServer = join(root, "second-server");
+  mkdirSync(secondServer);
+  const secondLocator = await serveGitRepository(secondServer, secondRepository);
+  assert.equal(runPorcuPi(home, ["add", `${secondLocator}@main`], "616e6e0d").status, 0);
+  const rootPath = dataRoot(home);
+  const activationPath = join(rootPath, "state", "activation.json");
+  const activationBefore = JSON.parse(readFileSync(activationPath, "utf8"));
+  const selectionsBefore = readFileSync(join(rootPath, "state", "selections.json"));
+
+  const cancelled = runPorcuPi(home, ["apply"], "1b", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+  assert.match(cancelled.stdout, /Apply cancelled/);
+  assert.match(cancelled.stdout, /\x1b\[\?25h/);
+  assert.deepEqual(JSON.parse(readFileSync(activationPath, "utf8")), activationBefore);
+
+  const apply = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+
+  assert.equal(apply.status, 0, apply.stderr || apply.stdout);
+  assert.match(apply.stdout, /Apply selected Patches/);
+  const canonicalLocator = `127.0.0.1:${new URL(locator).port}/owner/resources`;
+  const canonicalSecondLocator = `127.0.0.1:${new URL(secondLocator).port}/owner/resources`;
+  const expectedOrder = [
+    `${canonicalLocator} · patches/0002-first.patch`,
+    `${canonicalLocator} · patches/nested/0001-second.patch`,
+    `${canonicalSecondLocator} · patches/independent.patch`,
+  ].sort();
+  for (let index = 1; index < expectedOrder.length; index += 1) {
+    assert.ok(apply.stdout.indexOf(expectedOrder[index - 1]) < apply.stdout.indexOf(expectedOrder[index]));
+  }
+  assert.match(apply.stdout, /git apply --check --whitespace=error-all/);
+  assert.match(apply.stdout, /Activated Managed Pi Composition/);
+  assert.match(apply.stdout, /Patch Selection Intent matches the active Managed Pi Composition/);
+  assert.deepEqual(readFileSync(join(rootPath, "state", "selections.json")), selectionsBefore);
+
+  const activation = JSON.parse(readFileSync(activationPath, "utf8"));
+  assert.deepEqual(activation.previous, activationBefore.active);
+  assert.equal(activation.active.patches.length, 3);
+  const receiptPath = join(rootPath, "receipts", `${activation.active.compositionId}.json`);
+  const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+  assert.deepEqual(receipt.patches, activation.active.patches);
+  assert.equal(receipt.porcupiVersion, "0.1.0");
+  assert.equal(receipt.piBase.commit, base.commit);
+  assert.equal(receipt.recipe.id, "pi-v0.81.1-composition-v1");
+  assert.equal(receipt.platform, `${process.platform}-${process.arch}`);
+  assert.equal(receipt.requiredExecutable.path, "packages/coding-agent/dist/cli.js");
+  assert.ok(receipt.payload.every((entry) => typeof entry.path === "string"
+    && new Set(["file", "symlink"]).has(entry.kind)
+    && Number.isInteger(entry.mode)
+    && Number.isInteger(entry.size)
+    && /^[a-f0-9]{64}$/.test(entry.sha256)));
+  assert.equal(readFileSync(join(rootPath, "compositions", activation.active.compositionId, "payload", "series.txt"), "utf8"), "second\n");
+  assert.equal(readFileSync(join(rootPath, "compositions", activation.active.compositionId, "payload", "second-source.txt"), "utf8"), "second source\n");
+  assert.equal(lstatSync(join(rootPath, "compositions", activation.active.compositionId)).mode & 0o777, 0o555);
+  assert.equal(lstatSync(join(rootPath, "compositions", activation.active.compositionId, "payload", "series.txt")).mode & 0o777, 0o444);
+  assert.equal(lstatSync(join(rootPath, "compositions", activation.active.compositionId, "payload", "packages", "coding-agent", "dist", "cli.js")).mode & 0o777, 0o555);
+  assert.deepEqual(
+    readFileSync(receiptPath),
+    readFileSync(join(rootPath, "compositions", activation.active.compositionId, "receipt.json")),
+  );
+
+  const remove = runPorcuPi(home, ["manage"], "206a206a206e6e0d", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+  assert.equal(remove.status, 0, remove.stderr || remove.stdout);
+  const zero = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(zero.status, 0, zero.stderr || zero.stdout);
+  assert.match(zero.stdout, /zero Patches/);
+  const zeroActivation = JSON.parse(readFileSync(activationPath, "utf8"));
+  assert.deepEqual(zeroActivation.active, activationBefore.active);
+  assert.deepEqual(zeroActivation.previous, activation.active);
+  assert.equal(readFileSync(join(rootPath, "compositions", zeroActivation.active.compositionId, "payload", "series.txt"), "utf8"), "base\n");
+
+  const beforeNoOp = readFileSync(activationPath);
+  const noOp = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(noOp.status, 0, noOp.stderr || noOp.stdout);
+  assert.match(noOp.stdout, /no rebuild was needed/);
+  assert.doesNotMatch(noOp.stdout, /npm ci|git clone/);
+  assert.deepEqual(readFileSync(activationPath), beforeNoOp);
+
+  const activeSeries = join(rootPath, "compositions", zeroActivation.active.compositionId, "payload", "series.txt");
+  chmodSync(activeSeries, 0o644);
+  writeFileSync(activeSeries, "corrupt\n");
+  const corruptNoOp = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.notEqual(corruptNoOp.status, 0);
+  assert.match(corruptNoOp.stdout, /payload inventory mismatch/);
+  assert.doesNotMatch(corruptNoOp.stdout, /npm ci|git clone/);
+  assert.deepEqual(readFileSync(activationPath), beforeNoOp);
+});
+
+test("porcupi apply rejects digest drift and sequential preflight failure without publishing or activating", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createApplicablePatchRepository(root, [
+    ["patches/0001-valid.patch", textPatch("series.txt", "base", "first")],
+    ["patches/0002-invalid.patch", textPatch("series.txt", "missing", "second")],
+  ]);
+  const locator = await serveGitRepository(root, repository);
+  assert.equal(runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d").status, 0);
+  const rootPath = dataRoot(home);
+  const activationPath = join(rootPath, "state", "activation.json");
+  const selectionsPath = join(rootPath, "state", "selections.json");
+  const activationBefore = readFileSync(activationPath);
+  const compositionsBefore = readdirSync(join(rootPath, "compositions")).sort();
+  const receiptsBefore = readdirSync(join(rootPath, "receipts")).sort();
+  const selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
+  const originalCommit = selections.sources[0].commit;
+  const originalPackageSource = selections.sources[0].packageSource;
+  const missingCommit = "f".repeat(40);
+  selections.sources[0].commit = missingCommit;
+  selections.sources[0].packageSource = originalPackageSource.replace(`@${originalCommit}`, `@${missingCommit}`);
+  writeFileSync(selectionsPath, `${JSON.stringify(selections, null, 2)}\n`);
+  const missingSource = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.notEqual(missingSource.status, 0);
+  assert.match(missingSource.stdout, /Git could not resolve the requested Source Repository/);
+  assert.doesNotMatch(missingSource.stdout, /git apply --check|npm ci/);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+
+  selections.sources[0].commit = originalCommit;
+  selections.sources[0].packageSource = originalPackageSource;
+  const originalDigest = selections.sources[0].artifacts[0].sha256;
+  selections.sources[0].artifacts[0].sha256 = "0".repeat(64);
+  writeFileSync(selectionsPath, `${JSON.stringify(selections, null, 2)}\n`);
+
+  const mismatch = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.notEqual(mismatch.status, 0);
+  assert.match(mismatch.stdout, /Selected Patch digest mismatch/);
+  assert.doesNotMatch(mismatch.stdout, /git apply --check|npm ci/);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+
+  selections.sources[0].artifacts[0].sha256 = originalDigest;
+  writeFileSync(selectionsPath, `${JSON.stringify(selections, null, 2)}\n`);
+  const preflight = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.notEqual(preflight.status, 0);
+  assert.match(preflight.stdout, /git apply --check --whitespace=error-all/);
+  assert.doesNotMatch(preflight.stdout, /npm ci/);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+  assert.deepEqual(readdirSync(join(rootPath, "compositions")).sort(), compositionsBefore);
+  assert.deepEqual(readdirSync(join(rootPath, "receipts")).sort(), receiptsBefore);
+  assert.deepEqual(readdirSync(join(rootPath, "tmp")).filter((name) => name.startsWith("apply-")), []);
+});
+
+test("post-preflight recipe and receipt failures leave activation and publication unchanged", async () => {
+  const root = temporaryRoot();
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  const scenarios = [
+    {
+      name: "install",
+      expected: /npm.*exited with status/,
+      patch: patchFromBase(base.source, "package-lock.json", () => "{\n"),
+    },
+    {
+      name: "build",
+      expected: /fixture build failed|npm exited with status 23/,
+      patch: buildCommandPatch(base.source, "node scripts/fail-build.mjs"),
+    },
+    {
+      name: "conformance",
+      expected: /node exited with status 41/,
+      patch: buildCommandPatch(base.source, `node scripts/build.mjs && node -e "require('node:fs').appendFileSync('packages/coding-agent/dist/cli.js', '\\nif (process.argv[2] === \\\"--help\\\") process.exit(41);\\n')"`),
+    },
+    {
+      name: "smoke",
+      expected: /node exited with status 42/,
+      patch: buildCommandPatch(base.source, `node scripts/build.mjs && node -e "require('node:fs').appendFileSync('packages/coding-agent/dist/cli.js', '\\nif (process.argv[2] === \\\"--list-models\\\") process.exit(42);\\n')"`),
+    },
+    {
+      name: "receipt",
+      expected: /Payload symbolic link escapes the Managed Pi Composition/,
+      patch: escapingSymlinkPatch("packages/escape"),
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const scenarioRoot = join(root, scenario.name);
+    const home = join(scenarioRoot, "home");
+    mkdirSync(home, { recursive: true });
+    assert.equal(runInstaller(release, home).status, 0);
+    const repository = createApplicablePatchRepository(join(scenarioRoot, "source"), [["patches/failure.patch", scenario.patch]]);
+    const serverRoot = join(scenarioRoot, "server");
+    mkdirSync(serverRoot);
+    const locator = await serveGitRepository(serverRoot, repository);
+    assert.equal(runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d").status, 0);
+    const rootPath = dataRoot(home);
+    const activationPath = join(rootPath, "state", "activation.json");
+    const activationBefore = readFileSync(activationPath);
+    const compositionsBefore = readdirSync(join(rootPath, "compositions")).sort();
+    const receiptsBefore = readdirSync(join(rootPath, "receipts")).sort();
+
+    const apply = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+
+    assert.notEqual(apply.status, 0, `${scenario.name} unexpectedly succeeded`);
+    assert.match(apply.stdout, scenario.expected);
+    assert.deepEqual(readFileSync(activationPath), activationBefore);
+    assert.deepEqual(readdirSync(join(rootPath, "compositions")).sort(), compositionsBefore);
+    assert.deepEqual(readdirSync(join(rootPath, "receipts")).sort(), receiptsBefore);
+    assert.deepEqual(readdirSync(join(rootPath, "tmp")).filter((name) => name.startsWith("apply-")), []);
+  }
+});
+
+test("interrupted Patch publication and activation expose only complete old or new state and recover", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createApplicablePatchRepository(root);
+  const locator = await serveGitRepository(root, repository);
+  assert.equal(runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d").status, 0);
+  const rootPath = dataRoot(home);
+  const activationPath = join(rootPath, "state", "activation.json");
+  const oldActivation = JSON.parse(readFileSync(activationPath, "utf8"));
+
+  const published = runPorcuPi(home, ["apply"], "0d", {
+    PTY_WAIT_FOR: "Apply selected Patches",
+    PORCUPI_TEST_FAULT: "apply-composition-published",
+  });
+  assert.equal(published.signal, "SIGKILL");
+  assert.deepEqual(JSON.parse(readFileSync(activationPath, "utf8")), oldActivation);
+  const publishedIds = readdirSync(join(rootPath, "receipts")).map((name) => name.replace(/\.json$/, ""));
+  assert.equal(publishedIds.length, 2);
+  const candidateId = publishedIds.find((id) => id !== oldActivation.active.compositionId);
+  assert.deepEqual(
+    readFileSync(join(rootPath, "receipts", `${candidateId}.json`)),
+    readFileSync(join(rootPath, "compositions", candidateId, "receipt.json")),
+  );
+  assert.equal(readFileSync(join(rootPath, "compositions", candidateId, "payload", "series.txt"), "utf8"), "second\n");
+  const centralPath = join(rootPath, "receipts", `${candidateId}.json`);
+  const centralBefore = readFileSync(centralPath);
+  writeFileSync(centralPath, "{}\n");
+  const collision = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.notEqual(collision.status, 0);
+  assert.match(collision.stdout, /central receipt collision/);
+  assert.deepEqual(JSON.parse(readFileSync(activationPath, "utf8")), oldActivation);
+  writeFileSync(centralPath, centralBefore);
+  const activationFailure = runPorcuPi(home, ["apply"], "0d", {
+    PTY_WAIT_FOR: "Apply selected Patches",
+    PORCUPI_TEST_FAILURE: "apply-activation-write",
+  });
+  assert.notEqual(activationFailure.status, 0);
+  assert.match(activationFailure.stdout, /Injected failure at apply-activation-write/);
+  assert.deepEqual(JSON.parse(readFileSync(activationPath, "utf8")), oldActivation);
+
+  const retry = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(retry.status, 0, retry.stderr || retry.stdout);
+  let activation = JSON.parse(readFileSync(activationPath, "utf8"));
+  assert.equal(activation.active.compositionId, candidateId);
+  assert.deepEqual(activation.previous, oldActivation.active);
+  assert.deepEqual(readdirSync(join(rootPath, "tmp")).filter((name) => name.startsWith("apply-")), []);
+
+  const remove = runPorcuPi(home, ["manage"], "206a206e6e0d", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+  assert.equal(remove.status, 0, remove.stderr || remove.stdout);
+  const activated = runPorcuPi(home, ["apply"], "0d", {
+    PTY_WAIT_FOR: "Apply selected Patches",
+    PORCUPI_TEST_FAULT: "apply-activation-written",
+  });
+  assert.equal(activated.signal, "SIGKILL");
+  activation = JSON.parse(readFileSync(activationPath, "utf8"));
+  assert.deepEqual(activation.active, oldActivation.active);
+  assert.equal(activation.previous.compositionId, candidateId);
+  assert.equal(readdirSync(join(rootPath, "tmp")).filter((name) => name.startsWith("apply-")).length, 1);
+
+  const converge = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(converge.status, 0, converge.stderr || converge.stdout);
+  assert.match(converge.stdout, /no rebuild was needed/);
+  assert.deepEqual(JSON.parse(readFileSync(activationPath, "utf8")), activation);
+  assert.deepEqual(readdirSync(join(rootPath, "tmp")).filter((name) => name.startsWith("apply-")), []);
 });
 
 test("porcupi manage removes Patch intent without giving Patches an Installation Scope", async () => {

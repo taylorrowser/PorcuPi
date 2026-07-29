@@ -2,6 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { addResources } from "./add.mjs";
+import { applyPatches } from "./apply.mjs";
 import { defaultDataRoot, fail, readActiveComposition } from "./runtime.mjs";
 import { manageResources } from "./manage.mjs";
 
@@ -30,6 +31,9 @@ try {
   } else if (args[0] === "manage") {
     if (args.length !== 1) fail("Usage: porcupi manage");
     await manageResources();
+  } else if (args[0] === "apply") {
+    if (args.length !== 1) fail("Usage: porcupi apply");
+    await applyPatches();
   } else {
     await launch(args);
   }

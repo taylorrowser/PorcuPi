@@ -146,9 +146,9 @@ function resolveRequestedCommit(checkout, requestedRef) {
   return peelCommit(checkout, matches[0]);
 }
 
-export function resolveSourceRepository(requested) {
+export function resolveSourceRepository(requested, { temporaryParent = tmpdir() } = {}) {
   const parsed = parseRequestedGitSource(requested);
-  const temporaryRoot = mkdtempSync(join(tmpdir(), "porcupi-source-"));
+  const temporaryRoot = mkdtempSync(join(temporaryParent, "porcupi-source-"));
   const checkout = join(temporaryRoot, "checkout");
   try {
     process.stdout.write(`Resolving Source Repository ${parsed.locator}...\n`);

@@ -19,11 +19,13 @@ import {
   verifyPublishedComposition,
 } from "./composition.mjs";
 import { runGuidedTerminal, truncateForTerminal, windowAround } from "./guided-terminal.mjs";
+import { cleanupRetainedCompositions, withLifecycleLock } from "./lifecycle.mjs";
 import { patchPendingMessage, patchSelectionSnapshot, readSelections } from "./resource-intent.mjs";
 import {
   atomicWrite,
   canonicalJson,
   defaultDataRoot,
+  ensureCompositionLeaseDirectory,
   fail,
   managedLayout,
   platformIdentity,
@@ -142,7 +144,7 @@ function receiptMatchesApply(receipt, lock, patches) {
     && canonicalJson(receipt.patches) === canonicalJson(patches);
 }
 
-export async function applyPatches({
+async function applyPatchesLocked({
   input = process.stdin,
   output = process.stdout,
   environment = process.env,
@@ -150,8 +152,9 @@ export async function applyPatches({
 } = {}) {
   verifyHostNode();
   const paths = managedLayout(dataRoot);
-  recoverApplyStages(paths);
   const active = readActiveComposition(dataRoot);
+  cleanupRetainedCompositions(paths, active.activation, output);
+  recoverApplyStages(paths);
   const lock = loadBaseLock();
   if (canonicalJson(active.receipt.piBase) !== canonicalJson(lock)) fail("Active Managed Pi uses a different Pi Base than this PorcuPi release");
   const selections = readSelections(dataRoot);
@@ -179,15 +182,18 @@ export async function applyPatches({
     mkdirSync(candidateRoot, { mode: 0o700 });
     const receipt = buildComposition({ candidateRoot, stageRoot, patches: stagedPatches, lock });
     publishComposition(paths, candidateRoot, receipt);
+    ensureCompositionLeaseDirectory(paths, receipt.compositionId);
     checkpoint("apply-composition-published");
     failAtCheckpoint("apply-activation-write");
-    atomicWrite(paths.activation, {
+    const activation = {
       schemaVersion: 1,
       active: { compositionId: receipt.compositionId, patches: receipt.patches },
       previous: active.activation.active,
-    });
+    };
+    atomicWrite(paths.activation, activation);
     checkpoint("apply-activation-written");
     removePreparedTree(stageRoot);
+    cleanupRetainedCompositions(paths, activation, output);
     output.write(`\nActivated Managed Pi Composition ${receipt.compositionId}.\n`);
     output.write(`Retained previous Managed Pi Composition ${active.activation.active.compositionId}.\n`);
     output.write(patchPendingMessage(false));
@@ -196,4 +202,10 @@ export async function applyPatches({
     removePreparedTree(stageRoot);
     throw error;
   }
+}
+
+export async function applyPatches(options = {}) {
+  const environment = options.environment ?? process.env;
+  const dataRoot = options.dataRoot ?? defaultDataRoot(environment);
+  return withLifecycleLock(dataRoot, "apply", () => applyPatchesLocked({ ...options, environment, dataRoot }));
 }

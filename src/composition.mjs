@@ -267,7 +267,7 @@ export function buildComposition({ candidateRoot, stageRoot, patches, lock }) {
   return receipt;
 }
 
-function verifyCompositionContents(compositionRoot, receipt) {
+export function verifyCompositionContents(compositionRoot, receipt) {
   const stat = lstatSync(compositionRoot);
   if (!stat.isDirectory() || stat.isSymbolicLink()) fail("Managed Pi Composition root is malformed");
   const payloadRoot = join(compositionRoot, "payload");

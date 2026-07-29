@@ -2,7 +2,7 @@
 
 PorcuPi adds individual resource selection to Pi's Git package lifecycle and builds an isolated Managed Pi from explicitly selected source patches, without modifying Stock Pi.
 
-PorcuPi v1 targets macOS and Linux. The current implementation installs and launches a release-pinned Managed Pi, manages individually selected Pi resources and Patches from exact Git commits, and atomically applies pending Patch intent as immutable compositions.
+PorcuPi v1 targets macOS and Linux. The current implementation installs and launches a release-pinned Managed Pi, manages individually selected Pi resources and Patches from exact Git commits, atomically applies pending Patch intent as immutable compositions, and retains one verified local Composition for rollback.
 
 ## Install the zero-Patch Managed Pi
 
@@ -76,6 +76,20 @@ A successful candidate receives matching embedded and central receipts binding t
 
 Git content and fixed build commands run with your user authority. Exact commits, SHA-256 values, and receipts support reproducibility and local integrity checks; they do not authenticate a publisher or provide a sandbox. Use an OS, VM, or container boundary when isolation is required.
 
+## Roll back locally
+
+Run the guided rollback flow to inspect the active and optional previous Managed Pi Composition:
+
+```sh
+porcupi rollback
+```
+
+When a previous Composition exists, rollback requires Enter or Space confirmation, fully verifies its matching receipts and complete payload inventory, and atomically swaps active and previous. Escape or Ctrl-C cancels. With no retained target, the flow reports that nothing can be changed. Rollback performs no fetch or build and leaves Pi resource and Patch Selection Intent unchanged; if Patch intent is pending afterward, a later `porcupi apply` can restore it.
+
+Install, apply, rollback, future command-ownership changes, cleanup, and uninstall share one lifecycle lock. Ordinary Managed Pi launches continue without taking that lock. Each launch claims an owner-marked Composition lease before resolving its payload and retains the lease for the child Pi process lifetime.
+
+After activation changes, PorcuPi retains only active and previous. Older receipt-proven Compositions are removed only after their complete payloads are verified and no process lease is live. Live deletion is deferred and converges during a later lifecycle operation. Modified, malformed, symbolic, foreign, or otherwise unproven paths are reported and left untouched. Interrupted cleanup resumes only from an owner-marked, receipt-bound stage.
+
 ## Verify Managed Pi integrity
 
 Every normal Managed Pi launch performs cheap fail-closed checks of PorcuPi ownership and Activation state, matching Composition receipts and identity, platform and owned paths, the committed Patch snapshot, the required executable's exact identity, and the stable launcher's ownership receipt. It does not hash every payload file and is not a complete audit.
@@ -100,6 +114,6 @@ Run the external-process acceptance suite with one command:
 npm test
 ```
 
-The tests drive the guided installer and public `porcupi add`, `porcupi manage`, `porcupi apply`, launch, and `porcupi verify` commands as external processes through pseudo-terminals and isolated homes/projects, using deterministic local Git Pi Base, mixed resource/Patch Source Repository, metadata, project-trust, integrity-corruption, composition, interruption, and Pi package-lifecycle fixtures.
+The tests drive the guided installer and public `porcupi add`, `porcupi manage`, `porcupi apply`, `porcupi rollback`, launch, and `porcupi verify` commands as external processes through pseudo-terminals and isolated homes/projects, using deterministic local Git Pi Base, mixed resource/Patch Source Repository, metadata, project-trust, integrity-corruption, composition, lifecycle-lock, process-lease, cleanup, interruption, and Pi package-lifecycle fixtures.
 
 The build specification and remaining tracer bullets are tracked in [PorcuPi v1 issue #12](https://github.com/taylorrowser/PorcuPi/issues/12).

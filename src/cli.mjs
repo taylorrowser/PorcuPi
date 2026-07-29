@@ -4,26 +4,31 @@ import { spawn } from "node:child_process";
 import { addResources } from "./add.mjs";
 import { applyPatches } from "./apply.mjs";
 import { verifyManagedInstallation } from "./composition.mjs";
-import { defaultDataRoot, fail, readActiveComposition, verifyLauncher } from "./runtime.mjs";
+import { rollbackComposition } from "./rollback.mjs";
+import { defaultDataRoot, fail, readLeasedActiveComposition, verifyLauncher } from "./runtime.mjs";
 import { manageResources } from "./manage.mjs";
 
 async function launch(args) {
-  const active = readActiveComposition(defaultDataRoot());
-  verifyLauncher(active.paths);
-  const { executable } = active;
-  const child = spawn(process.execPath, [executable, ...args], {
-    stdio: "inherit",
-    env: process.env,
-  });
-  const result = await new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code, signal) => resolve({ code, signal }));
-  });
-  if (result.signal) {
-    process.kill(process.pid, result.signal);
-    return;
+  const active = readLeasedActiveComposition(defaultDataRoot());
+  try {
+    verifyLauncher(active.paths);
+    const { executable } = active;
+    const child = spawn(process.execPath, [executable, ...args], {
+      stdio: "inherit",
+      env: process.env,
+    });
+    const result = await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", (code, signal) => resolve({ code, signal }));
+    });
+    if (result.signal) {
+      process.kill(process.pid, result.signal);
+      return;
+    }
+    process.exitCode = result.code ?? 1;
+  } finally {
+    active.lease.release();
   }
-  process.exitCode = result.code ?? 1;
 }
 
 let launching = false;
@@ -38,6 +43,9 @@ try {
   } else if (args[0] === "apply") {
     if (args.length !== 1) fail("Usage: porcupi apply");
     await applyPatches();
+  } else if (args[0] === "rollback") {
+    if (args.length !== 1) fail("Usage: porcupi rollback");
+    await rollbackComposition();
   } else if (args[0] === "verify") {
     if (args.length !== 1) fail("Usage: porcupi verify");
     const receipt = verifyManagedInstallation();

@@ -18,6 +18,7 @@ import {
   createLauncherReceipt,
   defaultBinDirectory,
   defaultDataRoot,
+  ensureCompositionLeaseDirectory,
   fail,
   managedLayout,
   managedRootOwner,
@@ -36,6 +37,7 @@ import {
   removePreparedTree,
   verifyHostNode,
 } from "./composition.mjs";
+import { withLifecycleLock } from "./lifecycle.mjs";
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 
@@ -48,7 +50,7 @@ function initializeFreshRoot(paths) {
   }
   mkdirSync(paths.root, { recursive: true, mode: 0o700 });
   atomicWrite(paths.owner, managedRootOwner);
-  for (const path of [paths.temporary, paths.compositions, paths.receipts, paths.state]) {
+  for (const path of [paths.temporary, paths.compositions, paths.receipts, paths.leases, paths.state]) {
     mkdirSync(path, { recursive: true, mode: 0o700 });
   }
 }
@@ -135,7 +137,7 @@ async function confirmInstallation(lock, input, output) {
   });
 }
 
-export async function installManagedPi({
+async function installManagedPiLocked({
   input = process.stdin,
   output = process.stdout,
   environment = process.env,
@@ -202,6 +204,7 @@ export async function installManagedPi({
 
     const receipt = buildComposition({ candidateRoot: stagedComposition, stageRoot: temporaryRoot, patches: [], lock });
     publishComposition(paths, stagedComposition, receipt);
+    ensureCompositionLeaseDirectory(paths, receipt.compositionId);
     checkpoint("composition-published");
     publishRuntime(paths, temporaryRoot);
     atomicWrite(paths.activation, {
@@ -239,4 +242,11 @@ export async function installManagedPi({
     if (initialized) removePreparedTree(paths.root);
     throw error;
   }
+}
+
+export async function installManagedPi(options = {}) {
+  const environment = options.environment ?? process.env;
+  const platform = options.platform ?? process.platform;
+  const dataRoot = defaultDataRoot(environment, platform);
+  return withLifecycleLock(dataRoot, "install", () => installManagedPiLocked({ ...options, environment, platform }));
 }

@@ -12,15 +12,16 @@ Using current remote catalogs would make identical exact source inputs build dif
 
 ## Decision
 
-PorcuPi vendors the model-data snapshot from the official `@earendil-works/pi-ai@0.81.1` npm package as private Pi Base recipe data. The Pi Base lock records that package's exact version and npm integrity plus the generated model-data manifest's SHA-256. Installation verifies the manifest, every declared regular data file, and the complete file set before copying the snapshot into the exact checkout.
+PorcuPi vendors the model-data snapshot from the official `@earendil-works/pi-ai@0.81.1` npm package as private Pi Base recipe data. The Pi Base lock records that package's exact version and npm integrity plus the generated model-data manifest's SHA-256. Installation verifies the manifest, every declared regular data file, and the complete file set before hydration. The fixed PorcuPi recipe then parses the candidate's generated structural provider catalogs, selects only those exact provider/model identities from the verified snapshot, rejects every missing or API-incompatible identity, and writes a new deterministic manifest. Extra historical snapshot entries are excluded rather than fetched or silently added to the candidate structure. This fixed projection is necessary when selected Patches explicitly remove retired model identities; Patches cannot replace the projection algorithm or supply model bytes.
 
-After that deterministic hydration step, PorcuPi runs the Pi Base's local `check:model-data` command. This validates the snapshot against the source's structural catalog and pinned file hashes without fetching mutable inputs. PorcuPi then runs `build:offline`, which repeats that validation as part of Pi's own offline package build.
+After that deterministic hydration step, PorcuPi runs the Pi Base's local `check:model-data` command. This validates the projected snapshot against the candidate source's structural catalog and generated file hashes without fetching mutable inputs. PorcuPi then runs `build:offline`, which repeats that validation as part of Pi's own offline package build.
 
-The recipe receipt binds the model-data identity and exact command. Future PorcuPi releases may pin a different model-data input and recipe, but an installation never refreshes model data from mutable provider catalogs.
+The `pi-v0.81.1-composition-v2` recipe receipt binds the model-data identity, fixed structural projection semantics, and exact command. Future PorcuPi releases may pin a different model-data input and recipe, but an installation never refreshes model data from mutable provider catalogs.
 
 ## Consequences
 
 - The exact Pi Base can be rebuilt after public model catalogs drift.
-- The zero-Patch payload contains the model data committed by the pinned official Pi revision.
-- Model availability may be historically stale, but it is reproducible and remains user-overridable through Pi's normal configuration.
+- The zero-Patch payload contains the model data committed by the pinned official Pi revision; a patched payload contains the exact structural subset selected from those same pinned bytes.
+- Selected Patches may remove model identities through ordinary source changes, but cannot introduce an identity absent from the pinned snapshot or change its API binding without failing hydration.
+- Model details may be historically stale, but they are reproducible and remain user-overridable through Pi's normal configuration.
 - The retained reference's live hydration command is deliberately narrowed to deterministic validation rather than copied literally.

@@ -5,6 +5,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -36,7 +37,7 @@ import {
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 const releaseRoot = existsSync(join(moduleDirectory, "upstream")) ? moduleDirectory : dirname(moduleDirectory);
 export const compositionRecipe = Object.freeze({
-  id: "pi-v0.81.1-composition-v1",
+  id: "pi-v0.81.1-composition-v2",
   commands: [
     "npm ci --ignore-scripts",
     "porcupi hydrate pinned model data",
@@ -166,6 +167,54 @@ function makeImmutable(path) {
   chmodSync(path, 0o555);
 }
 
+function sortedObject(entries) {
+  return Object.fromEntries([...entries].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0));
+}
+
+function readPatchedModelDataStructure(payloadRoot) {
+  const packageRoot = join(payloadRoot, "packages", "ai");
+  const providersRoot = join(packageRoot, "src", "providers");
+  const providerIds = readdirSync(providersRoot)
+    .filter((name) => name.endsWith(".models.ts"))
+    .map((name) => name.slice(0, -".models.ts".length))
+    .sort();
+  if (providerIds.length === 0) fail("Pi Base contains no structural model provider catalog");
+  const aggregator = readFileSync(join(packageRoot, "src", "models.generated.ts"), "utf8");
+  const imported = [...aggregator.matchAll(/^import \{ [A-Z0-9_]+_MODELS \} from "\.\/providers\/([^"/]+)\.models\.ts";$/gm)]
+    .map((match) => match[1]).sort();
+  if (canonicalJson(imported) !== canonicalJson(providerIds)) fail("Pi Base structural model provider inventory is malformed");
+
+  const stringPattern = '"(?:\\\\.|[^"\\\\])*"';
+  const shapePattern = new RegExp(`^\\t(${stringPattern}): Model<(${stringPattern})> & \\{$`);
+  const idPattern = new RegExp(`^\\t\\tid: (${stringPattern});$`);
+  const providerPattern = new RegExp(`^\\t\\tprovider: (${stringPattern});$`);
+  return sortedObject(providerIds.map((providerId) => {
+    const path = join(providersRoot, `${providerId}.models.ts`);
+    const contents = readFileSync(path, "utf8");
+    if (!contents.includes(`import values from "./data/${providerId}.json" with { type: "json" };`)) {
+      fail(`Pi Base structural model provider does not bind pinned data: ${providerId}`);
+    }
+    const models = new Map();
+    const lines = contents.split("\n");
+    for (let index = 0; index < lines.length; index += 1) {
+      const shape = shapePattern.exec(lines[index]);
+      if (!shape) continue;
+      const id = idPattern.exec(lines[index + 1] || "");
+      const provider = providerPattern.exec(lines[index + 2] || "");
+      if (!id || !provider || lines[index + 3] !== "\t};") fail(`Malformed Pi Base structural model declaration: ${providerId}`);
+      const key = JSON.parse(shape[1]);
+      const api = JSON.parse(shape[2]);
+      if (JSON.parse(id[1]) !== key || JSON.parse(provider[1]) !== providerId || models.has(key)) {
+        fail(`Malformed Pi Base structural model identity: ${providerId}`);
+      }
+      models.set(key, api);
+      index += 3;
+    }
+    if (models.size === 0) fail(`Pi Base structural model provider is empty: ${providerId}`);
+    return [providerId, sortedObject(models)];
+  }));
+}
+
 function hydratePinnedModelData(payloadRoot, lock) {
   const source = join(releaseRoot, "upstream", lock.modelData.path);
   const sourceStat = lstatSync(source);
@@ -197,10 +246,36 @@ function hydratePinnedModelData(payloadRoot, lock) {
     }
     if (sha256File(file) !== manifest.files[name]) fail(`Pinned model data digest mismatch: ${name}`);
   }
+  const structure = readPatchedModelDataStructure(payloadRoot);
+  const staged = join(payloadRoot, "packages", "ai", "src", "providers", `.model-data-${randomUUID()}`);
   const destination = join(payloadRoot, "packages", "ai", "src", "providers", "data");
   if (pathExists(destination)) fail("Pi Base unexpectedly contains hydrated model data");
+  mkdirSync(staged, { mode: 0o700 });
+  const outputFiles = {};
+  for (const [providerId, expectedModels] of Object.entries(structure)) {
+    const name = `${providerId}.json`;
+    if (!Object.hasOwn(manifest.files, name)) fail(`Pinned model data is missing structural provider: ${providerId}`);
+    const values = readJson(join(source, name), `pinned model data provider ${providerId}`);
+    const hydrated = {};
+    for (const [modelId, expectedApi] of Object.entries(expectedModels)) {
+      const model = values[modelId];
+      if (model === null || typeof model !== "object" || Array.isArray(model) || model.api !== expectedApi) {
+        fail(`Pinned model data cannot hydrate structural model: ${providerId}/${modelId}`);
+      }
+      hydrated[modelId] = model;
+    }
+    const contents = `${JSON.stringify(hydrated)}\n`;
+    outputFiles[name] = sha256Bytes(contents);
+    writeFileSync(join(staged, name), contents, { mode: 0o644 });
+  }
+  const hydratedManifest = {
+    schemaVersion: 1,
+    structureHash: sha256Bytes(JSON.stringify(structure)),
+    files: sortedObject(Object.entries(outputFiles)),
+  };
+  writeFileSync(join(staged, ".manifest.json"), `${JSON.stringify(hydratedManifest)}\n`, { mode: 0o644 });
   process.stdout.write(`> PorcuPi hydrate pinned model data ${lock.modelData.package}@${lock.modelData.version}\n`);
-  cpSync(source, destination, { recursive: true, errorOnExist: true });
+  renameSync(staged, destination);
 }
 
 function smokeEnvironment(stageRoot, environment = process.env) {

@@ -1,0 +1,53 @@
+name: Real pi-wait-for-user handoff release gate
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/real-handoff-release-gate.yml"
+      - "install.sh"
+      - "package.json"
+      - "scripts/**"
+      - "src/**"
+      - "test/fixtures/real-handoff.json"
+      - "test/support/**"
+      - "upstream/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-handoff-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  real-handoff:
+    name: ${{ matrix.os }} / Stock Pi ${{ matrix.stock_pi }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04]
+        stock_pi: [absent, present]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - name: Install PorcuPi development dependencies
+        run: npm ci --ignore-scripts
+      - name: Run the complete public-process handoff journey
+        run: npm run test:real-handoff -- --stock-pi=${{ matrix.stock_pi }}
+      - name: Upload durable acceptance report and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-handoff-${{ runner.os }}-${{ runner.arch }}-stock-${{ matrix.stock_pi }}
+          path: artifacts/acceptance/
+          if-no-files-found: error
+          retention-days: 90

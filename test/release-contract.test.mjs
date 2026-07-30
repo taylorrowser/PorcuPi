@@ -70,3 +70,14 @@ test("first-release documentation covers the supported bootstrap, operation, tru
   assert.match(notes, /macOS.*Linux/is);
   assert.match(notes, /no release channel/i);
 });
+
+test("legacy migration preserves human-owned root entries before receipt-safe uninstall", () => {
+  const migration = readText("docs/migration-from-pi-wait-for-user.md");
+
+  assert.match(migration, /Foreign Managed Installation root path/);
+  assert.match(migration, /pi managed disable/);
+  assert.match(migration, /outside.*managed root/is);
+  assert.match(migration, /production-signing-private/);
+  assert.match(migration, /pi-wait-for-user managed uninstall/);
+  assert.match(migration, /do not delete/i);
+});

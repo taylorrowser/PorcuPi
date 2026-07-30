@@ -146,4 +146,12 @@ npm test
 
 The tests drive the guided installer and public `porcupi add`, `porcupi manage`, `porcupi apply`, `porcupi rollback`, `porcupi pi enable|disable`, `porcupi uninstall`, launch, and `porcupi verify` commands as external processes through pseudo-terminals and isolated homes/projects, using deterministic local Git Pi Base, mixed resource/Patch Source Repository, metadata, project-trust, integrity-corruption, composition, lifecycle-lock, process-lease, cleanup, interruption, and Pi package-lifecycle fixtures.
 
+The separate networked release gate composes the exact 20-Patch `pi-wait-for-user` handoff and installs its Question Tool through Pi on macOS and Linux, with and without Stock Pi:
+
+```sh
+npm run test:real-handoff -- --stock-pi=absent
+```
+
+See [the real handoff acceptance contract](docs/acceptance/real-pi-wait-for-user-handoff.md) for its pinned identities, four-job matrix, complete public-process journey, environment requirements, and durable report format.
+
 The build specification and remaining tracer bullets are tracked in [PorcuPi v1 issue #12](https://github.com/taylorrowser/PorcuPi/issues/12).

@@ -56,7 +56,7 @@ function git(cwd, ...args) {
 function createPiBase(root, { version = "0.81.1", buildFails = false } = {}) {
   const source = join(root, "pi-base");
   mkdirSync(join(source, "packages", "coding-agent"), { recursive: true });
-  mkdirSync(join(source, "packages", "ai"), { recursive: true });
+  mkdirSync(join(source, "packages", "ai", "src", "providers"), { recursive: true });
   mkdirSync(join(source, "packages", "agent"), { recursive: true });
   mkdirSync(join(source, "packages", "tui"), { recursive: true });
   mkdirSync(join(source, "scripts"), { recursive: true });
@@ -82,6 +82,17 @@ function createPiBase(root, { version = "0.81.1", buildFails = false } = {}) {
     }, null, 2)}\n`,
   );
   writeFileSync(join(source, "series.txt"), "base\n");
+  writeFileSync(join(source, "packages", "ai", "src", "models.generated.ts"), 'import { FIXTURE_MODELS } from "./providers/fixture.models.ts";\n');
+  writeFileSync(join(source, "packages", "ai", "src", "providers", "fixture.models.ts"), [
+    'import values from "./data/fixture.json" with { type: "json" };',
+    "export const FIXTURE_MODELS = values as {",
+    '\t"fixture-model": Model<"fixture-api"> & {',
+    '\t\tid: "fixture-model";',
+    '\t\tprovider: "fixture";',
+    "\t};",
+    "};",
+    "",
+  ].join("\n"));
   writeFileSync(join(source, "scripts", "check-model-data.mjs"), "console.log('fixture pinned model data is valid');\n");
   writeFileSync(join(source, "scripts", "fail-build.mjs"), "console.error('fixture build failed'); process.exit(23);\n");
   writeFileSync(
@@ -159,7 +170,32 @@ function createReleaseFixture(root, base, expectedVersion = "0.81.1") {
   const modelData = join(release, "upstream", "model-data", "fixture");
   mkdirSync(modelData, { recursive: true });
   const modelFile = "fixture.json";
-  const modelContents = "{}\n";
+  const modelContents = `${JSON.stringify({
+    "fixture-model": {
+      id: "fixture-model",
+      name: "Fixture Model",
+      api: "fixture-api",
+      provider: "fixture",
+      baseUrl: "https://fixture.invalid",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 1,
+      maxTokens: 1,
+    },
+    "snapshot-extra": {
+      id: "snapshot-extra",
+      name: "Snapshot Extra",
+      api: "fixture-api",
+      provider: "fixture",
+      baseUrl: "https://fixture.invalid",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 1,
+      maxTokens: 1,
+    },
+  })}\n`;
   const modelDigest = createHash("sha256").update(modelContents).digest("hex");
   const modelManifest = `${JSON.stringify({
     schemaVersion: 1,
@@ -698,13 +734,15 @@ test("guided install builds, activates, and launches a zero-Patch Managed Pi wit
   assert.deepEqual(readFileSync(stockPi), stockBefore);
 
   const launcher = join(home, ".local", "bin", "porcupi");
-  const dataRoot = join(home, "Library", "Application Support", "porcupi");
-  const activation = JSON.parse(readFileSync(join(dataRoot, "state", "activation.json"), "utf8"));
+  const managedRoot = dataRoot(home);
+  const activation = JSON.parse(readFileSync(join(managedRoot, "state", "activation.json"), "utf8"));
   assert.equal(activation.schemaVersion, 1);
   assert.equal(activation.previous, null);
   assert.deepEqual(activation.active.patches, []);
-  const centralReceipt = readFileSync(join(dataRoot, "receipts", `${activation.active.compositionId}.json`), "utf8");
-  const embeddedReceipt = readFileSync(join(dataRoot, "compositions", activation.active.compositionId, "receipt.json"), "utf8");
+  const centralReceipt = readFileSync(join(managedRoot, "receipts", `${activation.active.compositionId}.json`), "utf8");
+  const embeddedReceipt = readFileSync(join(managedRoot, "compositions", activation.active.compositionId, "receipt.json"), "utf8");
+  const hydratedModels = JSON.parse(readFileSync(join(managedRoot, "compositions", activation.active.compositionId, "payload", "packages", "ai", "src", "providers", "data", "fixture.json"), "utf8"));
+  assert.deepEqual(Object.keys(hydratedModels), ["fixture-model"]);
   assert.equal(centralReceipt, embeddedReceipt);
   assert.equal(existsSync(launcher), true);
   assert.equal(existsSync(join(home, ".local", "bin", "pi")), false);

@@ -2,20 +2,17 @@ import { randomUUID } from "node:crypto";
 import {
   accessSync,
   chmodSync,
-  closeSync,
   constants,
-  fsyncSync,
   linkSync,
   lstatSync,
   mkdirSync,
-  openSync,
   readFileSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { pathExists } from "./composition.mjs";
-import { cleanupRetainedCompositions, withLifecycleLock } from "./lifecycle.mjs";
+import { cleanupRetainedCompositions, durableUnlink, withLifecycleLock } from "./lifecycle.mjs";
 import {
   atomicWrite,
   canonicalJson,
@@ -48,20 +45,6 @@ function exactObject(value, fields) {
 function checkpoint(name) {
   if (process.env.NODE_ENV === "test" && process.env.PORCUPI_TEST_FAULT === name) process.kill(process.pid, "SIGKILL");
   if (process.env.NODE_ENV === "test" && process.env.PORCUPI_TEST_FAILURE === name) fail(`Injected failure at ${name}`);
-}
-
-function durableUnlink(path) {
-  unlinkSync(path);
-  try {
-    const directory = openSync(dirname(path), "r");
-    try {
-      fsyncSync(directory);
-    } finally {
-      closeSync(directory);
-    }
-  } catch {
-    // The unlink remains atomic where directory fsync is unavailable.
-  }
 }
 
 function piPaths(paths, environment) {

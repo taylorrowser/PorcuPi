@@ -8,6 +8,7 @@ import { rollbackComposition } from "./rollback.mjs";
 import { defaultDataRoot, fail, readLeasedActiveComposition, verifyLauncher } from "./runtime.mjs";
 import { manageResources } from "./manage.mjs";
 import { setPiOwnership } from "./pi-ownership.mjs";
+import { uninstallManagedPi } from "./uninstall.mjs";
 
 async function launch(args) {
   const active = readLeasedActiveComposition(defaultDataRoot());
@@ -50,6 +51,9 @@ try {
   } else if (args[0] === "rollback") {
     if (args.length !== 1) fail("Usage: porcupi rollback");
     await rollbackComposition();
+  } else if (args[0] === "uninstall") {
+    if (args.length !== 1) fail("Usage: porcupi uninstall");
+    await uninstallManagedPi();
   } else if (args[0] === "verify") {
     if (args.length !== 1) fail("Usage: porcupi verify");
     const receipt = verifyManagedInstallation();

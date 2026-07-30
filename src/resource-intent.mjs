@@ -393,6 +393,39 @@ export async function realizeResourceChanges({ executable, environment, changes,
   }
 }
 
+export function summarizeRetainedPiResources(dataRoot, environment = process.env) {
+  const selections = readSelections(dataRoot);
+  const summaries = [];
+  for (const source of selections.sources) {
+    const resources = source.artifacts.filter((artifact) => artifact.kind !== "Patch");
+    const groups = groupByContext(resources);
+    const hasGlobal = groups.has("global");
+    for (const { context, artifacts } of groups.values()) {
+      const snapshot = readPiSettings(environment, context);
+      const expected = packageEntry(source.packageSource, artifacts, context.scope, context.scope === "project" && hasGlobal);
+      const matches = matchingPackageIndexes(snapshot.packages, source.locator);
+      summaries.push({
+        locator: source.locator,
+        scope: context.scope,
+        projectRoot: context.scope === "project" ? context.projectRoot : null,
+        artifacts: artifacts.map((artifact) => ({ kind: artifact.kind, path: artifact.path }))
+          .sort((left, right) => lexicalCompare(artifactKey(left), artifactKey(right))),
+        configured: matches.length === 1 && canonicalJson(snapshot.packages[matches[0]]) === canonicalJson(expected),
+      });
+    }
+  }
+  return {
+    resources: summaries.sort((left, right) => lexicalCompare(
+      `${left.locator}\0${left.scope}\0${left.projectRoot || ""}`,
+      `${right.locator}\0${right.scope}\0${right.projectRoot || ""}`,
+    )),
+    patchCount: selections.sources.reduce(
+      (count, source) => count + source.artifacts.filter((artifact) => artifact.kind === "Patch").length,
+      0,
+    ),
+  };
+}
+
 export function saveSelectionSources(dataRoot, sources) {
   const ordered = [...sources].sort((left, right) => lexicalCompare(left.locator, right.locator));
   atomicWrite(selectionStatePath(dataRoot), { schemaVersion: 1, sources: ordered });

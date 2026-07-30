@@ -30,6 +30,7 @@ import {
   validateRequiredExecutable,
   verifyLauncher,
   verifyOptionalPiLauncher,
+  verifyRuntime,
 } from "./runtime.mjs";
 
 const moduleDirectory = dirname(fileURLToPath(import.meta.url));
@@ -294,6 +295,7 @@ export function verifyManagedInstallation({ dataRoot, environment = process.env 
   verifyHostNode();
   const active = readActiveComposition(dataRoot);
   verifyLauncher(active.paths, environment);
+  verifyRuntime(active.paths);
   verifyOptionalPiLauncher(active.paths, environment);
   verifyCompositionContents(active.compositionRoot, active.receipt);
   const stageRoot = join(active.paths.temporary, `verify-${randomUUID()}`);

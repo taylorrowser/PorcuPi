@@ -5,8 +5,13 @@ on:
   pull_request:
     paths:
       - ".github/workflows/real-handoff-release-gate.yml"
+      - "docs/install.md"
+      - "docs/migration-from-pi-wait-for-user.md"
+      - "docs/operations.md"
+      - "docs/releases/**"
       - "install.sh"
-      - "package.json"
+      - "package*.json"
+      - "release/**"
       - "scripts/**"
       - "src/**"
       - "test/fixtures/real-handoff.json"

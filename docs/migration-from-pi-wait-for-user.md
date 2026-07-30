@@ -15,7 +15,45 @@ pi managed uninstall
 
 Review the old manager's output. Its receipt-safe uninstall preserves Stock Pi and shared Pi settings, credentials, packages, sessions, and project data. If it reports live leased processes, let those processes exit and run `pi managed uninstall` again. Do not terminate cleanup by manually removing managed directories or launchers.
 
-If the old manager cannot execute its uninstall, use the recovery and uninstall instructions from the exact historical `pi-wait-for-user` release that installed it. PorcuPi is not a recovery tool for legacy state.
+### Preserve a human-owned entry refused by uninstall
+
+The old manager fails before deleting anything when its root contains a path it cannot prove it owns. For example, a locally created signing directory produces:
+
+```text
+managed-manager: Foreign Managed Installation root path: production-signing-private
+```
+
+Do not delete that directory or the managed root. First release the receipt-owned `pi` command while the old dispatcher still resolves:
+
+```sh
+pi managed disable
+hash -r 2>/dev/null || true
+command -v pi || true
+```
+
+Then inspect the named foreign entry and preserve it at a secure destination **outside the old managed root**. The following example applies only when `production-signing-private` is known to be human-owned and the destination does not already exist:
+
+```sh
+legacy_root="$HOME/Library/Application Support/pi-wait-for-user"
+preserved="$HOME/Library/Application Support/pi-wait-for-user-production-signing-private"
+
+test -d "$legacy_root/production-signing-private"
+test ! -e "$preserved"
+mv "$legacy_root/production-signing-private" "$preserved"
+```
+
+After `pi managed disable`, use the remaining compatibility command to retry the old manager's receipt-safe uninstall:
+
+```sh
+pi-wait-for-user managed uninstall
+hash -r 2>/dev/null || true
+command -v pi || true
+command -v pi-wait-for-user || true
+```
+
+If uninstall reports another foreign entry, stop and establish who owns it before moving it. Never delete, rename, or move one of the manager's recognized directories merely to bypass validation.
+
+If the old manager cannot execute its uninstall after its human-owned entries are safely outside the managed root, use the recovery and uninstall instructions from the exact historical `pi-wait-for-user` release that installed it. PorcuPi is not a recovery tool for legacy state.
 
 After successful uninstall, start a new shell or clear the shell's command lookup cache, then inspect resolution again:
 

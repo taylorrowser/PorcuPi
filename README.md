@@ -106,6 +106,20 @@ Install, apply, rollback, future command-ownership changes, cleanup, and uninsta
 
 After activation changes, PorcuPi retains only active and previous. Older receipt-proven Compositions are removed only after their complete payloads are verified and no process lease is live. Live deletion is deferred and converges during a later lifecycle operation. Modified, malformed, symbolic, foreign, or otherwise unproven paths are reported and left untouched. Interrupted cleanup resumes only from an owner-marked, receipt-bound stage.
 
+## Uninstall PorcuPi-owned state
+
+Run the conservative three-page uninstall flow with:
+
+```sh
+porcupi uninstall
+```
+
+The flow inventories receipt-proven PorcuPi launchers, runtime, activation, Patches, Compositions, leases, and temporary state; separately reports the global and project Pi resource groups that will remain; and requires confirmation. Escape or Ctrl-C cancels without mutation and restores the cursor. Pi settings, package directories, credentials, sessions, project trust/resources, and Stock Pi are never removed or rewritten.
+
+Uninstall fails closed before deletion if an intended PorcuPi target is modified, malformed, foreign, traversing, symbolic, outside its owner root, or disagrees with its receipt. It atomically gates every Composition lease before deletion. A live Pi process defers the operation without termination or payload removal, and a later `porcupi uninstall` retries after it exits.
+
+A confirmed uninstall uses an exact-owner adjacent tombstone and a receipt-bound recovery launcher so interruption after any destructive durability boundary remains retryable. It removes the tombstone last. An already absent installation is a convergent no-op. See [ADR 0009](docs/adr/0009-conservative-receipt-proven-uninstall.md).
+
 ## Verify Managed Pi integrity
 
 Every normal Managed Pi launch performs cheap fail-closed checks of PorcuPi ownership and Activation state, matching Composition receipts and identity, platform and owned paths, the committed Patch snapshot, the required executable's exact identity, and the stable launcher's ownership receipt. It does not hash every payload file and is not a complete audit.
@@ -116,7 +130,7 @@ Run the complete on-demand check with:
 porcupi verify
 ```
 
-Verification recomputes the active Composition's normalized complete payload inventory and reruns the required executable identity, exact version, public conformance, and isolated-home smoke checks. It also checks the stable launcher's exact path, regular-file kind, mode, size, digest, ownership marker, and expected command bytes, plus the optional `pi` alias whenever PorcuPi has an ownership receipt for it. It reports a modified or foreign owned launcher without overwriting it.
+Verification recomputes the active Composition's normalized complete payload inventory and reruns the required executable identity, exact version, public conformance, and isolated-home smoke checks. It also checks the installed PorcuPi runtime inventory receipt, the stable launcher's exact path, regular-file kind, mode, size, digest, ownership marker, and expected command bytes, plus the optional `pi` alias whenever PorcuPi has an ownership receipt for it. It reports a modified or foreign owned launcher without overwriting it.
 
 Malformed state, receipt disagreement, platform/path mismatch, or a changed required executable makes normal launch exit nonzero. PorcuPi never silently runs the previous Composition or Stock Pi. The error points to `porcupi verify`, retained-composition rollback, `porcupi pi disable` for an unchanged owned alias, and the independently managed Stock Pi path for direct recovery because `pi` may currently resolve to PorcuPi.
 
@@ -130,6 +144,6 @@ Run the external-process acceptance suite with one command:
 npm test
 ```
 
-The tests drive the guided installer and public `porcupi add`, `porcupi manage`, `porcupi apply`, `porcupi rollback`, `porcupi pi enable|disable`, launch, and `porcupi verify` commands as external processes through pseudo-terminals and isolated homes/projects, using deterministic local Git Pi Base, mixed resource/Patch Source Repository, metadata, project-trust, integrity-corruption, composition, lifecycle-lock, process-lease, cleanup, interruption, and Pi package-lifecycle fixtures.
+The tests drive the guided installer and public `porcupi add`, `porcupi manage`, `porcupi apply`, `porcupi rollback`, `porcupi pi enable|disable`, `porcupi uninstall`, launch, and `porcupi verify` commands as external processes through pseudo-terminals and isolated homes/projects, using deterministic local Git Pi Base, mixed resource/Patch Source Repository, metadata, project-trust, integrity-corruption, composition, lifecycle-lock, process-lease, cleanup, interruption, and Pi package-lifecycle fixtures.
 
 The build specification and remaining tracer bullets are tracked in [PorcuPi v1 issue #12](https://github.com/taylorrowser/PorcuPi/issues/12).

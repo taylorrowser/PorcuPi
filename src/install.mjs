@@ -16,6 +16,7 @@ import {
   atomicWrite,
   canonicalJson,
   createLauncherReceipt,
+  createRuntimeReceipt,
   defaultBinDirectory,
   defaultDataRoot,
   ensureCompositionLeaseDirectory,
@@ -27,6 +28,7 @@ import {
   readJson,
   shellLauncherContents,
   verifyLauncher,
+  verifyRuntime,
 } from "./runtime.mjs";
 import {
   buildComposition,
@@ -157,6 +159,7 @@ async function installManagedPiLocked({
       fail(`PorcuPi data root is foreign: ${paths.root}`);
     }
     const active = readActiveComposition(dataRoot);
+    verifyRuntime(paths);
     const installedCli = join(paths.runtime, "cli.mjs");
     const cliStat = lstatSync(installedCli);
     if (!cliStat.isFile() || cliStat.isSymbolicLink()) fail("Installed PorcuPi runtime is malformed");
@@ -201,6 +204,8 @@ async function installManagedPiLocked({
     ensureCompositionLeaseDirectory(paths, receipt.compositionId);
     checkpoint("composition-published");
     publishRuntime(paths, temporaryRoot);
+    atomicWrite(paths.runtimeReceipt, createRuntimeReceipt(paths));
+    verifyRuntime(paths);
     atomicWrite(paths.activation, {
       schemaVersion: 1,
       active: { compositionId: receipt.compositionId, patches: [] },

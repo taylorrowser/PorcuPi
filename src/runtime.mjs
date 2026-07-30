@@ -35,6 +35,7 @@ const recipeFields = new Set(["id", "commands"]);
 const payloadEntryFields = new Set(["path", "kind", "mode", "size", "sha256"]);
 const payloadKinds = new Set(["file", "symlink"]);
 const launcherReceiptFields = new Set(["schemaVersion", "type", "path", "kind", "mode", "size", "sha256"]);
+const runtimeReceiptFields = new Set(["schemaVersion", "type", "inventorySha256"]);
 const leaseDirectoryOwnerFields = new Set(["schemaVersion", "type", "compositionId"]);
 const leaseFields = new Set(["schemaVersion", "type", "compositionId", "pid", "nonce"]);
 
@@ -103,6 +104,7 @@ export function managedLayout(dataRoot) {
     state: join(root, "state"),
     activation: join(root, "state", "activation.json"),
     launcherReceipt: join(root, "state", "launcher.json"),
+    runtimeReceipt: join(root, "state", "runtime.json"),
     piLauncherReceipt: join(root, "state", "pi-launcher.json"),
     piTransition: join(root, "state", "pi-transition.json"),
   };
@@ -520,6 +522,26 @@ export function validateRequiredExecutable(payloadRoot, expected) {
     fail("Managed Pi executable does not match its Composition receipt");
   }
   return executable;
+}
+
+export function createRuntimeReceipt(paths) {
+  return {
+    schemaVersion: 1,
+    type: "porcupi-runtime",
+    inventorySha256: sha256Bytes(canonicalJson(createPayloadInventory(paths.runtime))),
+  };
+}
+
+export function verifyRuntime(paths) {
+  const receipt = readJson(paths.runtimeReceipt, "PorcuPi runtime receipt");
+  if (
+    !exactObject(receipt, runtimeReceiptFields)
+    || receipt.schemaVersion !== 1
+    || receipt.type !== "porcupi-runtime"
+    || !/^[a-f0-9]{64}$/.test(receipt.inventorySha256 || "")
+  ) fail("Malformed PorcuPi runtime receipt");
+  if (createRuntimeReceipt(paths).inventorySha256 !== receipt.inventorySha256) fail("PorcuPi runtime inventory mismatch");
+  return receipt;
 }
 
 export function shellLauncherContents(cliPath) {

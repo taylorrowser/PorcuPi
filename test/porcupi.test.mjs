@@ -224,6 +224,38 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
+function treeDigest(root) {
+  const entries = [];
+  function visit(path, relativePath) {
+    const stat = lstatSync(path);
+    if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      entries.push([relativePath, "directory", stat.mode & 0o777]);
+      for (const name of readdirSync(path).sort()) visit(join(path, name), relativePath ? `${relativePath}/${name}` : name);
+    } else if (stat.isSymbolicLink()) entries.push([relativePath, "symlink", readlinkSync(path)]);
+    else entries.push([relativePath, "file", stat.mode & 0o777, createHash("sha256").update(readFileSync(path)).digest("hex")]);
+  }
+  visit(root, "");
+  return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+}
+
+function createSharedSentinels(root, home, { stockAtTarget = false } = {}) {
+  const piRoot = join(home, ".pi");
+  mkdirSync(join(piRoot, "agent", "sessions"), { recursive: true });
+  writeFileSync(join(piRoot, "agent", "settings.json"), "{\"packages\":[\"shared-sentinel\"]}\n");
+  writeFileSync(join(piRoot, "agent", "credentials.json"), "shared-credential\n");
+  writeFileSync(join(piRoot, "agent", "sessions", "session"), "shared-session\n");
+  const stockPi = stockAtTarget ? join(home, ".local", "bin", "pi") : join(root, "shared-stock", "bin", "pi");
+  mkdirSync(dirname(stockPi), { recursive: true });
+  writeFileSync(stockPi, "#!/bin/sh\necho shared-stock\n");
+  chmodSync(stockPi, 0o755);
+  const expected = { piRoot, piDigest: treeDigest(piRoot), stockPi, stockBytes: readFileSync(stockPi) };
+  expected.assertUnchanged = () => {
+    assert.equal(treeDigest(expected.piRoot), expected.piDigest);
+    assert.deepEqual(readFileSync(expected.stockPi), expected.stockBytes);
+  };
+  return expected;
+}
+
 function rebindActiveReceipt(home, mutate) {
   const root = dataRoot(home);
   const activationPath = join(root, "state", "activation.json");
@@ -923,6 +955,213 @@ test("pi ownership retries converge across publication and removal interruptions
   assert.equal(existsSync(join(bin, "porcupi")), true);
 });
 
+test("porcupi uninstall cancellation preserves all PorcuPi and shared state with terminal restoration", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const managedRoot = dataRoot(home);
+  const shared = createSharedSentinels(root, home, { stockAtTarget: true });
+  const rootBefore = treeDigest(managedRoot);
+  const launcher = join(home, ".local", "bin", "porcupi");
+  const launcherBefore = readFileSync(launcher);
+
+  const cancelled = runPorcuPi(home, ["uninstall"], "1b");
+
+  assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+  assert.match(cancelled.stdout, /1 of 3 — Owned state/);
+  assert.match(cancelled.stdout, /Uninstall cancelled/);
+  assert.match(cancelled.stdout, /\x1b\[\?25l/);
+  assert.match(cancelled.stdout, /\x1b\[\?25h/);
+  assert.equal(treeDigest(managedRoot), rootBefore);
+  assert.deepEqual(readFileSync(launcher), launcherBefore);
+  shared.assertUnchanged();
+});
+
+test("porcupi uninstall removes only receipt-proven state and retains Pi resources and Stock Pi", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  const stockBin = join(root, "stock-bin");
+  const stockPi = join(stockBin, "pi");
+  mkdirSync(home);
+  mkdirSync(stockBin);
+  writeFileSync(stockPi, "#!/bin/sh\necho stock\n");
+  chmodSync(stockPi, 0o755);
+  const stockBefore = readFileSync(stockPi);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  const environment = { PATH: `${join(home, ".local", "bin")}:${stockBin}:${process.env.PATH}` };
+  assert.equal(runInstaller(release, home, "0d790d0d", environment).status, 0);
+  const project = join(root, "project");
+  mkdirSync(project);
+  const repository = createResourceRepository(root);
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e206a206a206a206e0d", environment, project);
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  const piRoot = join(home, ".pi");
+  mkdirSync(join(piRoot, "agent", "sessions"), { recursive: true });
+  mkdirSync(join(piRoot, "agent", "packages", "foreign"), { recursive: true });
+  writeFileSync(join(piRoot, "agent", "credentials.json"), "credential-sentinel\n");
+  writeFileSync(join(piRoot, "agent", "trust.json"), "trust-sentinel\n");
+  writeFileSync(join(piRoot, "agent", "sessions", "session.json"), "session-sentinel\n");
+  writeFileSync(join(piRoot, "agent", "packages", "foreign", "asset"), "package-sentinel\n");
+  mkdirSync(join(project, ".pi", "resources"), { recursive: true });
+  writeFileSync(join(project, ".pi", "trust.json"), "project-trust-sentinel\n");
+  writeFileSync(join(project, ".pi", "resources", "asset"), "project-resource-sentinel\n");
+  const piBefore = treeDigest(piRoot);
+  const projectBefore = treeDigest(join(project, ".pi"));
+
+  const uninstall = runPorcuPi(home, ["uninstall"], "0d0d0d", environment);
+
+  assert.equal(uninstall.status, 0, uninstall.stderr || uninstall.stdout);
+  assert.match(uninstall.stdout, /1 of 3 — Owned state/);
+  assert.match(uninstall.stdout, /2 of 3 — Pi resources/);
+  assert.match(uninstall.stdout, /3 of 3 — Review/);
+  assert.match(uninstall.stdout, /Pi-owned resource groups that will remain: 1/);
+  assert.match(uninstall.stdout, /Uninstalled receipt-proven PorcuPi state/);
+  assert.equal(existsSync(dataRoot(home)), false);
+  assert.equal(existsSync(`${dataRoot(home)}.uninstall-tombstone`), false);
+  assert.equal(existsSync(join(home, ".local", "bin", "porcupi")), false);
+  assert.equal(existsSync(join(home, ".local", "bin", "pi")), false);
+  assert.equal(treeDigest(piRoot), piBefore);
+  assert.equal(treeDigest(join(project, ".pi")), projectBefore);
+  assert.deepEqual(readFileSync(stockPi), stockBefore);
+  const foreignPorcuPi = join(home, ".local", "bin", "porcupi");
+  writeFileSync(foreignPorcuPi, "foreign command after uninstall\n");
+  const alreadyAbsent = spawnSync(process.execPath, [join(release, "src", "cli.mjs"), "uninstall"], {
+    encoding: "utf8",
+    env: { ...process.env, HOME: home, XDG_DATA_HOME: join(home, ".local", "share"), NODE_ENV: "test" },
+  });
+  assert.equal(alreadyAbsent.status, 0, alreadyAbsent.stderr || alreadyAbsent.stdout);
+  assert.match(alreadyAbsent.stdout, /already absent.*no change/);
+  assert.equal(readFileSync(foreignPorcuPi, "utf8"), "foreign command after uninstall\n");
+});
+
+test("porcupi uninstall refuses modified and malformed ownership targets without deletion", () => {
+  for (const scenario of [
+    "modified-launcher", "modified-runtime", "traversing-launcher-receipt", "malformed-activation",
+    "symbolic-pi", "foreign-temporary", "foreign-tombstone",
+  ]) {
+    const root = temporaryRoot();
+    const home = join(root, "home");
+    mkdirSync(home);
+    const base = createPiBase(root);
+    const release = createReleaseFixture(root, base);
+    const ownPi = scenario === "symbolic-pi";
+    assert.equal(runInstaller(release, home, ownPi ? "0d790d0d" : "0d").status, 0);
+    const managedRoot = dataRoot(home);
+    const launcher = join(home, ".local", "bin", "porcupi");
+    if (scenario === "modified-launcher") writeFileSync(launcher, `${readFileSync(launcher, "utf8")}# changed\n`);
+    if (scenario === "modified-runtime") writeFileSync(join(managedRoot, "runtime", "add.mjs"), `${readFileSync(join(managedRoot, "runtime", "add.mjs"), "utf8")}\n// changed\n`);
+    if (scenario === "traversing-launcher-receipt") {
+      const receiptPath = join(managedRoot, "state", "launcher.json");
+      const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+      receipt.path = `${join(home, ".local", "bin")}/../bin/porcupi`;
+      writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+    }
+    if (scenario === "malformed-activation") writeFileSync(join(managedRoot, "state", "activation.json"), "malformed\n");
+    if (scenario === "symbolic-pi") {
+      const alias = join(home, ".local", "bin", "pi");
+      rmSync(alias);
+      symlinkSync(launcher, alias);
+    }
+    if (scenario === "foreign-temporary") mkdirSync(join(managedRoot, "tmp", "foreign-stage"));
+    if (scenario === "foreign-tombstone") writeFileSync(`${managedRoot}.uninstall-tombstone`, "foreign tombstone\n");
+    const shared = createSharedSentinels(root, home);
+    const rootBefore = treeDigest(managedRoot);
+    const launcherBefore = readFileSync(launcher);
+
+    const uninstall = runPorcuPi(home, ["uninstall"], "0d0d0d");
+
+    assert.notEqual(uninstall.status, 0, `${scenario}: uninstall unexpectedly succeeded`);
+    assert.equal(treeDigest(managedRoot), rootBefore);
+    assert.deepEqual(readFileSync(launcher), launcherBefore);
+    shared.assertUnchanged();
+    if (scenario === "symbolic-pi") assert.equal(lstatSync(join(home, ".local", "bin", "pi")).isSymbolicLink(), true);
+    if (scenario === "foreign-tombstone") assert.equal(readFileSync(`${managedRoot}.uninstall-tombstone`, "utf8"), "foreign tombstone\n");
+  }
+});
+
+test("porcupi uninstall defers a live Composition lease and converges after the process exits", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const shared = createSharedSentinels(root, home, { stockAtTarget: true });
+  const launchLog = join(root, "uninstall-held-launch.log");
+  const held = spawn(join(home, ".local", "bin", "porcupi"), ["held"], {
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      NODE_ENV: "test",
+      PI_FIXTURE_LAUNCH_LOG: launchLog,
+      PI_FIXTURE_HOLD_MS: "1800",
+    },
+  });
+  childProcesses.push(held);
+  for (let attempt = 0; attempt < 100 && !existsSync(launchLog); attempt += 1) await delay(20);
+  assert.equal(existsSync(launchLog), true, "held Managed Pi did not start");
+
+  const deferred = runPorcuPi(home, ["uninstall"], "0d0d0d");
+
+  assert.equal(deferred.status, 0, deferred.stderr || deferred.stdout);
+  assert.match(deferred.stdout, /Uninstall deferred.*live process lease/);
+  assert.equal(existsSync(dataRoot(home)), true);
+  assert.equal(existsSync(join(home, ".local", "bin", "porcupi")), true);
+  await new Promise((resolvePromise) => held.once("exit", resolvePromise));
+  const retry = runPorcuPi(home, ["uninstall"], "0d0d0d");
+  assert.equal(retry.status, 0, retry.stderr || retry.stdout);
+  assert.equal(existsSync(dataRoot(home)), false);
+  shared.assertUnchanged();
+});
+
+test("interrupted PorcuPi uninstall retries every destructive durability boundary", () => {
+  const boundaries = [
+    "uninstall-tombstone-published",
+    "uninstall-leases-gated",
+    "uninstall-pi-alias-removed",
+    "uninstall-recovery-launcher-published",
+    "uninstall-root-removed",
+    "uninstall-launcher-removed",
+    "uninstall-tombstone-removed",
+  ];
+  for (const boundary of boundaries) {
+    const root = temporaryRoot();
+    const home = join(root, "home");
+    mkdirSync(home);
+    const base = createPiBase(root);
+    const release = createReleaseFixture(root, base);
+    const ownsPi = boundary === "uninstall-pi-alias-removed";
+    assert.equal(runInstaller(release, home, ownsPi ? "0d790d0d" : "0d").status, 0);
+    const shared = createSharedSentinels(root, home, { stockAtTarget: !ownsPi });
+    const interrupted = runPorcuPi(home, ["uninstall"], "0d0d0d", { PORCUPI_TEST_FAULT: boundary });
+    assert.notEqual(interrupted.status, 0, `${boundary}: fault did not interrupt uninstall`);
+    const tombstone = `${dataRoot(home)}.uninstall-tombstone`;
+    const launcher = join(home, ".local", "bin", "porcupi");
+    let retry;
+    if (existsSync(launcher)) retry = runPorcuPiProcess(home, ["uninstall"]);
+    else if (existsSync(tombstone)) retry = spawnSync(process.execPath, [join(tombstone, "runtime", "cli.mjs"), "uninstall"], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: home, XDG_DATA_HOME: join(home, ".local", "share"), NODE_ENV: "test" },
+    });
+    else retry = spawnSync(process.execPath, [join(release, "src", "cli.mjs"), "uninstall"], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: home, XDG_DATA_HOME: join(home, ".local", "share"), NODE_ENV: "test" },
+    });
+    assert.equal(retry.status, 0, `${boundary}: ${retry.stderr || retry.stdout}`);
+    assert.equal(existsSync(dataRoot(home)), false, boundary);
+    assert.equal(existsSync(tombstone), false, boundary);
+    assert.equal(existsSync(launcher), false, boundary);
+    shared.assertUnchanged();
+  }
+});
+
 test("porcupi verify audits the complete Composition and owned launcher while normal launch stays cheap and fail closed", () => {
   const root = temporaryRoot();
   const home = join(root, "home");
@@ -968,6 +1207,14 @@ test("porcupi verify audits the complete Composition and owned launcher while no
   assert.notEqual(smokeHome, home);
   assert.match(smokeHome, /tmp[\\/]verify-/);
   assert.equal(existsSync(smokeHome), false);
+
+  const runtimeFile = join(managedRoot, "runtime", "add.mjs");
+  const runtimeBefore = readFileSync(runtimeFile);
+  writeFileSync(runtimeFile, `${runtimeBefore.toString()}\n// local runtime change\n`);
+  const changedRuntime = runPorcuPiProcess(home, ["verify"]);
+  assert.notEqual(changedRuntime.status, 0);
+  assert.match(`${changedRuntime.stdout}${changedRuntime.stderr}`, /runtime inventory mismatch/);
+  writeFileSync(runtimeFile, runtimeBefore);
 
   const series = join(composition, "payload", "series.txt");
   const seriesBefore = readFileSync(series);

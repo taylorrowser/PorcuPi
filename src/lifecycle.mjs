@@ -155,7 +155,7 @@ function readCleanupOwner(stage) {
   return owner;
 }
 
-function durableUnlink(path) {
+export function durableUnlink(path) {
   unlinkSync(path);
   try {
     const directory = openSync(dirname(path), "r");
@@ -190,20 +190,39 @@ function validateStagedLeaseOwnership(directory, compositionId) {
   ) fail(`Foreign Composition lease directory requires manual inspection: ${directory}`);
 }
 
-function leaseDirectoryHasLiveOrForeignEntries(directory, compositionId) {
+function inspectLeaseDirectory(directory, compositionId) {
   validateStagedLeaseOwnership(directory, compositionId);
+  const leases = [];
   for (const name of readdirSync(directory)) {
     if (name === "owner.json") continue;
     const path = join(directory, name);
-    let lease;
-    try {
-      lease = readJson(path, "Managed Pi Composition lease");
-    } catch {
-      return true;
+    const lease = readJson(path, "Managed Pi Composition lease");
+    if (!validateLease(lease, compositionId, name)) {
+      fail(`Foreign Composition lease requires manual inspection: ${path}`);
     }
-    if (!validateLease(lease, compositionId, name) || processIsAlive(lease.pid)) return true;
-    durableUnlink(path);
+    leases.push({ path, lease, live: processIsAlive(lease.pid) });
   }
+  return leases;
+}
+
+export function inspectStagedCompositionLeases(directory, compositionId) {
+  return inspectLeaseDirectory(directory, compositionId);
+}
+
+export function inspectCompositionLeases(paths, compositionId) {
+  const directory = validateCompositionLeaseDirectory(paths, compositionId);
+  return inspectLeaseDirectory(directory, compositionId);
+}
+
+function leaseDirectoryHasLiveOrForeignEntries(directory, compositionId) {
+  let leases;
+  try {
+    leases = inspectLeaseDirectory(directory, compositionId);
+  } catch {
+    return true;
+  }
+  if (leases.some((entry) => entry.live)) return true;
+  for (const entry of leases) durableUnlink(entry.path);
   return false;
 }
 
@@ -275,6 +294,36 @@ function recoverCleanupStage(paths, activation, stage) {
     durableUnlink(centralPath);
   }
   removePreparedTree(stage);
+}
+
+export function preflightCompositionCleanup(paths, activation) {
+  const referenced = new Set([activation.active.compositionId, activation.previous?.compositionId].filter(Boolean));
+  const stagedCompositionIds = new Set();
+  for (const name of readdirSync(paths.temporary).sort()) {
+    if (!name.startsWith("cleanup-")) continue;
+    const stage = join(paths.temporary, name);
+    const stat = lstatSync(stage);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) fail(`Foreign Composition cleanup stage requires manual inspection: ${stage}`);
+    const owner = readCleanupOwner(stage);
+    const names = readdirSync(stage);
+    if (names.some((entry) => !new Set(["owner.json", "leases", "composition"]).has(entry))) {
+      fail(`Foreign Composition cleanup stage requires manual inspection: ${stage}`);
+    }
+    const stagedLeases = join(stage, "leases");
+    if (pathExists(stagedLeases)) inspectLeaseDirectory(stagedLeases, owner.compositionId);
+    const stagedComposition = join(stage, "composition");
+    if (!pathExists(stagedComposition)) continue;
+    const receipt = verifyStagedComposition(stage, owner);
+    stagedCompositionIds.add(owner.compositionId);
+    const centralPath = join(paths.receipts, `${owner.compositionId}.json`);
+    if (pathExists(centralPath)) {
+      const central = readJson(centralPath, "central Composition receipt");
+      if (canonicalJson(central) !== canonicalJson(receipt)) fail(`Composition cleanup central receipt mismatch: ${stage}`);
+    } else if (referenced.has(owner.compositionId)) {
+      fail(`Referenced Composition cleanup receipt mismatch: ${stage}`);
+    }
+  }
+  return stagedCompositionIds;
 }
 
 export function recoverCompositionCleanup(paths, activation) {

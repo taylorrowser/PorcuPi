@@ -1645,7 +1645,7 @@ test("porcupi apply builds and atomically activates the exact ordered Patch seri
   assert.deepEqual(receipt.patches, activation.active.patches);
   assert.equal(receipt.porcupiVersion, "0.1.0");
   assert.equal(receipt.piBase.commit, base.commit);
-  assert.equal(receipt.recipe.id, "pi-v0.81.1-composition-v1");
+  assert.equal(receipt.recipe.id, "pi-v0.81.1-composition-v2");
   assert.equal(receipt.platform, `${process.platform}-${process.arch}`);
   assert.equal(receipt.requiredExecutable.path, "packages/coding-agent/dist/cli.js");
   assert.ok(receipt.payload.every((entry) => typeof entry.path === "string"

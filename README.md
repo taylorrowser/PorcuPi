@@ -2,17 +2,21 @@
 
 PorcuPi adds individual resource selection to Pi's Git package lifecycle and builds an isolated Managed Pi from explicitly selected source patches, without modifying Stock Pi.
 
-PorcuPi v1 targets macOS and Linux. The current implementation installs and launches a release-pinned Managed Pi, manages individually selected Pi resources and Patches from exact Git commits, atomically applies pending Patch intent as immutable compositions, and retains one verified local Composition for rollback.
+PorcuPi v1 targets macOS and Linux. The current release is [PorcuPi v0.1.0](docs/releases/v0.1.0.md). It installs and launches a release-pinned Managed Pi, manages individually selected Pi resources and Patches from exact Git commits, atomically applies pending Patch intent as immutable compositions, and retains one verified local Composition for rollback.
 
 ## Install the zero-Patch Managed Pi
 
-Prerequisites: Git, npm, and Node.js 22.19 or newer.
+Prerequisites: Git, npm, and Node.js 22.19 or newer. Existing `pi-wait-for-user` Managed Installation users must first follow the [old-manager uninstall and manual migration procedure](docs/migration-from-pi-wait-for-user.md); PorcuPi does not adopt legacy state or payloads.
 
-From a trusted PorcuPi checkout, run:
+Bootstrap from the exact versioned source rather than a moving branch:
 
 ```sh
+git clone --branch v0.1.0 --depth 1 https://github.com/taylorrowser/PorcuPi.git
+cd PorcuPi
 ./install.sh
 ```
+
+See the complete [v0.1.0 installation guide](docs/install.md) for release-commit confirmation, clean-machine and Stock Pi scenarios, foreign-collision behavior, trust limits, and external-isolation guidance.
 
 The three-page guided installer shows the exact Pi Base commit, asks whether PorcuPi should own the `pi` command, and reviews the result. The choice defaults to No; use arrows or `y`/`n`, press Enter to continue/install, or Escape to cancel. It:
 
@@ -136,6 +140,8 @@ Malformed state, receipt disagreement, platform/path mismatch, or a changed requ
 
 These checks provide local-corruption and reproducibility evidence only. They do not establish publisher identity or provenance, and they do not sandbox Pi or Patch-modified code.
 
+The focused [operations guide](docs/operations.md) covers the complete command surface, pending intent, forwarding, lifecycle serialization, leases, and recovery boundaries.
+
 ## Development
 
 Run the external-process acceptance suite with one command:
@@ -152,6 +158,6 @@ The separate networked release gate composes the exact 20-Patch `pi-wait-for-use
 npm run test:real-handoff -- --stock-pi=absent
 ```
 
-See [the real handoff acceptance contract](docs/acceptance/real-pi-wait-for-user-handoff.md) for its pinned identities, four-job matrix, complete public-process journey, environment requirements, and durable report format.
+See [the real handoff acceptance contract](docs/acceptance/real-pi-wait-for-user-handoff.md) for its pinned identities, four-job matrix, complete public-process journey, environment requirements, and durable report format. The v0.1.0 release record is [`release/v0.1.0.json`](release/v0.1.0.json), and its immutable evidence is linked from the [release notes](docs/releases/v0.1.0.md).
 
 The build specification and remaining tracer bullets are tracked in [PorcuPi v1 issue #12](https://github.com/taylorrowser/PorcuPi/issues/12).

@@ -14,6 +14,8 @@ Arguments not recognized as PorcuPi lifecycle commands are forwarded unchanged t
 
 ## Add exact source intent
 
+The [Source Repository guide](source-guide.md) explains how to consume a source and how to make Pi resources and Patches discoverable.
+
 ```sh
 porcupi add https://github.com/example/pi-resources@main
 porcupi add https://github.com/example/pi-resources@0123456789abcdef0123456789abcdef01234567

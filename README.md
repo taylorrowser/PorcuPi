@@ -56,6 +56,8 @@ Disabling never removes `porcupi`. Afterward, the shell may resolve an independe
 
 ## Add Pi resources from Git
 
+Use the complete [Source Repository guide](docs/source-guide.md) to consume a source or make Extensions, Skills, prompt templates, Themes, and Patches discoverable through PorcuPi.
+
 Use a Pi-compatible Git source, optionally with a branch, tag, or full commit:
 
 ```sh
@@ -160,4 +162,4 @@ npm run test:real-handoff -- --stock-pi=absent
 
 See [the real handoff acceptance contract](docs/acceptance/real-pi-wait-for-user-handoff.md) for its pinned identities, four-job matrix, complete public-process journey, environment requirements, and durable report format. The v0.1.0 release record is [`release/v0.1.0.json`](release/v0.1.0.json), and its immutable evidence is linked from the [release notes](docs/releases/v0.1.0.md).
 
-The build specification and remaining tracer bullets are tracked in [PorcuPi v1 issue #12](https://github.com/taylorrowser/PorcuPi/issues/12).
+The completed minimum-v1 specification and tracer-bullet history are recorded in [PorcuPi v1 issue #12](https://github.com/taylorrowser/PorcuPi/issues/12).

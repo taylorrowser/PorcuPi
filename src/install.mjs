@@ -45,7 +45,13 @@ import {
 import { runGuidedTerminal } from "./guided-terminal.mjs";
 import { cleanupRetainedCompositions, withLifecycleLock } from "./lifecycle.mjs";
 import { reconcilePiOwnershipLocked } from "./pi-ownership.mjs";
-import { readSelections } from "./resource-intent.mjs";
+import {
+  patchIntentPending,
+  patchSelectionSnapshot,
+  readSelections,
+  stageSelectionIntent,
+  summarizeRetainedPiResources,
+} from "./resource-intent.mjs";
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const migrationContractKey = (sourceVersion, targetVersion) => `${sourceVersion} → ${targetVersion}`;
@@ -182,7 +188,22 @@ function confirmInstallation(lock, input, output) {
   });
 }
 
-function confirmUpgrade({ active, installedVersion, lock, ownPi, input, output }) {
+function selectedArtifactReview(sources) {
+  return sources.flatMap((source) => source.artifacts.map((artifact) => {
+    const scope = artifact.scope ? ` [${artifact.scope}${artifact.projectRoot ? `: ${artifact.projectRoot}` : ""}]` : "";
+    return `${artifact.kind} ${source.locator}@${source.commit}:${artifact.path}${scope}`;
+  }));
+}
+
+function patchReview(patches) {
+  return patches.map((patch) => `${patch.locator}@${patch.commit}:${patch.path} (sha256 ${patch.sha256})`);
+}
+
+function confirmUpgrade({ active, installedVersion, lock, ownPi, selections, input, output }) {
+  const artifacts = selectedArtifactReview(selections.sources);
+  const selectedPatches = patchSelectionSnapshot(selections.sources);
+  const activePatches = active.activation.active.patches;
+  const pending = patchIntentPending(selections.sources, activePatches);
   let page = 0;
   return runGuidedTerminal({
     command: "PorcuPi upgrade",
@@ -200,15 +221,29 @@ function confirmUpgrade({ active, installedVersion, lock, ownPi, input, output }
           output.write("[Enter/→] Continue  [Esc] cancel\n");
         } else if (page === 1) {
           output.write("Upgrade Readiness Check: ready\n\n");
-          output.write("The exact zero-Patch target passed its fixed build, conformance, version, and smoke checks.\n");
-          output.write("The check did not change Activation, Compositions, launchers, Selection Intent, or shared Pi state.\n\n");
+          output.write(`The exact target with ${selectedPatches.length} selected Patch${selectedPatches.length === 1 ? "" : "es"} passed Patch preflight, fixed build, conformance, version, and smoke checks.\n`);
+          output.write(`${artifacts.length - selectedPatches.length} selected Pi resource${artifacts.length - selectedPatches.length === 1 ? "" : "s"} remained discoverable at the exact retained source snapshot.\n`);
+          output.write("The check did not change Activation, Compositions, launchers, Selection Intent, Pi settings/checkouts, or shared Pi state.\n\n");
           output.write("[Enter/→] Continue  [←] back  [Esc] cancel\n");
         } else {
           output.write(`PorcuPi: ${installedVersion} → ${porcupiVersion}\n`);
           output.write(`Pi Base: ${active.receipt.piBase.tag} → ${lock.tag}\n`);
-          output.write("Selection Intent: empty — selected Artifact upgrades are handled separately\n");
+          output.write(`Active Composition: ${active.activation.active.compositionId}\n`);
+          output.write(`Previous Composition: ${active.activation.previous?.compositionId ?? "none"}\n`);
+          output.write(`Patch Selection Intent: ${pending ? "pending — differs from the active Patch selection" : "current — matches the active Patch selection"}\n`);
+          output.write(`Active Patches (${activePatches.length}):\n`);
+          if (activePatches.length === 0) output.write("- none\n");
+          else for (const patch of patchReview(activePatches)) output.write(`- ${patch}\n`);
+          output.write(`Selected Patches (${selectedPatches.length}):\n`);
+          if (selectedPatches.length === 0) output.write("- none\n");
+          else for (const patch of patchReview(selectedPatches)) output.write(`- ${patch}\n`);
+          output.write(`Selected Artifacts (${artifacts.length}):\n`);
+          if (artifacts.length === 0) output.write("- none\n");
+          else for (const artifact of artifacts) output.write(`- ${artifact}\n`);
+          if (artifacts.length === 0) output.write("Selection Intent: empty\n");
           output.write(`Own \`pi\`: ${ownPi ? "Yes — existing reversible alias retained" : "No — independent resolution retained"}\n`);
-          output.write("Stock Pi and Pi-owned state: retained\n\n");
+          output.write("Pi package lifecycle: retained under Pi ownership\n");
+          output.write("Credentials, sessions, trust, package/project data, Stock Pi, and other shared state: retained\n\n");
           output.write("[Enter] Upgrade  [←] back  [Esc] cancel\n");
         }
       };
@@ -255,17 +290,17 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
   if (existing.active.activation.schemaVersion !== migration.sourceStateSchema) {
     fail(`Upgrade requires PorcuPi ${existing.installedVersion} state schema ${migration.sourceStateSchema}`);
   }
-  const activeReceipt = verifyPublishedComposition(paths, existing.active.activation.active.compositionId);
-  if (activeReceipt.patches.length !== 0 || existing.active.activation.active.patches.length !== 0) {
-    fail(`Upgrade Readiness Check blocked: PorcuPi ${porcupiVersion} supports only an intact zero-Patch v0.1.0 installation`);
-  }
+  verifyPublishedComposition(paths, existing.active.activation.active.compositionId);
   if (existing.active.activation.previous) {
     verifyPublishedComposition(paths, existing.active.activation.previous.compositionId);
   }
   const ownedPi = Boolean(verifyOptionalPiLauncher(paths, environment));
   const selections = readSelections(paths.root);
-  if (selections.sources.length !== 0) {
-    fail(`Upgrade Readiness Check blocked: PorcuPi ${porcupiVersion} selected Artifact migration is handled by a later upgrade contract`);
+  const resourceSummary = summarizeRetainedPiResources(paths.root, environment);
+  const changedResource = resourceSummary.resources.find((resource) => !resource.configured);
+  if (changedResource) {
+    const scope = changedResource.scope === "global" ? "global" : `project ${changedResource.projectRoot}`;
+    fail(`Upgrade Readiness Check blocked by externally changed Pi ${scope} package configuration for ${changedResource.locator}`);
   }
 
   output.write(`Upgrade candidate: installed PorcuPi ${existing.installedVersion}, target PorcuPi ${porcupiVersion}.\n`);
@@ -286,11 +321,12 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
   const previousRuntime = join(stageRoot, "previous-runtime");
   const previousRuntimeReceipt = readJson(paths.runtimeReceipt, "PorcuPi runtime receipt");
   try {
-    const receipt = buildComposition({ candidateRoot, stageRoot, patches: [], lock });
+    const stagedPatches = stageSelectionIntent({ stageRoot, sources: selections.sources, piBase: lock });
+    const receipt = buildComposition({ candidateRoot, stageRoot, patches: stagedPatches, lock });
     stageRuntime(stageRoot, "target-runtime");
     const targetActivation = {
       schemaVersion: migration.targetStateSchema,
-      active: { compositionId: receipt.compositionId, patches: [] },
+      active: { compositionId: receipt.compositionId, patches: receipt.patches },
       previous: existing.active.activation.active,
     };
     const confirmed = await confirmUpgrade({
@@ -298,6 +334,7 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
       installedVersion: existing.installedVersion,
       lock,
       ownPi: ownedPi,
+      selections,
       input,
       output,
     });
@@ -322,10 +359,10 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
     removePreparedTree(previousRuntime);
     removePreparedTree(stageRoot);
     output.write(`\nUpgraded PorcuPi from ${existing.installedVersion} to ${porcupiVersion}.\n`);
-    output.write(`Activated verified zero-Patch Managed Pi Composition ${receipt.compositionId}.\n`);
+    output.write(`Activated verified Managed Pi Composition ${receipt.compositionId} with ${receipt.patches.length} selected Patch${receipt.patches.length === 1 ? "" : "es"}.\n`);
     output.write(`Retained previous Managed Pi Composition ${existing.active.activation.active.compositionId}.\n`);
     output.write(`Command: ${launcher}\n`);
-    output.write("Stock Pi, Pi-owned state, empty Selection Intent, and `pi` ownership were preserved.\n");
+    output.write(`Preserved ${selectedArtifactReview(selections.sources).length} selected Artifacts, their Installation Scope, Pi-owned state, Stock Pi, and \`pi\` ownership.\n`);
     return { installed: true, upgraded: true, launcher, compositionId: receipt.compositionId };
   } catch (error) {
     if (runtimeSwitchStarted && !activated && pathExists(previousRuntime)) {

@@ -9,12 +9,11 @@ import {
   readFileSync,
   readdirSync,
   readlinkSync,
-  realpathSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, sep } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
@@ -27,6 +26,7 @@ import {
   defaultBinDirectory,
   defaultDataRoot,
   ensureCompositionLeaseDirectory,
+  exactObject,
   fail,
   managedLayout,
   managedRootOwner,
@@ -40,6 +40,7 @@ import {
   validateCompositionReceipt,
   validateCompositionLeaseDirectory,
   validateLauncherReceipt,
+  validateOwnedDirectory,
   validateRuntimeReceipt,
   verifyLauncher,
   verifyLauncherReceipt,
@@ -169,14 +170,6 @@ const upgradeCleanupFields = new Set([
 ]);
 const uuidV4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-function exactObject(value, fields) {
-  return value !== null
-    && typeof value === "object"
-    && !Array.isArray(value)
-    && Object.keys(value).length === fields.size
-    && Object.keys(value).every((key) => fields.has(key));
-}
-
 function scratchInventory(root) {
   const entries = [];
   const visit = (directory, prefix = "") => {
@@ -250,26 +243,8 @@ function runtimeReceiptFor(root) {
   };
 }
 
-function validateOwnedDirectoryLocation(ownershipRoot, path, label) {
-  let stat;
-  let realOwnershipRoot;
-  let realPath;
-  try {
-    stat = lstatSync(path);
-    realOwnershipRoot = realpathSync(ownershipRoot);
-    realPath = realpathSync(path);
-  } catch {
-    fail(`${label} is missing or path-escaping: ${path}`);
-  }
-  if (
-    !stat.isDirectory()
-    || stat.isSymbolicLink()
-    || (realPath !== realOwnershipRoot && !realPath.startsWith(`${realOwnershipRoot}${sep}`))
-  ) fail(`${label} is malformed or path-escaping: ${path}`);
-}
-
 function validateRuntimeDirectory(ownershipRoot, path, receipt, label) {
-  validateOwnedDirectoryLocation(ownershipRoot, path, label);
+  validateOwnedDirectory(ownershipRoot, path, label);
   if (runtimeReceiptFor(path).inventorySha256 !== receipt.inventorySha256) fail(`${label} inventory mismatch: ${path}`);
 }
 
@@ -288,7 +263,7 @@ function validateUpgradeRecoveryRoot(paths) {
   ) fail("Malformed PorcuPi upgrade recovery root");
   try {
     for (const path of [paths.temporary, paths.state, paths.compositions, paths.receipts, paths.leases]) {
-      validateOwnedDirectoryLocation(paths.root, path, "PorcuPi upgrade recovery directory");
+      validateOwnedDirectory(paths.root, path, "PorcuPi upgrade recovery directory");
     }
   } catch {
     fail("Malformed PorcuPi upgrade recovery root");
@@ -446,7 +421,7 @@ function replaceLauncher(path, contents, mode) {
 
 function runtimeKind(ownershipRoot, path, transaction) {
   if (!pathExists(path)) return "missing";
-  validateOwnedDirectoryLocation(ownershipRoot, path, "PorcuPi runtime during upgrade recovery");
+  validateOwnedDirectory(ownershipRoot, path, "PorcuPi runtime during upgrade recovery");
   const inventorySha256 = runtimeReceiptFor(path).inventorySha256;
   if (inventorySha256 === transaction.sourceRuntimeReceipt.inventorySha256) return "source";
   if (inventorySha256 === transaction.targetRuntimeReceipt.inventorySha256) return "target";

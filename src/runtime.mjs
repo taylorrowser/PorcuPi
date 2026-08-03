@@ -121,7 +121,7 @@ export function readJson(path, label = basename(path)) {
   }
 }
 
-function exactObject(value, fields) {
+export function exactObject(value, fields) {
   return value !== null
     && typeof value === "object"
     && !Array.isArray(value)
@@ -150,7 +150,7 @@ function withinRoot(root, path) {
   return realPath === realRoot || realPath.startsWith(`${realRoot}${sep}`);
 }
 
-function validateOwnedDirectory(root, path, label) {
+export function validateOwnedDirectory(root, path, label) {
   let stat;
   try {
     stat = lstatSync(path);

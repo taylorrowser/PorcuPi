@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import test, { after } from "node:test";
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const porcupiVersion = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")).version;
 const temporaryRoots = [];
 const childProcesses = [];
 
@@ -164,7 +165,7 @@ chmodSync(cli, 0o755);
 function createReleaseFixture(root, base, expectedVersion = "0.81.1") {
   const release = join(root, "porcupi-release");
   mkdirSync(release);
-  for (const path of ["install.sh", "package.json", "scripts", "src"]) {
+  for (const path of ["LICENSE", "README.md", "install.sh", "package-lock.json", "package.json", "release", "scripts", "src"]) {
     cpSync(join(repositoryRoot, path), join(release, path), { recursive: true });
   }
   const modelData = join(release, "upstream", "model-data", "fixture");
@@ -204,7 +205,7 @@ function createReleaseFixture(root, base, expectedVersion = "0.81.1") {
   }, null, 2)}\n`;
   writeFileSync(join(modelData, modelFile), modelContents);
   writeFileSync(join(modelData, ".manifest.json"), modelManifest);
-  writeFileSync(join(release, "upstream", "pi-base.json"), `${JSON.stringify({
+  const piBase = {
     schemaVersion: 1,
     repository: base.source,
     tag: "v0.81.1",
@@ -222,8 +223,51 @@ function createReleaseFixture(root, base, expectedVersion = "0.81.1") {
       { path: "packages/tui/package.json", name: "@earendil-works/pi-tui", version: expectedVersion },
       { path: "packages/coding-agent/package.json", name: "@earendil-works/pi-coding-agent", version: expectedVersion },
     ],
-  }, null, 2)}\n`);
+  };
+  writeFileSync(join(release, "upstream", "pi-base.json"), `${JSON.stringify(piBase, null, 2)}\n`);
+
+  const packageManifestPath = join(release, "package.json");
+  const packageManifest = JSON.parse(readFileSync(packageManifestPath, "utf8"));
+  const releaseRecordPath = join(release, "release", `v${packageManifest.version}.json`);
+  const releaseRecord = JSON.parse(readFileSync(releaseRecordPath, "utf8"));
+  releaseRecord.piBase = { repository: piBase.repository, tag: piBase.tag, commit: piBase.commit };
+  const packedInputs = [
+    `release/v${packageManifest.version}.json`,
+    "scripts/install.mjs",
+  ];
+  for (const directory of ["src", "upstream"]) {
+    const visit = (path) => {
+      for (const name of readdirSync(path).sort()) {
+        const child = join(path, name);
+        if (lstatSync(child).isDirectory()) visit(child);
+        else packedInputs.push(child.slice(release.length + 1));
+      }
+    };
+    visit(join(release, directory));
+  }
+  packageManifest.files = packedInputs;
+  writeFileSync(packageManifestPath, `${JSON.stringify(packageManifest, null, 2)}\n`);
+  const packageInputHash = createHash("sha256");
+  const packageInputPaths = ["package.json", ...packedInputs.filter((path) => !path.startsWith("release/"))].sort();
+  for (const path of packageInputPaths) {
+    packageInputHash.update(`${JSON.stringify(path)}\0`);
+    packageInputHash.update(readFileSync(join(release, path)));
+    packageInputHash.update("\0");
+  }
+  releaseRecord.packageInputsSha256 = packageInputHash.digest("hex");
+  writeFileSync(releaseRecordPath, `${JSON.stringify(releaseRecord, null, 2)}\n`);
   return release;
+}
+
+function packRelease(release, root) {
+  const destination = join(root, "packed");
+  mkdirSync(destination);
+  const output = execFileSync("npm", ["pack", "--json", "--pack-destination", destination], {
+    cwd: release,
+    encoding: "utf8",
+  });
+  const [{ filename }] = JSON.parse(output);
+  return join(destination, filename);
 }
 
 function runInstaller(release, home, inputHex = "0d", extraEnvironment = {}) {
@@ -233,6 +277,37 @@ function runInstaller(release, home, inputHex = "0d", extraEnvironment = {}) {
     [join(repositoryRoot, "test", "support", "pty-driver.py"), guidedInput, join(release, "install.sh")],
     {
       cwd: release,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: home,
+        XDG_DATA_HOME: join(home, ".local", "share"),
+        NODE_ENV: "test",
+        PTY_WAIT_FOR: "1 of 3 — Installation",
+        ...extraEnvironment,
+      },
+    },
+  );
+}
+
+function runPackedInstaller(artifact, home, inputHex = "0d", extraEnvironment = {}) {
+  const guidedInput = inputHex === "0d" ? "0d0d0d" : inputHex;
+  return spawnSync(
+    "python3",
+    [
+      join(repositoryRoot, "test", "support", "pty-driver.py"),
+      guidedInput,
+      "npm",
+      "exec",
+      "--yes",
+      "--offline",
+      "--package",
+      artifact,
+      "--",
+      "porcupi",
+    ],
+    {
+      cwd: dirname(artifact),
       encoding: "utf8",
       env: {
         ...process.env,
@@ -535,6 +610,79 @@ async function serveHttpRepository(root, repository) {
   }
   throw new Error("Git HTTP fixture did not start");
 }
+
+test("the packed npm artifact is behaviorally equivalent to the exact-tag source entrance", () => {
+  const root = temporaryRoot();
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  const artifact = packRelease(release, root);
+  const stockBin = join(root, "stock-bin");
+  const stockPi = join(stockBin, "pi");
+  mkdirSync(stockBin);
+  writeFileSync(stockPi, "#!/bin/sh\necho stock-pi\n");
+  chmodSync(stockPi, 0o755);
+  const stockBefore = readFileSync(stockPi);
+  const environment = { PATH: `${stockBin}:${process.env.PATH}` };
+
+  const cancelledHome = join(root, "cancelled-home");
+  mkdirSync(cancelledHome);
+  const cancelled = runPackedInstaller(artifact, cancelledHome, "1b", environment);
+  assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+  assert.match(cancelled.stdout, /Installation cancelled\. No changes were made\./);
+  assert.equal(existsSync(dataRoot(cancelledHome)), false);
+  assert.equal(existsSync(join(cancelledHome, ".local", "bin", "porcupi")), false);
+
+  const collisionHome = join(root, "collision-home");
+  const collisionLauncher = join(collisionHome, ".local", "bin", "porcupi");
+  mkdirSync(dirname(collisionLauncher), { recursive: true });
+  writeFileSync(collisionLauncher, "foreign command\n");
+  const collision = runPackedInstaller(artifact, collisionHome, "0d", environment);
+  assert.notEqual(collision.status, 0);
+  assert.match(collision.stdout, /Refusing foreign porcupi command collision/);
+  assert.equal(readFileSync(collisionLauncher, "utf8"), "foreign command\n");
+  assert.equal(existsSync(dataRoot(collisionHome)), false);
+
+  const sourceHome = join(root, "source-home");
+  const packedHome = join(root, "packed-home");
+  mkdirSync(sourceHome);
+  mkdirSync(packedHome);
+  const sourceInstall = runInstaller(release, sourceHome, "0d", environment);
+  const packedInstall = runPackedInstaller(artifact, packedHome, "0d", environment);
+  assert.equal(sourceInstall.status, 0, sourceInstall.stderr || sourceInstall.stdout);
+  assert.equal(packedInstall.status, 0, packedInstall.stderr || packedInstall.stdout);
+  assert.match(packedInstall.stdout, /Installed zero-Patch Managed Pi/);
+  assert.deepEqual(readFileSync(stockPi), stockBefore);
+  assert.equal(existsSync(join(packedHome, ".local", "bin", "pi")), false);
+
+  const sourceActivation = JSON.parse(readFileSync(join(dataRoot(sourceHome), "state", "activation.json"), "utf8"));
+  const packedActivation = JSON.parse(readFileSync(join(dataRoot(packedHome), "state", "activation.json"), "utf8"));
+  assert.deepEqual(packedActivation, sourceActivation);
+  assert.deepEqual(
+    readFileSync(join(dataRoot(packedHome), "receipts", `${packedActivation.active.compositionId}.json`)),
+    readFileSync(join(dataRoot(sourceHome), "receipts", `${sourceActivation.active.compositionId}.json`)),
+  );
+
+  const ownPi = runPackedInstaller(artifact, packedHome, "0d790d0d", environment);
+  assert.equal(ownPi.status, 0, ownPi.stderr || ownPi.stdout);
+  assert.match(ownPi.stdout, /Recovered installed zero-Patch Managed Pi/);
+  assert.equal(existsSync(join(packedHome, ".local", "bin", "pi")), true);
+  assert.deepEqual(readFileSync(stockPi), stockBefore);
+
+  rmSync(join(packedHome, ".npm"), { recursive: true, force: true });
+  const launch = runPorcuPiProcess(packedHome, ["--version"], environment);
+  assert.equal(launch.status, 0, launch.stderr || launch.stdout);
+  assert.equal(launch.stdout.trim(), "0.81.1");
+  const verified = runPorcuPiProcess(packedHome, ["verify"], environment);
+  assert.equal(verified.status, 0, verified.stderr || verified.stdout);
+  assert.match(verified.stdout, /Verified Managed Pi Composition/);
+  const uninstall = runPorcuPi(packedHome, ["uninstall"], "0d0d0d", environment);
+  assert.equal(uninstall.status, 0, uninstall.stderr || uninstall.stdout);
+  assert.match(uninstall.stdout, /Uninstalled receipt-proven PorcuPi state/);
+  assert.equal(existsSync(dataRoot(packedHome)), false);
+  assert.equal(existsSync(join(packedHome, ".local", "bin", "porcupi")), false);
+  assert.equal(existsSync(join(packedHome, ".local", "bin", "pi")), false);
+  assert.deepEqual(readFileSync(stockPi), stockBefore);
+});
 
 test("guided installation can be cancelled without creating PorcuPi state", () => {
   const root = temporaryRoot();
@@ -1643,7 +1791,7 @@ test("porcupi apply builds and atomically activates the exact ordered Patch seri
   const receiptPath = join(rootPath, "receipts", `${activation.active.compositionId}.json`);
   const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
   assert.deepEqual(receipt.patches, activation.active.patches);
-  assert.equal(receipt.porcupiVersion, "0.1.0");
+  assert.equal(receipt.porcupiVersion, porcupiVersion);
   assert.equal(receipt.piBase.commit, base.commit);
   assert.equal(receipt.recipe.id, "pi-v0.81.1-composition-v2");
   assert.equal(receipt.platform, `${process.platform}-${process.arch}`);

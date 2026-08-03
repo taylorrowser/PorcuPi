@@ -246,15 +246,16 @@ function createReleaseFixture(root, base, expectedVersion = "0.81.1") {
     visit(join(release, directory));
   }
   packageManifest.files = packedInputs;
+  writeFileSync(packageManifestPath, `${JSON.stringify(packageManifest, null, 2)}\n`);
   const packageInputHash = createHash("sha256");
-  for (const path of packedInputs.filter((path) => !path.startsWith("release/")).sort()) {
+  const packageInputPaths = ["package.json", ...packedInputs.filter((path) => !path.startsWith("release/"))].sort();
+  for (const path of packageInputPaths) {
     packageInputHash.update(`${JSON.stringify(path)}\0`);
     packageInputHash.update(readFileSync(join(release, path)));
     packageInputHash.update("\0");
   }
   releaseRecord.packageInputsSha256 = packageInputHash.digest("hex");
   writeFileSync(releaseRecordPath, `${JSON.stringify(releaseRecord, null, 2)}\n`);
-  writeFileSync(packageManifestPath, `${JSON.stringify(packageManifest, null, 2)}\n`);
   return release;
 }
 

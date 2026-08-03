@@ -109,6 +109,16 @@ test("release packing rejects implementation bytes from a different release iden
   assert.match(`${result.stdout}${result.stderr}`, /release record does not match the exact package input bytes/i);
 });
 
+test("release packing rejects package manifest bytes from a different release identity", () => {
+  const fixture = packageFixture();
+  writeFileSync(join(fixture, "package.json"), "\n", { flag: "a" });
+
+  const result = packFixture(fixture);
+
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}${result.stderr}`, /release record does not match the exact package input bytes/i);
+});
+
 test("release packing rejects undeclared content in release-fixed input roots", () => {
   const fixture = packageFixture();
   writeFileSync(join(fixture, "src", "undeclared.mjs"), "export {};\n");

@@ -64,11 +64,12 @@ const declaredReleaseRecords = [...declared].filter((path) => path.startsWith("r
 if (JSON.stringify(declaredReleaseRecords) !== JSON.stringify([releaseRecordPath])) {
   fail(`package must carry only its exact release record: ${releaseRecordPath}`);
 }
-const packageInputPaths = [...walk("src"), ...walk("upstream"), "scripts/install.mjs"].sort();
-for (const path of [...packageInputPaths, releaseRecordPath]) {
+const declaredInputPaths = [...walk("src"), ...walk("upstream"), "scripts/install.mjs"].sort();
+for (const path of [...declaredInputPaths, releaseRecordPath]) {
   if (!declared.has(path)) fail(`undeclared package input: ${path}`);
 }
 
+const packageInputPaths = ["package.json", ...declaredInputPaths].sort();
 const packageInputHash = createHash("sha256");
 for (const path of packageInputPaths) {
   packageInputHash.update(`${JSON.stringify(path)}\0`);

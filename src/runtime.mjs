@@ -380,13 +380,16 @@ function validateActivationEntry(value) {
   return value;
 }
 
-export function readActivation(paths) {
-  const activation = readJson(paths.activation, "PorcuPi activation");
+export function validateActivation(activation) {
   if (!exactObject(activation, activationFields) || activation.schemaVersion !== 1) fail("Malformed PorcuPi activation");
   validateActivationEntry(activation.active);
   if (activation.previous !== null) validateActivationEntry(activation.previous);
   if (activation.previous?.compositionId === activation.active.compositionId) fail("Malformed PorcuPi activation");
   return activation;
+}
+
+export function readActivation(paths) {
+  return validateActivation(readJson(paths.activation, "PorcuPi activation"));
 }
 
 function validateCompositionDirectory(paths, compositionId) {
@@ -526,7 +529,7 @@ export function validateRequiredExecutable(payloadRoot, expected) {
 
 export function createRuntimeReceipt(paths) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     type: "porcupi-runtime",
     inventorySha256: sha256Bytes(canonicalJson(createPayloadInventory(paths.runtime))),
   };
@@ -536,7 +539,7 @@ export function verifyRuntime(paths) {
   const receipt = readJson(paths.runtimeReceipt, "PorcuPi runtime receipt");
   if (
     !exactObject(receipt, runtimeReceiptFields)
-    || receipt.schemaVersion !== 1
+    || !new Set([1, 2]).has(receipt.schemaVersion)
     || receipt.type !== "porcupi-runtime"
     || !/^[a-f0-9]{64}$/.test(receipt.inventorySha256 || "")
   ) fail("Malformed PorcuPi runtime receipt");

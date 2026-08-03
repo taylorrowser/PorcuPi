@@ -167,6 +167,7 @@ const upgradeTransactionFields = new Set([
 ]);
 const upgradeCleanupFields = new Set([
   "schemaVersion", "type", "dataRoot", "sourceStage", "retiredStage", "targetVersion", "nonce", "inventory",
+  "removablePaths",
 ]);
 const uuidV4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -226,12 +227,20 @@ function validateScratchInventory(value, label) {
   return value;
 }
 
-function validateScratchRemainder(root, expected) {
+function validateScratchRemainder(root, expected, removablePaths) {
   const expectedByPath = new Map(expected.map((entry) => [entry.path, entry]));
-  for (const entry of scratchInventory(root)) {
+  const actual = scratchInventory(root);
+  const actualPaths = new Set(actual.map((entry) => entry.path));
+  for (const entry of actual) {
     if (canonicalJson(entry) !== canonicalJson(expectedByPath.get(entry.path))) {
       fail(`Retired PorcuPi upgrade stage changed during cleanup: ${root}`);
     }
+  }
+  for (const entry of expected) {
+    if (
+      !actualPaths.has(entry.path)
+      && !removablePaths.some((path) => entry.path === path || entry.path.startsWith(`${path}/`))
+    ) fail(`Retired PorcuPi upgrade stage changed during cleanup: ${root}`);
   }
 }
 
@@ -481,7 +490,7 @@ function validateUpgradePublicationState(paths, launcher, stage, transaction, en
   return { activation, kind };
 }
 
-function prepareUpgradeCleanup(paths, stage, owner) {
+function prepareUpgradeCleanup(paths, stage, owner, removablePaths = []) {
   const retiredStage = join(paths.temporary, `upgrade-retired-${owner.nonce}`);
   const cleanupMarker = join(paths.temporary, `upgrade-cleanup-${owner.nonce}.json`);
   if (!pathExists(cleanupMarker)) atomicWrite(cleanupMarker, {
@@ -493,6 +502,7 @@ function prepareUpgradeCleanup(paths, stage, owner) {
     targetVersion: owner.targetVersion,
     nonce: owner.nonce,
     inventory: scratchInventory(stage),
+    removablePaths,
   });
   return { cleanupMarker, retiredStage };
 }
@@ -571,7 +581,12 @@ function completeUpgradeTransaction(paths, launcher, stage, owner, environment, 
   checkpoint("upgrade-cleanup-started");
   cleanupRetainedCompositions(paths, transaction.targetActivation, output);
   checkpoint("upgrade-composition-cleanup-complete");
-  const { cleanupMarker, retiredStage } = prepareUpgradeCleanup(paths, stage, owner);
+  const { cleanupMarker, retiredStage } = prepareUpgradeCleanup(
+    paths,
+    stage,
+    owner,
+    ["previous-runtime", "published-runtime"],
+  );
   checkpoint("upgrade-cleanup-marker-written");
   removePreparedTree(join(stage, "previous-runtime"));
   checkpoint("upgrade-previous-runtime-removed");
@@ -614,6 +629,10 @@ function recoverUpgradeCleanupMarkers(paths) {
       || marker.sourceStage !== join(paths.temporary, `upgrade-${marker.nonce}`)
       || marker.retiredStage !== join(paths.temporary, `upgrade-retired-${marker.nonce}`)
       || name !== `upgrade-cleanup-${marker.nonce}.json`
+      || !Array.isArray(marker.removablePaths)
+      || !new Set([canonicalJson([]), canonicalJson(["previous-runtime", "published-runtime"])]).has(
+        canonicalJson(marker.removablePaths),
+      )
     ) fail(`Foreign PorcuPi upgrade cleanup marker requires manual inspection: ${markerPath}`);
     validateScratchInventory(marker.inventory, "PorcuPi upgrade cleanup inventory");
     if (pathExists(marker.retiredStage)) {
@@ -621,7 +640,7 @@ function recoverUpgradeCleanupMarkers(paths) {
       if (!stat.isDirectory() || stat.isSymbolicLink()) {
         fail(`Foreign PorcuPi retired upgrade stage requires manual inspection: ${marker.retiredStage}`);
       }
-      validateScratchRemainder(marker.retiredStage, marker.inventory);
+      validateScratchRemainder(marker.retiredStage, marker.inventory, marker.removablePaths);
       removePreparedTree(marker.retiredStage);
       durableUnlink(markerPath);
     } else if (pathExists(marker.sourceStage)) {
@@ -629,7 +648,7 @@ function recoverUpgradeCleanupMarkers(paths) {
       if (!stat.isDirectory() || stat.isSymbolicLink()) {
         fail(`Foreign PorcuPi upgrade stage requires manual inspection: ${marker.sourceStage}`);
       }
-      validateScratchRemainder(marker.sourceStage, marker.inventory);
+      validateScratchRemainder(marker.sourceStage, marker.inventory, marker.removablePaths);
     } else durableUnlink(markerPath);
   }
 }

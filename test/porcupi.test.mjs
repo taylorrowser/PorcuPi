@@ -360,6 +360,17 @@ function runPackedInstaller(artifact, home, inputHex = "0d", extraEnvironment = 
   );
 }
 
+function createUpgradeFixture() {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const targetRelease = createReleaseFixture(root, base);
+  const artifact = packRelease(targetRelease, root);
+  return { artifact, base, historicalRelease, home, root, targetRelease };
+}
+
 function dataRoot(home) {
   return process.platform === "darwin"
     ? join(home, "Library", "Application Support", "porcupi")
@@ -724,13 +735,7 @@ test("the packed npm artifact is behaviorally equivalent to the exact-tag source
 });
 
 test("the packed release upgrades an intact historical v0.1.0 zero-Patch installation", () => {
-  const root = temporaryRoot();
-  const home = join(root, "home");
-  mkdirSync(home);
-  const base = createPiBase(root);
-  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
-  const targetRelease = createReleaseFixture(root, base);
-  const artifact = packRelease(targetRelease, root);
+  const { artifact, historicalRelease, home, root } = createUpgradeFixture();
   const shared = createSharedSentinels(root, home);
   const environment = { PATH: `${dirname(shared.stockPi)}:${process.env.PATH}` };
 
@@ -812,13 +817,7 @@ test("the packed release upgrades an intact historical v0.1.0 zero-Patch install
 });
 
 test("the public exact-version installer recovers an interrupted upgrade after candidate publication", () => {
-  const root = temporaryRoot();
-  const home = join(root, "home");
-  mkdirSync(home);
-  const base = createPiBase(root);
-  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
-  const targetRelease = createReleaseFixture(root, base);
-  const artifact = packRelease(targetRelease, root);
+  const { artifact, historicalRelease, home } = createUpgradeFixture();
 
   const historicalInstall = runInstaller(historicalRelease, home, "0d790d0d");
   assert.equal(historicalInstall.status, 0, historicalInstall.stderr || historicalInstall.stdout);
@@ -845,13 +844,7 @@ test("the public exact-version installer recovers an interrupted upgrade after c
 });
 
 test("modified upgrade transaction targets are refused and left untouched", () => {
-  const root = temporaryRoot();
-  const home = join(root, "home");
-  mkdirSync(home);
-  const base = createPiBase(root);
-  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
-  const targetRelease = createReleaseFixture(root, base);
-  const artifact = packRelease(targetRelease, root);
+  const { artifact, historicalRelease, home, root } = createUpgradeFixture();
   assert.equal(runInstaller(historicalRelease, home).status, 0);
   const interrupted = runPackedInstaller(artifact, home, "0d0d0d", {
     PORCUPI_TEST_FAULT: "upgrade-candidate-published",
@@ -895,7 +888,7 @@ test("modified upgrade transaction targets are refused and left untouched", () =
   const escapedRuntimeBefore = treeDigest(escapedRuntime);
   const substituted = runPackedInstaller(artifact, home, "");
   assert.notEqual(substituted.status, 0);
-  assert.match(`${substituted.stdout}${substituted.stderr}`, /runtime.*malformed|Foreign PorcuPi upgrade transaction/i);
+  assert.match(`${substituted.stdout}${substituted.stderr}`, /malformed.*runtime|runtime.*malformed|Foreign PorcuPi upgrade transaction/i);
   assert.equal(lstatSync(stableRuntime).isSymbolicLink(), true);
   assert.equal(realpathSync(stableRuntime), realpathSync(escapedRuntime));
   assert.equal(treeDigest(escapedRuntime), escapedRuntimeBefore);
@@ -930,13 +923,7 @@ test("modified upgrade transaction targets are refused and left untouched", () =
 });
 
 test("modified retired upgrade cleanup stages are reported and left untouched", () => {
-  const root = temporaryRoot();
-  const home = join(root, "home");
-  mkdirSync(home);
-  const base = createPiBase(root);
-  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
-  const targetRelease = createReleaseFixture(root, base);
-  const artifact = packRelease(targetRelease, root);
+  const { artifact, historicalRelease, home } = createUpgradeFixture();
   assert.equal(runInstaller(historicalRelease, home).status, 0);
   const interrupted = runPackedInstaller(artifact, home, "0d0d0d", {
     PORCUPI_TEST_FAULT: "upgrade-cleanup-retired",
@@ -954,6 +941,13 @@ test("modified retired upgrade cleanup stages are reported and left untouched", 
   assert.notEqual(retry.status, 0);
   assert.match(`${retry.stdout}${retry.stderr}`, /Retired PorcuPi upgrade stage changed during cleanup/);
   assert.equal(readFileSync(foreign, "utf8"), "foreign\n");
+
+  unlinkSync(foreign);
+  unlinkSync(join(retired, "transaction.json"));
+  const truncated = runPackedInstaller(artifact, home, "");
+  assert.notEqual(truncated.status, 0);
+  assert.match(`${truncated.stdout}${truncated.stderr}`, /Retired PorcuPi upgrade stage changed during cleanup/);
+  assert.equal(existsSync(retired), true);
 });
 
 test("public launch, verify, and installer retry converge across upgrade publication interruptions", () => {
@@ -977,13 +971,7 @@ test("public launch, verify, and installer retry converge across upgrade publica
     "upgrade-cleanup-complete",
   ];
   for (const boundary of boundaries) {
-    const root = temporaryRoot();
-    const home = join(root, "home");
-    mkdirSync(home);
-    const base = createPiBase(root);
-    const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
-    const targetRelease = createReleaseFixture(root, base);
-    const artifact = packRelease(targetRelease, root);
+    const { artifact, historicalRelease, home } = createUpgradeFixture();
     assert.equal(runInstaller(historicalRelease, home, "0d790d0d").status, 0, boundary);
 
     const interrupted = runPackedInstaller(artifact, home, "0d0d0d", {
@@ -1008,13 +996,7 @@ test("public launch, verify, and installer retry converge across upgrade publica
 });
 
 test("release upgrade refuses a competing live lifecycle owner without changing state", async () => {
-  const root = temporaryRoot();
-  const home = join(root, "home");
-  mkdirSync(home);
-  const base = createPiBase(root);
-  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
-  const targetRelease = createReleaseFixture(root, base);
-  const artifact = packRelease(targetRelease, root);
+  const { artifact, historicalRelease, home } = createUpgradeFixture();
   assert.equal(runInstaller(historicalRelease, home, "0d790d0d").status, 0);
   const managedRoot = dataRoot(home);
   const before = treeDigest(managedRoot);
@@ -1046,13 +1028,7 @@ test("release upgrade refuses a competing live lifecycle owner without changing 
 });
 
 test("ordinary launch waits through a live upgrade launcher transition and observes the new installation", async () => {
-  const root = temporaryRoot();
-  const home = join(root, "home");
-  mkdirSync(home);
-  const base = createPiBase(root);
-  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
-  const targetRelease = createReleaseFixture(root, base);
-  const artifact = packRelease(targetRelease, root);
+  const { artifact, historicalRelease, home, root } = createUpgradeFixture();
   assert.equal(runInstaller(historicalRelease, home).status, 0);
   const boundaryFile = join(root, "upgrade-boundary");
   const installer = spawn("python3", [
@@ -1098,13 +1074,7 @@ test("ordinary launch waits through a live upgrade launcher transition and obser
 });
 
 test("release upgrade defers cleanup of an unreferenced Composition with a live lease", async () => {
-  const root = temporaryRoot();
-  const home = join(root, "home");
-  mkdirSync(home);
-  const base = createPiBase(root);
-  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
-  const targetRelease = createReleaseFixture(root, base);
-  const artifact = packRelease(targetRelease, root);
+  const { artifact, historicalRelease, home, root } = createUpgradeFixture();
   assert.equal(runInstaller(historicalRelease, home).status, 0);
   const managedRoot = dataRoot(home);
   const activationPath = join(managedRoot, "state", "activation.json");

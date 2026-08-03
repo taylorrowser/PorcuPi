@@ -1,10 +1,16 @@
 import { randomUUID } from "node:crypto";
 import {
+  chmodSync,
+  closeSync,
+  constants,
+  copyFileSync,
   cpSync,
   existsSync,
+  fsyncSync,
   linkSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -17,6 +23,7 @@ import {
   atomicWrite,
   canonicalJson,
   createLauncherReceipt,
+  createPayloadInventory,
   createRuntimeReceipt,
   defaultBinDirectory,
   defaultDataRoot,
@@ -46,11 +53,15 @@ import {
 import { runGuidedTerminal } from "./guided-terminal.mjs";
 import { cleanupRetainedCompositions, withLifecycleLock } from "./lifecycle.mjs";
 import { reconcilePiOwnershipLocked } from "./pi-ownership.mjs";
-import { patchSelectionSnapshot, readSelections } from "./resource-intent.mjs";
+import { patchIntentPending, patchSelectionSnapshot, readSelections } from "./resource-intent.mjs";
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const upgradeMigrationContracts = new Map([
-  ["0.1.0", Object.freeze({ sourceStateSchema: 1, targetStateSchema: 1 })],
+  ["0.1.0", Object.freeze({
+    sourceStateSchema: 1,
+    targetStateSchema: 1,
+    runtimeChangedPaths: Object.freeze(["runtime.mjs", "install.mjs", "package.json"]),
+  })],
 ]);
 const upgradeOwnerBaseFields = new Set(["schemaVersion", "type", "installedVersion", "targetVersion", "phase"]);
 const upgradeOwnerCompleteFields = new Set([
@@ -84,6 +95,77 @@ function stageRuntime(stageRoot, name = "runtime") {
 
 function publishFreshRuntime(paths, stageRoot) {
   renameSync(stageRuntime(stageRoot), paths.runtime);
+}
+
+function atomicallyReplaceRuntimeFile(source, destination) {
+  const sourceStat = lstatSync(source);
+  const destinationStat = lstatSync(destination);
+  if (
+    !sourceStat.isFile()
+    || sourceStat.isSymbolicLink()
+    || !destinationStat.isFile()
+    || destinationStat.isSymbolicLink()
+  ) fail(`Upgrade runtime path is not a regular file: ${destination}`);
+  const temporary = join(dirname(destination), `.${basename(destination)}.upgrade-${randomUUID()}`);
+  try {
+    copyFileSync(source, temporary, constants.COPYFILE_EXCL);
+    chmodSync(temporary, sourceStat.mode & 0o777);
+    const file = openSync(temporary, "r");
+    try {
+      fsyncSync(file);
+    } finally {
+      closeSync(file);
+    }
+    renameSync(temporary, destination);
+    try {
+      const directory = openSync(dirname(destination), "r");
+      try {
+        fsyncSync(directory);
+      } finally {
+        closeSync(directory);
+      }
+    } catch {
+      // Atomic replacement still prevents a missing or partial runtime file.
+    }
+  } finally {
+    if (pathExists(temporary)) unlinkSync(temporary);
+  }
+}
+
+function validateRuntimeMigration(paths, targetRuntime, migration) {
+  const sourceEntries = new Map(createPayloadInventory(paths.runtime).map((entry) => [entry.path, entry]));
+  const targetEntries = new Map(createPayloadInventory(targetRuntime).map((entry) => [entry.path, entry]));
+  const changed = new Set(migration.runtimeChangedPaths);
+  const sourceOnly = [...sourceEntries.keys()].filter((path) => !targetEntries.has(path));
+  const targetOnly = [...targetEntries.keys()].filter((path) => !sourceEntries.has(path));
+  if (sourceEntries.size !== targetEntries.size || sourceOnly.length !== 0 || targetOnly.length !== 0) {
+    fail(`Upgrade runtime migration requires identical source and target inventories; source-only: ${sourceOnly.join(", ") || "none"}; target-only: ${targetOnly.join(", ") || "none"}`);
+  }
+  for (const [path, sourceEntry] of sourceEntries) {
+    const targetEntry = targetEntries.get(path);
+    const differs = canonicalJson(sourceEntry) !== canonicalJson(targetEntry);
+    if (differs !== changed.has(path)) {
+      fail(`Upgrade runtime migration contract mismatch at ${path}`);
+    }
+    if (changed.has(path) && (sourceEntry.kind !== "file" || targetEntry.kind !== "file")) {
+      fail(`Upgrade runtime migration requires regular changed files: ${path}`);
+    }
+  }
+}
+
+function publishTargetRuntimeFiles(paths, stageRoot, migration) {
+  const targetRuntime = join(stageRoot, "target-runtime");
+  for (const path of migration.runtimeChangedPaths) {
+    atomicallyReplaceRuntimeFile(join(targetRuntime, path), join(paths.runtime, path));
+    checkpoint(`upgrade-runtime-${path.replaceAll(".", "-")}-published`);
+  }
+}
+
+function restorePreviousRuntimeFiles(paths, stageRoot, migration) {
+  const previousRuntime = join(stageRoot, "previous-runtime");
+  for (const path of migration.runtimeChangedPaths) {
+    atomicallyReplaceRuntimeFile(join(previousRuntime, path), join(paths.runtime, path));
+  }
 }
 
 function compareVersions(left, right) {
@@ -125,6 +207,7 @@ function readInstalledVersion(paths) {
 }
 
 function recoverUpgradeStages(paths, environment, output) {
+  let recoveredUpgrade = null;
   for (const name of readdirSync(paths.temporary).sort()) {
     if (!name.startsWith("upgrade-")) continue;
     const stageRoot = join(paths.temporary, name);
@@ -149,31 +232,25 @@ function recoverUpgradeStages(paths, environment, output) {
       removePreparedTree(stageRoot);
       continue;
     }
+    const migration = upgradeMigrationContracts.get(owner.installedVersion);
     if (
-      typeof owner.targetCompositionId !== "string"
+      !migration
+      || typeof owner.targetCompositionId !== "string"
       || owner.targetActivation?.active?.compositionId !== owner.targetCompositionId
       || owner.targetActivation?.previous?.compositionId !== owner.sourceActivation?.active?.compositionId
+      || owner.previousRuntimeReceipt?.schemaVersion !== 1
       || owner.previousRuntimeReceipt?.type !== "porcupi-runtime"
+      || !/^[a-f0-9]{64}$/.test(owner.previousRuntimeReceipt?.inventorySha256 || "")
     ) fail(`Upgrade stage does not match the invoking release: ${stageRoot}`);
 
-    const previousRuntime = join(stageRoot, "previous-runtime");
-    const targetRuntime = join(stageRoot, "target-runtime");
     if (owner.phase === "runtime-switching") {
-      if (pathExists(targetRuntime)) {
-        const hasRuntime = pathExists(paths.runtime);
-        const hasPreviousRuntime = pathExists(previousRuntime);
-        if (hasRuntime === hasPreviousRuntime) {
-          fail(`Interrupted upgrade runtime state requires manual inspection: ${stageRoot}`);
-        }
-        if (!hasRuntime) renameSync(previousRuntime, paths.runtime);
-        atomicWrite(paths.runtimeReceipt, owner.previousRuntimeReceipt);
-        removePreparedTree(stageRoot);
-        output.write("Recovered an interrupted upgrade before the runtime switch.\n");
-        continue;
-      }
-      if (!pathExists(paths.runtime) || !pathExists(previousRuntime)) {
+      const targetRuntime = join(stageRoot, "target-runtime");
+      const previousRuntime = join(stageRoot, "previous-runtime");
+      if (!pathExists(targetRuntime) || !pathExists(previousRuntime) || !pathExists(paths.runtime)) {
         fail(`Interrupted upgrade runtime state requires manual inspection: ${stageRoot}`);
       }
+      validateRuntimeMigration({ ...paths, runtime: previousRuntime }, targetRuntime, migration);
+      publishTargetRuntimeFiles(paths, stageRoot, migration);
       atomicWrite(paths.runtimeReceipt, createRuntimeReceipt(paths));
       atomicWrite(join(stageRoot, "owner.json"), { ...owner, phase: "runtime-published" });
       owner.phase = "runtime-published";
@@ -193,12 +270,13 @@ function recoverUpgradeStages(paths, environment, output) {
       if (canonicalJson(activation) !== canonicalJson(owner.targetActivation)) {
         fail(`Activated upgrade state mismatch: ${stageRoot}`);
       }
-      removePreparedTree(previousRuntime);
       removePreparedTree(stageRoot);
       cleanupRetainedCompositions(paths, activation, output);
       output.write(`Recovered completed PorcuPi upgrade to ${owner.targetVersion}.\n`);
+      recoveredUpgrade = { installed: true, upgraded: true, recovered: true, compositionId: owner.targetCompositionId };
     }
   }
+  return recoveredUpgrade;
 }
 
 function checkpoint(name) {
@@ -267,7 +345,16 @@ function confirmInstallation(lock, input, output) {
   });
 }
 
-function confirmUpgrade({ active, installedVersion, lock, ownPi, selectionCount, input, output }) {
+function selectedArtifactReview(sources) {
+  return sources.flatMap((source) => source.artifacts.map((artifact) => {
+    const scope = artifact.scope ? ` [${artifact.scope}${artifact.projectRoot ? `: ${artifact.projectRoot}` : ""}]` : "";
+    return `${artifact.kind} ${source.locator}@${source.commit}:${artifact.path}${scope}`;
+  }));
+}
+
+function confirmUpgrade({ active, installedVersion, lock, ownPi, selections, input, output }) {
+  const artifacts = selectedArtifactReview(selections.sources);
+  const pending = patchIntentPending(selections.sources, active.activation.active.patches);
   let page = 0;
   return runGuidedTerminal({
     command: "PorcuPi upgrade",
@@ -291,7 +378,12 @@ function confirmUpgrade({ active, installedVersion, lock, ownPi, selectionCount,
         } else {
           output.write(`PorcuPi: ${installedVersion} → ${porcupiVersion}\n`);
           output.write(`Pi Base: ${active.receipt.piBase.tag} → ${lock.tag}\n`);
-          output.write(`Selection Intent: ${selectionCount} Source Repositor${selectionCount === 1 ? "y" : "ies"} retained\n`);
+          output.write(`Active Composition: ${active.activation.active.compositionId}\n`);
+          output.write(`Previous Composition: ${active.activation.previous?.compositionId ?? "none"}\n`);
+          output.write(`Patch Selection Intent: ${pending ? "pending — differs from the active Patch selection" : "current — matches the active Patch selection"}\n`);
+          output.write(`Selected Artifacts (${artifacts.length}):\n`);
+          if (artifacts.length === 0) output.write("- none\n");
+          else for (const artifact of artifacts) output.write(`- ${artifact}\n`);
           output.write(`Own \`pi\`: ${ownPi ? "Yes — existing reversible alias retained" : "No — independent resolution retained"}\n`);
           output.write("Stock Pi and Pi-owned state: retained\n\n");
           output.write("[Enter] Upgrade  [←] back  [Esc] cancel\n");
@@ -346,14 +438,22 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
   }
   const ownedPi = Boolean(verifyOptionalPiLauncher(paths, environment));
   const selections = readSelections(paths.root);
-  const patches = patchSelectionSnapshot(selections.sources);
-  if (patches.length !== 0) {
-    fail(`Upgrade Readiness Check blocked: target ${porcupiVersion} requires zero Patch Selection Intent; found ${patches.length}`);
-  }
+  const selectedPatches = patchSelectionSnapshot(selections.sources);
+  const activePatches = existing.active.activation.active.patches;
 
   output.write(`Upgrade candidate: installed PorcuPi ${existing.installedVersion}, target PorcuPi ${porcupiVersion}.\n`);
   output.write(`Migration contract: state schema ${migration.sourceStateSchema} → ${migration.targetStateSchema}.\n`);
   output.write(`Installed Pi Base: ${existing.active.receipt.piBase.tag} (${existing.active.receipt.piBase.commit}); target Pi Base: ${lock.tag} (${lock.commit}).\n`);
+  if (selectedPatches.length !== 0 || activePatches.length !== 0) {
+    output.write(`Upgrade Readiness Check blocked for target Pi Base ${lock.tag} (${lock.commit}):\n`);
+    for (const patch of selectedPatches) {
+      output.write(`- selected Patch ${patch.locator}@${patch.commit}:${patch.path} (sha256 ${patch.sha256})\n`);
+    }
+    for (const patch of activePatches) {
+      output.write(`- active Patch ${patch.locator}@${patch.commit}:${patch.path} (sha256 ${patch.sha256})\n`);
+    }
+    fail(`Upgrade Readiness Check blocked: target PorcuPi ${porcupiVersion} requires zero selected and active Patches; exact blockers are listed above`);
+  }
   const stageRoot = join(paths.temporary, `upgrade-${randomUUID()}`);
   let stageOwner = {
     schemaVersion: 1,
@@ -372,7 +472,9 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
   const previousRuntimeReceipt = readJson(paths.runtimeReceipt, "PorcuPi runtime receipt");
   try {
     const receipt = buildComposition({ candidateRoot, stageRoot, patches: [], lock });
-    stageRuntime(stageRoot, "target-runtime");
+    const targetRuntime = stageRuntime(stageRoot, "target-runtime");
+    cpSync(paths.runtime, previousRuntime, { recursive: true });
+    validateRuntimeMigration(paths, targetRuntime, migration);
     const targetActivation = {
       schemaVersion: migration.targetStateSchema,
       active: { compositionId: receipt.compositionId, patches: [] },
@@ -392,7 +494,7 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
       installedVersion: existing.installedVersion,
       lock,
       ownPi: ownedPi,
-      selectionCount: selections.sources.length,
+      selections,
       input,
       output,
     });
@@ -410,8 +512,7 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
     stageOwner = { ...stageOwner, phase: "runtime-switching" };
     atomicWrite(join(stageRoot, "owner.json"), stageOwner);
     runtimeSwitchStarted = true;
-    renameSync(paths.runtime, previousRuntime);
-    renameSync(join(stageRoot, "target-runtime"), paths.runtime);
+    publishTargetRuntimeFiles(paths, stageRoot, migration);
     atomicWrite(paths.runtimeReceipt, createRuntimeReceipt(paths));
     stageOwner = { ...stageOwner, phase: "runtime-published" };
     atomicWrite(join(stageRoot, "owner.json"), stageOwner);
@@ -425,7 +526,6 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
     stageOwner = { ...stageOwner, phase: "activated" };
     atomicWrite(join(stageRoot, "owner.json"), stageOwner);
     checkpoint("upgrade-activation-written");
-    removePreparedTree(previousRuntime);
     removePreparedTree(stageRoot);
     cleanupRetainedCompositions(paths, activation, output);
     output.write(`\nUpgraded PorcuPi from ${existing.installedVersion} to ${porcupiVersion}.\n`);
@@ -436,8 +536,7 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
     return { installed: true, upgraded: true, launcher, compositionId: receipt.compositionId };
   } catch (error) {
     if (runtimeSwitchStarted && !activated && pathExists(previousRuntime)) {
-      removePreparedTree(paths.runtime);
-      renameSync(previousRuntime, paths.runtime);
+      restorePreviousRuntimeFiles(paths, stageRoot, migration);
       atomicWrite(paths.runtimeReceipt, previousRuntimeReceipt);
     }
     removePreparedTree(stageRoot);
@@ -460,8 +559,9 @@ async function installManagedPiLocked({
   const paths = managedLayout(dataRoot);
 
   if (pathExists(paths.root) && pathExists(paths.activation)) {
-    recoverUpgradeStages(paths, environment, output);
+    const recoveredUpgrade = recoverUpgradeStages(paths, environment, output);
     const existing = validateExistingInstallation(paths, launcher, environment);
+    if (recoveredUpgrade) return { ...recoveredUpgrade, launcher };
     const comparison = compareVersions(porcupiVersion, existing.installedVersion);
     if (comparison < 0) {
       fail(`Unsupported PorcuPi downgrade: installed ${existing.installedVersion}, invoked target ${porcupiVersion}; no changes were made`);
@@ -473,16 +573,15 @@ async function installManagedPiLocked({
       return upgradeManagedPi({ paths, launcher, existing, lock, input, output, environment });
     }
 
-    const ownPi = await confirmInstallation(lock, input, output);
-    if (ownPi === null) {
-      output.write("\nInstallation cancelled. No changes were made.\n");
-      return { installed: false };
-    }
     if (!existing.hasLauncher) publishLauncher(launcher, existing.installedCli);
     if (!existing.hasLauncherReceipt) atomicWrite(paths.launcherReceipt, createLauncherReceipt(launcher));
     verifyLauncher(paths, environment);
     verifyPublishedComposition(paths, existing.active.activation.active.compositionId);
-    reconcilePiOwnershipLocked(paths, ownPi, environment, output);
+    if (pathExists(paths.piTransition)) {
+      const transition = readJson(paths.piTransition, "PorcuPi pi ownership transition");
+      if (!new Set(["enable", "disable"]).has(transition?.action)) fail("Malformed PorcuPi pi ownership transition");
+      reconcilePiOwnershipLocked(paths, transition.action === "enable", environment, output);
+    }
     verifyOptionalPiLauncher(paths, environment);
     output.write(`\nRecovered installed zero-Patch Managed Pi ${existing.active.receipt.piBase.tag}.\n`);
     output.write(`Verified installed PorcuPi ${porcupiVersion}; no rebuild was needed.\n`);

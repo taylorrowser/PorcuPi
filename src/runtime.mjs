@@ -526,7 +526,7 @@ export function validateRequiredExecutable(payloadRoot, expected) {
 
 export function createRuntimeReceipt(paths) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     type: "porcupi-runtime",
     inventorySha256: sha256Bytes(canonicalJson(createPayloadInventory(paths.runtime))),
   };
@@ -536,7 +536,7 @@ export function verifyRuntime(paths) {
   const receipt = readJson(paths.runtimeReceipt, "PorcuPi runtime receipt");
   if (
     !exactObject(receipt, runtimeReceiptFields)
-    || receipt.schemaVersion !== 1
+    || !new Set([1, 2]).has(receipt.schemaVersion)
     || receipt.type !== "porcupi-runtime"
     || !/^[a-f0-9]{64}$/.test(receipt.inventorySha256 || "")
   ) fail("Malformed PorcuPi runtime receipt");

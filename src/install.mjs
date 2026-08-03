@@ -701,7 +701,9 @@ function retireUpgradeScratch(paths, stage, owner) {
 function recoverInterruptedUpgradesLocked(paths, launcher, environment, output) {
   if (!pathExists(paths.temporary)) return [];
   const temporaryStat = lstatSync(paths.temporary);
-  if (!temporaryStat.isDirectory() || temporaryStat.isSymbolicLink()) return [];
+  if (!temporaryStat.isDirectory() || temporaryStat.isSymbolicLink()) {
+    fail("Malformed PorcuPi upgrade recovery root");
+  }
   if (!readdirSync(paths.temporary).some((name) => name.startsWith("upgrade-"))) return [];
   validateUpgradeRecoveryRoot(paths);
   validateUpgradeTemporaryNames(paths);
@@ -733,7 +735,9 @@ export async function recoverInterruptedUpgrade({
   let waitedForPublisher = false;
   for (let attempt = 0; attempt < 1_500; attempt += 1) {
     const temporaryStat = lstatSync(paths.temporary);
-    if (!temporaryStat.isDirectory() || temporaryStat.isSymbolicLink()) return noUpgradeRecovery;
+    if (!temporaryStat.isDirectory() || temporaryStat.isSymbolicLink()) {
+      fail("Malformed PorcuPi upgrade recovery root");
+    }
     const hasUpgrade = readdirSync(paths.temporary).some((name) => name.startsWith("upgrade-"));
     if (!hasUpgrade) return waitedForPublisher ? restartAfterUpgradeRecovery : noUpgradeRecovery;
     validateUpgradeRecoveryRoot(paths);

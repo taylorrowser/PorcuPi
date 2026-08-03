@@ -917,6 +917,18 @@ test("modified upgrade transaction targets are refused and left untouched", () =
   unlinkSync(stableState);
   renameSync(escapedState, stableState);
 
+  const escapedTemporary = join(root, "escaped-temporary");
+  renameSync(temporary, escapedTemporary);
+  symlinkSync(escapedTemporary, temporary);
+  const escapedTemporaryBefore = treeDigest(escapedTemporary);
+  const escapedTemporaryRetry = runPackedInstaller(artifact, home, "");
+  assert.notEqual(escapedTemporaryRetry.status, 0);
+  assert.match(`${escapedTemporaryRetry.stdout}${escapedTemporaryRetry.stderr}`, /Malformed PorcuPi upgrade recovery root/);
+  assert.equal(lstatSync(temporary).isSymbolicLink(), true);
+  assert.equal(treeDigest(escapedTemporary), escapedTemporaryBefore);
+  unlinkSync(temporary);
+  renameSync(escapedTemporary, temporary);
+
   const publishedCli = join(stage, "published-runtime", "cli.mjs");
   const publishedCliBefore = readFileSync(publishedCli);
   writeFileSync(publishedCli, "\n// foreign publication modification\n", { flag: "a" });

@@ -74,6 +74,8 @@ const migrationContractKey = (sourceVersion, targetVersion) => `${sourceVersion}
 const upgradeMigrationContracts = new Map([
   [migrationContractKey("0.1.0", "0.2.0"), Object.freeze({ sourceStateSchema: 1, targetStateSchema: 1 })],
 ]);
+const noUpgradeRecovery = Object.freeze({ restartRequired: false });
+const restartAfterUpgradeRecovery = Object.freeze({ restartRequired: true });
 
 function initializeFreshRoot(paths) {
   if (pathExists(paths.root)) {
@@ -248,7 +250,7 @@ function runtimeReceiptFor(root) {
   };
 }
 
-function validateRuntimeLocation(ownershipRoot, path, label) {
+function validateOwnedDirectoryLocation(ownershipRoot, path, label) {
   let stat;
   let realOwnershipRoot;
   let realPath;
@@ -267,30 +269,30 @@ function validateRuntimeLocation(ownershipRoot, path, label) {
 }
 
 function validateRuntimeDirectory(ownershipRoot, path, receipt, label) {
-  validateRuntimeLocation(ownershipRoot, path, label);
+  validateOwnedDirectoryLocation(ownershipRoot, path, label);
   if (runtimeReceiptFor(path).inventorySha256 !== receipt.inventorySha256) fail(`${label} inventory mismatch: ${path}`);
 }
 
 function validateUpgradeRecoveryRoot(paths) {
   let rootStat;
-  let temporaryStat;
   try {
     rootStat = lstatSync(paths.root);
-    temporaryStat = lstatSync(paths.temporary);
   } catch {
     fail("Malformed PorcuPi upgrade recovery root");
   }
   const owner = readJson(paths.owner, "PorcuPi root ownership");
-  const realRoot = realpathSync(paths.root);
-  const realTemporary = realpathSync(paths.temporary);
   if (
     !rootStat.isDirectory()
     || rootStat.isSymbolicLink()
-    || !temporaryStat.isDirectory()
-    || temporaryStat.isSymbolicLink()
     || canonicalJson(owner) !== canonicalJson(managedRootOwner)
-    || (realTemporary !== realRoot && !realTemporary.startsWith(`${realRoot}${sep}`))
   ) fail("Malformed PorcuPi upgrade recovery root");
+  try {
+    for (const path of [paths.temporary, paths.state, paths.compositions, paths.receipts, paths.leases]) {
+      validateOwnedDirectoryLocation(paths.root, path, "PorcuPi upgrade recovery directory");
+    }
+  } catch {
+    fail("Malformed PorcuPi upgrade recovery root");
+  }
 }
 
 function readUpgradeStageOwner(paths, stage) {
@@ -444,7 +446,7 @@ function replaceLauncher(path, contents, mode) {
 
 function runtimeKind(ownershipRoot, path, transaction) {
   if (!pathExists(path)) return "missing";
-  validateRuntimeLocation(ownershipRoot, path, "PorcuPi runtime during upgrade recovery");
+  validateOwnedDirectoryLocation(ownershipRoot, path, "PorcuPi runtime during upgrade recovery");
   const inventorySha256 = runtimeReceiptFor(path).inventorySha256;
   if (inventorySha256 === transaction.sourceRuntimeReceipt.inventorySha256) return "source";
   if (inventorySha256 === transaction.targetRuntimeReceipt.inventorySha256) return "target";
@@ -502,6 +504,22 @@ function validateUpgradePublicationState(paths, launcher, stage, transaction, en
     fail("PorcuPi-owned pi launcher changed during upgrade recovery");
   }
   return { activation, kind };
+}
+
+function prepareUpgradeCleanup(paths, stage, owner) {
+  const retiredStage = join(paths.temporary, `upgrade-retired-${owner.nonce}`);
+  const cleanupMarker = join(paths.temporary, `upgrade-cleanup-${owner.nonce}.json`);
+  if (!pathExists(cleanupMarker)) atomicWrite(cleanupMarker, {
+    schemaVersion: 1,
+    type: "porcupi-upgrade-cleanup",
+    dataRoot: paths.root,
+    sourceStage: stage,
+    retiredStage,
+    targetVersion: owner.targetVersion,
+    nonce: owner.nonce,
+    inventory: scratchInventory(stage),
+  });
+  return { cleanupMarker, retiredStage };
 }
 
 function completeUpgradeTransaction(paths, launcher, stage, owner, environment, output) {
@@ -578,18 +596,7 @@ function completeUpgradeTransaction(paths, launcher, stage, owner, environment, 
   checkpoint("upgrade-cleanup-started");
   cleanupRetainedCompositions(paths, transaction.targetActivation, output);
   checkpoint("upgrade-composition-cleanup-complete");
-  const retiredStage = join(paths.temporary, `upgrade-retired-${owner.nonce}`);
-  const cleanupMarker = join(paths.temporary, `upgrade-cleanup-${owner.nonce}.json`);
-  if (!pathExists(cleanupMarker)) atomicWrite(cleanupMarker, {
-    schemaVersion: 1,
-    type: "porcupi-upgrade-cleanup",
-    dataRoot: paths.root,
-    sourceStage: stage,
-    retiredStage,
-    targetVersion: transaction.targetVersion,
-    nonce: owner.nonce,
-    inventory: scratchInventory(stage),
-  });
+  const { cleanupMarker, retiredStage } = prepareUpgradeCleanup(paths, stage, owner);
   checkpoint("upgrade-cleanup-marker-written");
   removePreparedTree(join(stage, "previous-runtime"));
   checkpoint("upgrade-previous-runtime-removed");
@@ -653,18 +660,7 @@ function recoverUpgradeCleanupMarkers(paths) {
 }
 
 function retireUpgradeScratch(paths, stage, owner) {
-  const retiredStage = join(paths.temporary, `upgrade-retired-${owner.nonce}`);
-  const cleanupMarker = join(paths.temporary, `upgrade-cleanup-${owner.nonce}.json`);
-  if (!pathExists(cleanupMarker)) atomicWrite(cleanupMarker, {
-    schemaVersion: 1,
-    type: "porcupi-upgrade-cleanup",
-    dataRoot: paths.root,
-    sourceStage: stage,
-    retiredStage,
-    targetVersion: owner.targetVersion,
-    nonce: owner.nonce,
-    inventory: scratchInventory(stage),
-  });
+  const { cleanupMarker, retiredStage } = prepareUpgradeCleanup(paths, stage, owner);
   if (pathExists(stage)) renameSync(stage, retiredStage);
   if (pathExists(retiredStage)) removePreparedTree(retiredStage);
   if (pathExists(cleanupMarker)) durableUnlink(cleanupMarker);
@@ -700,21 +696,21 @@ export async function recoverInterruptedUpgrade({
 } = {}) {
   const dataRoot = defaultDataRoot(environment, platform);
   const paths = managedLayout(dataRoot);
-  if (!pathExists(paths.temporary)) return false;
+  if (!pathExists(paths.temporary)) return noUpgradeRecovery;
   const launcher = join(defaultBinDirectory(environment), "porcupi");
   let waitedForPublisher = false;
   for (let attempt = 0; attempt < 1_500; attempt += 1) {
     const temporaryStat = lstatSync(paths.temporary);
-    if (!temporaryStat.isDirectory() || temporaryStat.isSymbolicLink()) return false;
+    if (!temporaryStat.isDirectory() || temporaryStat.isSymbolicLink()) return noUpgradeRecovery;
     const hasUpgrade = readdirSync(paths.temporary).some((name) => name.startsWith("upgrade-"));
-    if (!hasUpgrade) return waitedForPublisher ? "restart" : false;
+    if (!hasUpgrade) return waitedForPublisher ? restartAfterUpgradeRecovery : noUpgradeRecovery;
     validateUpgradeRecoveryRoot(paths);
     validateUpgradeTemporaryNames(paths);
     try {
       const recovered = await withLifecycleLock(dataRoot, "upgrade recovery", () => (
         recoverInterruptedUpgradesLocked(paths, launcher, environment, output).length > 0
       ));
-      return recovered ? "restart" : false;
+      return recovered ? restartAfterUpgradeRecovery : noUpgradeRecovery;
     } catch (error) {
       if (
         error instanceof Error
@@ -728,7 +724,7 @@ export async function recoverInterruptedUpgrade({
       throw error;
     }
   }
-  return false;
+  return noUpgradeRecovery;
 }
 
 function publishLauncher(path, cliPath) {

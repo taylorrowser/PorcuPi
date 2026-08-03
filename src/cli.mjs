@@ -39,7 +39,7 @@ let launching = false;
 try {
   const args = process.argv.slice(2);
   const recovery = await recoverInterruptedUpgrade({ output: process.stderr });
-  if (recovery === "restart") {
+  if (recovery.restartRequired) {
     await runChild(join(defaultBinDirectory(), "porcupi"), args);
   } else if (args[0] === "add") {
     if (args.length > 2) fail("Usage: porcupi add [git-source]");

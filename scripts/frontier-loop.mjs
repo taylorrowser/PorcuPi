@@ -109,6 +109,26 @@ export function validationPassed(output) {
   return verdicts.length > 0 && verdicts.at(-1)[1].toUpperCase() === "PASS";
 }
 
+export function parsePullRequestNumber(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    fail(`Invalid pull request URL: ${value}`);
+  }
+  const match = url.pathname.match(/^\/[^/]+\/[^/]+\/pull\/(\d+)\/?$/);
+  if (!match) fail(`Invalid pull request URL: ${value}`);
+  return Number(match[1]);
+}
+
+export function failureBaseState(inMemory, persisted) {
+  return persisted ?? inMemory;
+}
+
+export function panesAreRunning(deadStatuses) {
+  return deadStatuses.some((status) => status === "0");
+}
+
 function parentIssues(parent) {
   const parentData = ghJson(["issue", "view", String(parent)], { fields: "number,title,state,subIssues" });
   const children = parentData.subIssues?.nodes ?? [];
@@ -154,13 +174,20 @@ function ensurePrerequisites() {
   if (localHead !== remoteHead) fail(`Control checkout HEAD does not match origin/${branch} after fast-forward.`);
 }
 
-function tmuxAlive(parent) {
+function tmuxSessionExists(parent) {
   return commandResult("tmux", ["has-session", "-t", sessionName(parent)]).status === 0;
+}
+
+function tmuxAlive(parent) {
+  if (!tmuxSessionExists(parent)) return false;
+  const result = commandResult("tmux", ["list-panes", "-t", sessionName(parent), "-F", "#{pane_dead}"]);
+  return result.status === 0 && panesAreRunning(result.stdout.trim().split("\n").filter(Boolean));
 }
 
 function start(parent) {
   ensurePrerequisites();
   if (tmuxAlive(parent)) fail(`tmux session ${sessionName(parent)} is already running`);
+  if (tmuxSessionExists(parent)) commandResult("tmux", ["kill-session", "-t", sessionName(parent)]);
   const paths = loopPaths(parent);
   mkdirSync(paths.worktrees, { recursive: true });
   rmSync(paths.stop, { force: true });
@@ -287,7 +314,7 @@ function publishAndMerge(issue, worktree, branch, logPath) {
   } else {
     const body = `Closes #${issue.number}\n\nImplemented and independently validated by the PorcuPi frontier loop.`;
     url = commandOutput("gh", ["pr", "create", "--base", base, "--head", branch, "--title", issue.title, "--body", body], { cwd: worktree });
-    prNumber = Number(url.rstrip("/").split("/").at(-1));
+    prNumber = parsePullRequestNumber(url);
   }
   appendAgentLog(logPath, "pull request", `${url}\n`);
   waitForPullRequestChecks(prNumber, worktree, logPath);
@@ -396,6 +423,7 @@ function runLoop(parent) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const phase = stopped(paths) ? "stopped" : "failed";
+    state = failureBaseState(state, readState(paths));
     state = writeState(paths, state, { phase, message: phase === "stopped" ? "Stopped by request" : "Frontier loop stopped on failure", lastError: message });
     log(`${state.message}: ${message}`);
     process.exitCode = phase === "failed" ? 1 : 0;
@@ -459,12 +487,13 @@ function stop(parent) {
   mkdirSync(paths.root, { recursive: true });
   writeFileSync(paths.stop, `${isoNow()}\n`);
   if (!tmuxAlive(parent)) {
+    if (tmuxSessionExists(parent)) commandResult("tmux", ["kill-session", "-t", sessionName(parent)]);
     process.stdout.write("Frontier loop is not running. Stop marker recorded.\n");
     return;
   }
   commandResult("tmux", ["send-keys", "-t", sessionName(parent), "C-c"]);
   sleep(2_000);
-  if (tmuxAlive(parent)) commandResult("tmux", ["kill-session", "-t", sessionName(parent)]);
+  if (tmuxSessionExists(parent)) commandResult("tmux", ["kill-session", "-t", sessionName(parent)]);
   process.stdout.write("Frontier loop stopped.\n");
 }
 

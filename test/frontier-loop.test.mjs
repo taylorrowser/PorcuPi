@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { findFrontier, validationPassed } from "../scripts/frontier-loop.mjs";
+import {
+  failureBaseState,
+  findFrontier,
+  panesAreRunning,
+  parsePullRequestNumber,
+  validationPassed,
+} from "../scripts/frontier-loop.mjs";
 
 function issue(number, { state = "OPEN", assignees = [], blockedBy = [] } = {}) {
   return { number, title: `Issue ${number}`, state, assignees, blockedBy };
@@ -30,4 +36,23 @@ test("validation requires the final explicit reviewer verdict", () => {
   assert.equal(validationPassed("Everything passes.\nVALIDATION: PASS\n"), true);
   assert.equal(validationPassed("VALIDATION: PASS\nLater finding.\nVALIDATION: FAIL\n"), false);
   assert.equal(validationPassed("The implementation looks good."), false);
+});
+
+test("pull request URLs yield their numeric GitHub identity", () => {
+  assert.equal(parsePullRequestNumber("https://github.com/taylorrowser/PorcuPi/pull/58"), 58);
+  assert.throws(() => parsePullRequestNumber("https://github.com/taylorrowser/PorcuPi/issues/58"), /pull request URL/);
+});
+
+test("failure reporting preserves the latest state written by nested processing", () => {
+  const stale = { currentIssue: null, phase: "starting" };
+  const persisted = { currentIssue: 41, phase: "merging", worktree: "/tmp/issue-41" };
+
+  assert.deepEqual(failureBaseState(stale, persisted), persisted);
+  assert.deepEqual(failureBaseState(stale, null), stale);
+});
+
+test("a tmux session is running only while at least one pane is live", () => {
+  assert.equal(panesAreRunning(["1"]), false);
+  assert.equal(panesAreRunning(["1", "0"]), true);
+  assert.equal(panesAreRunning([]), false);
 });

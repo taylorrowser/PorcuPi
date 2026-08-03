@@ -267,7 +267,7 @@ function writeUpgradeScratchReceipt(stage, owner) {
   });
 }
 
-function validateUpgradeScratchReceipt(stage, owner) {
+function readUpgradeScratchReceipt(stage, owner) {
   const receipt = readJson(join(stage, "scratch.json"), "PorcuPi upgrade scratch receipt");
   if (
     !exactObject(receipt, upgradeScratchReceiptFields)
@@ -277,8 +277,34 @@ function validateUpgradeScratchReceipt(stage, owner) {
     || receipt.nonce !== owner.nonce
   ) fail(`Foreign PorcuPi upgrade stage requires manual inspection: ${stage}`);
   validateScratchInventory(receipt.inventory, "PorcuPi upgrade scratch inventory");
+  return receipt;
+}
+
+function validateUpgradeScratchReceipt(stage, owner) {
+  const receipt = readUpgradeScratchReceipt(stage, owner);
   if (canonicalJson(upgradeScratchInventory(stage)) !== canonicalJson(receipt.inventory)) {
     fail(`Foreign PorcuPi upgrade stage requires manual inspection: ${stage}`);
+  }
+}
+
+function validateIncompleteUpgradeScratch(stage, owner) {
+  const receipt = readUpgradeScratchReceipt(stage, owner);
+  const expectedByPath = new Map(receipt.inventory.map((entry) => [entry.path, entry]));
+  const mutablePaths = [
+    "composition", "patches", "published-runtime", "smoke-home", "target-activation.json", "target-leases",
+    "target-runtime",
+  ];
+  for (const entry of upgradeScratchInventory(stage)) {
+    const expected = expectedByPath.get(entry.path);
+    if (canonicalJson(entry) === canonicalJson(expected)) continue;
+    if (pathMatchesAny(entry.path, mutablePaths) || /^preflight-[0-9a-f-]+(?:\/|$)/.test(entry.path)) continue;
+    fail(`Foreign PorcuPi upgrade stage requires manual inspection: ${stage}`);
+  }
+  const actualPaths = new Set(upgradeScratchInventory(stage).map((entry) => entry.path));
+  for (const entry of receipt.inventory) {
+    if (!actualPaths.has(entry.path) && !pathMatchesAny(entry.path, mutablePaths)) {
+      fail(`Foreign PorcuPi upgrade stage requires manual inspection: ${stage}`);
+    }
   }
 }
 
@@ -713,8 +739,11 @@ function retireUpgradeScratch(paths, stage, owner, { allowIncomplete = false } =
     fail(`Foreign PorcuPi upgrade stage requires manual inspection: ${stage}`);
   }
   recoverUpgradeCleanupMarkers(paths);
-  if (pathExists(join(stage, "scratch.json"))) validateUpgradeScratchReceipt(stage, owner);
-  else if (!allowIncomplete) fail(`Foreign PorcuPi upgrade stage requires manual inspection: ${stage}`);
+  if (!pathExists(join(stage, "scratch.json"))) {
+    fail(`Foreign PorcuPi upgrade stage requires manual inspection: ${stage}`);
+  }
+  if (allowIncomplete) validateIncompleteUpgradeScratch(stage, owner);
+  else validateUpgradeScratchReceipt(stage, owner);
   const { cleanupMarker, retiredStage } = prepareUpgradeCleanup({ paths, stage, owner });
   if (pathExists(stage)) renameSync(stage, retiredStage);
   if (pathExists(retiredStage)) removePreparedTree(retiredStage);
@@ -979,10 +1008,13 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
   atomicWrite(join(stageRoot, "owner.json"), stageOwner);
   const candidateRoot = join(stageRoot, "composition");
   mkdirSync(candidateRoot, { mode: 0o700 });
+  writeUpgradeScratchReceipt(stageRoot, stageOwner);
   let transactionCommitted = false;
   try {
     const stagedPatches = stageSelectionIntent({ stageRoot, sources: selections.sources, piBase: lock });
+    writeUpgradeScratchReceipt(stageRoot, stageOwner);
     const receipt = buildComposition({ candidateRoot, stageRoot, patches: stagedPatches, lock });
+    writeUpgradeScratchReceipt(stageRoot, stageOwner);
     const stagedLeases = join(stageRoot, "target-leases");
     mkdirSync(stagedLeases, { mode: 0o700 });
     atomicWrite(join(stagedLeases, "owner.json"), {

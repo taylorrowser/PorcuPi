@@ -821,6 +821,7 @@ test("interrupted v0.1.0 upgrades converge at each publication boundary", () => 
     "upgrade-runtime-install-mjs-published",
     "upgrade-runtime-package-json-published",
     "upgrade-runtime-published",
+    "upgrade-activation-published",
     "upgrade-activation-written",
   ]) {
     const home = join(root, boundary);
@@ -857,6 +858,104 @@ test("interrupted v0.1.0 upgrades converge at each publication boundary", () => 
     assert.deepEqual(readFileSync(launcher), launcherBefore);
     assert.equal(existsSync(join(home, ".local", "bin", "pi")), true);
   }
+});
+
+test("upgrade recovery refuses changed staged runtime evidence", () => {
+  const root = temporaryRoot();
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const targetRelease = createReleaseFixture(root, base);
+  const artifact = packRelease(targetRelease, root);
+
+  for (const stagedRuntime of ["target-runtime", "previous-runtime"]) {
+    const home = join(root, stagedRuntime);
+    mkdirSync(home);
+    assert.equal(runInstaller(historicalRelease, home).status, 0);
+    const interrupted = runPackedInstaller(artifact, home, "0d0d0d", {
+      PORCUPI_TEST_FAULT: "upgrade-runtime-runtime-mjs-published",
+      PTY_WAIT_FOR: "1 of 3 — Upgrade",
+    });
+    assert.notEqual(interrupted.status, 0);
+
+    const managedRoot = dataRoot(home);
+    const activationBefore = readFileSync(join(managedRoot, "state", "activation.json"));
+    const stage = readdirSync(join(managedRoot, "tmp")).find((name) => name.startsWith("upgrade-"));
+    assert.ok(stage);
+    const changedPath = join(managedRoot, "tmp", stage, stagedRuntime, "install.mjs");
+    writeFileSync(changedPath, `${readFileSync(changedPath, "utf8")}\n// changed staged evidence\n`);
+
+    const retry = runPackedInstaller(artifact, home, "");
+    assert.notEqual(retry.status, 0);
+    assert.match(`${retry.stdout}${retry.stderr}`, /Upgrade stage runtime evidence mismatch/);
+    assert.deepEqual(readFileSync(join(managedRoot, "state", "activation.json")), activationBefore);
+    assert.equal(runPorcuPiProcess(home, ["--version"]).stdout.trim(), "0.81.1");
+  }
+});
+
+test("upgrade recovery does not overwrite a newer public Activation", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const targetRelease = createReleaseFixture(root, base);
+  const artifact = packRelease(targetRelease, root);
+  assert.equal(runInstaller(historicalRelease, home).status, 0);
+
+  const patchRoot = join(root, "patches");
+  const repository = createApplicablePatchRepository(patchRoot, [[
+    "patches/recovery.patch",
+    textPatch("series.txt", "base", "changed"),
+  ]]);
+  const locator = await serveGitRepository(patchRoot, repository);
+  assert.equal(runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d").status, 0);
+  assert.equal(runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" }).status, 0);
+  assert.equal(runPorcuPi(home, ["manage"], "206e6e0d", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" }).status, 0);
+  assert.equal(runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" }).status, 0);
+
+  const interrupted = runPackedInstaller(artifact, home, "0d0d0d", {
+    PORCUPI_TEST_FAULT: "upgrade-runtime-published",
+    PTY_WAIT_FOR: "1 of 3 — Upgrade",
+  });
+  assert.notEqual(interrupted.status, 0);
+  const rolledBack = runPorcuPi(home, ["rollback"], "0d", { PTY_WAIT_FOR: "Roll back Managed Pi" });
+  assert.equal(rolledBack.status, 0, rolledBack.stderr || rolledBack.stdout);
+
+  const managedRoot = dataRoot(home);
+  const activationBeforeRetry = readFileSync(join(managedRoot, "state", "activation.json"));
+  const retry = runPackedInstaller(artifact, home, "");
+  assert.notEqual(retry.status, 0);
+  assert.match(retry.stdout, /Abandoned interrupted upgrade because Activation changed in a later lifecycle operation/);
+  assert.match(retry.stdout, /Upgrade Readiness Check blocked/);
+  assert.deepEqual(readFileSync(join(managedRoot, "state", "activation.json")), activationBeforeRetry);
+  assert.equal(JSON.parse(readFileSync(join(managedRoot, "runtime", "package.json"), "utf8")).version, "0.1.0");
+});
+
+test("an error after upgrade activation reports committed success and remains recoverable", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const targetRelease = createReleaseFixture(root, base);
+  const artifact = packRelease(targetRelease, root);
+  assert.equal(runInstaller(historicalRelease, home).status, 0);
+
+  const upgraded = runPackedInstaller(artifact, home, "0d0d0d", {
+    PORCUPI_TEST_FAILURE: "upgrade-activation-published",
+    PTY_WAIT_FOR: "1 of 3 — Upgrade",
+  });
+  assert.equal(upgraded.status, 0, upgraded.stderr || upgraded.stdout);
+  assert.match(upgraded.stdout, /Upgrade activation committed.*recovery evidence was retained/);
+  const managedRoot = dataRoot(home);
+  const activation = JSON.parse(readFileSync(join(managedRoot, "state", "activation.json"), "utf8"));
+  const receipt = JSON.parse(readFileSync(join(managedRoot, "receipts", `${activation.active.compositionId}.json`), "utf8"));
+  assert.equal(receipt.porcupiVersion, "0.2.0");
+
+  const recovered = runPackedInstaller(artifact, home, "");
+  assert.equal(recovered.status, 0, recovered.stderr || recovered.stdout);
+  assert.match(recovered.stdout, /Recovered completed PorcuPi upgrade to 0\.2\.0/);
+  assert.equal(runPorcuPiProcess(home, ["verify"]).status, 0);
 });
 
 test("upgrade review retains selected Pi resources and their exact Selection Intent", async () => {

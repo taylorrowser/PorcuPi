@@ -380,13 +380,16 @@ function validateActivationEntry(value) {
   return value;
 }
 
-export function readActivation(paths) {
-  const activation = readJson(paths.activation, "PorcuPi activation");
+export function validateActivation(activation) {
   if (!exactObject(activation, activationFields) || activation.schemaVersion !== 1) fail("Malformed PorcuPi activation");
   validateActivationEntry(activation.active);
   if (activation.previous !== null) validateActivationEntry(activation.previous);
   if (activation.previous?.compositionId === activation.active.compositionId) fail("Malformed PorcuPi activation");
   return activation;
+}
+
+export function readActivation(paths) {
+  return validateActivation(readJson(paths.activation, "PorcuPi activation"));
 }
 
 function validateCompositionDirectory(paths, compositionId) {

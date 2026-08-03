@@ -121,7 +121,7 @@ export function readJson(path, label = basename(path)) {
   }
 }
 
-function exactObject(value, fields) {
+export function exactObject(value, fields) {
   return value !== null
     && typeof value === "object"
     && !Array.isArray(value)
@@ -150,7 +150,7 @@ function withinRoot(root, path) {
   return realPath === realRoot || realPath.startsWith(`${realRoot}${sep}`);
 }
 
-function validateOwnedDirectory(root, path, label) {
+export function validateOwnedDirectory(root, path, label) {
   let stat;
   try {
     stat = lstatSync(path);
@@ -535,14 +535,18 @@ export function createRuntimeReceipt(paths) {
   };
 }
 
-export function verifyRuntime(paths) {
-  const receipt = readJson(paths.runtimeReceipt, "PorcuPi runtime receipt");
+export function validateRuntimeReceipt(receipt, label = "PorcuPi runtime receipt") {
   if (
     !exactObject(receipt, runtimeReceiptFields)
     || !new Set([1, 2]).has(receipt.schemaVersion)
     || receipt.type !== "porcupi-runtime"
     || !/^[a-f0-9]{64}$/.test(receipt.inventorySha256 || "")
-  ) fail("Malformed PorcuPi runtime receipt");
+  ) fail(`Malformed ${label}`);
+  return receipt;
+}
+
+export function verifyRuntime(paths) {
+  const receipt = validateRuntimeReceipt(readJson(paths.runtimeReceipt, "PorcuPi runtime receipt"));
   if (createRuntimeReceipt(paths).inventorySha256 !== receipt.inventorySha256) fail("PorcuPi runtime inventory mismatch");
   return receipt;
 }

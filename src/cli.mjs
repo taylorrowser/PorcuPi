@@ -1,33 +1,35 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { join } from "node:path";
 import { addResources } from "./add.mjs";
 import { applyPatches } from "./apply.mjs";
 import { verifyManagedInstallation } from "./composition.mjs";
 import { rollbackComposition } from "./rollback.mjs";
-import { defaultDataRoot, fail, readLeasedActiveComposition, verifyLauncher } from "./runtime.mjs";
+import { recoverInterruptedUpgrade } from "./install.mjs";
+import { defaultBinDirectory, defaultDataRoot, fail, readLeasedActiveComposition, verifyLauncher } from "./runtime.mjs";
 import { manageResources } from "./manage.mjs";
 import { setPiOwnership } from "./pi-ownership.mjs";
 import { uninstallManagedPi } from "./uninstall.mjs";
+
+async function runChild(command, args) {
+  const child = spawn(command, args, { stdio: "inherit", env: process.env });
+  const result = await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  if (result.signal) {
+    process.kill(process.pid, result.signal);
+    return;
+  }
+  process.exitCode = result.code ?? 1;
+}
 
 async function launch(args) {
   const active = readLeasedActiveComposition(defaultDataRoot());
   try {
     verifyLauncher(active.paths);
-    const { executable } = active;
-    const child = spawn(process.execPath, [executable, ...args], {
-      stdio: "inherit",
-      env: process.env,
-    });
-    const result = await new Promise((resolve, reject) => {
-      child.once("error", reject);
-      child.once("exit", (code, signal) => resolve({ code, signal }));
-    });
-    if (result.signal) {
-      process.kill(process.pid, result.signal);
-      return;
-    }
-    process.exitCode = result.code ?? 1;
+    await runChild(process.execPath, [active.executable, ...args]);
   } finally {
     active.lease.release();
   }
@@ -36,7 +38,10 @@ async function launch(args) {
 let launching = false;
 try {
   const args = process.argv.slice(2);
-  if (args[0] === "add") {
+  const recovery = await recoverInterruptedUpgrade({ output: process.stderr });
+  if (recovery.restartRequired) {
+    await runChild(join(defaultBinDirectory(), "porcupi"), args);
+  } else if (args[0] === "add") {
     if (args.length > 2) fail("Usage: porcupi add [git-source]");
     await addResources(args[1]);
   } else if (args[0] === "manage") {

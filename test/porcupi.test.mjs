@@ -870,6 +870,14 @@ test("modified upgrade transaction targets are refused and left untouched", () =
   assert.equal(JSON.parse(readFileSync(transactionPath, "utf8")).stage, transaction.stage);
 
   writeFileSync(transactionPath, transactionBytes);
+  const foreignStagePath = join(stage, "foreign-file");
+  writeFileSync(foreignStagePath, "foreign\n");
+  const foreignStage = runPackedInstaller(artifact, home, "");
+  assert.notEqual(foreignStage.status, 0);
+  assert.match(`${foreignStage.stdout}${foreignStage.stderr}`, /Foreign PorcuPi upgrade transaction requires manual inspection/);
+  assert.equal(readFileSync(foreignStagePath, "utf8"), "foreign\n");
+  unlinkSync(foreignStagePath);
+
   const targetRuntime = join(stage, "target-runtime");
   const savedRuntime = join(stage, "saved-target-runtime");
   renameSync(targetRuntime, savedRuntime);
@@ -915,7 +923,7 @@ test("modified upgrade transaction targets are refused and left untouched", () =
   const modifiedPublication = readFileSync(publishedCli);
   const publicationRetry = runPackedInstaller(artifact, home, "");
   assert.notEqual(publicationRetry.status, 0);
-  assert.match(`${publicationRetry.stdout}${publicationRetry.stderr}`, /Prepared target PorcuPi runtime inventory mismatch/);
+  assert.match(`${publicationRetry.stdout}${publicationRetry.stderr}`, /Prepared target PorcuPi runtime inventory mismatch|Foreign PorcuPi upgrade transaction/);
   assert.deepEqual(readFileSync(publishedCli), modifiedPublication);
   writeFileSync(publishedCli, publishedCliBefore);
 

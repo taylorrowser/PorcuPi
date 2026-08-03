@@ -163,7 +163,7 @@ const upgradeTransactionFields = new Set([
   "schemaVersion", "type", "dataRoot", "stage", "installedVersion", "targetVersion",
   "sourceRuntimeReceipt", "targetRuntimeReceipt", "sourceActivation", "targetActivation",
   "compositionReceipt", "sourceLauncherReceipt", "transitionLauncherReceipt", "piLauncherReceipt",
-  "selectionIntentSha256",
+  "selectionIntentSha256", "stageInventory",
 ]);
 const upgradeCleanupFields = new Set([
   "schemaVersion", "type", "dataRoot", "sourceStage", "retiredStage", "targetVersion", "nonce", "inventory",
@@ -225,6 +225,29 @@ function validateScratchInventory(value, label) {
     previous = entry.path;
   }
   return value;
+}
+
+function validateUpgradeTransactionRemainder(stage, expected) {
+  const expectedByPath = new Map(expected.map((entry) => [entry.path, entry]));
+  const movablePaths = ["composition", "published-runtime", "target-leases"];
+  const actual = scratchInventory(stage);
+  for (const entry of actual) {
+    if (
+      entry.path === "transaction.json"
+      || entry.path === "previous-runtime"
+      || entry.path.startsWith("previous-runtime/")
+    ) continue;
+    if (canonicalJson(entry) !== canonicalJson(expectedByPath.get(entry.path))) {
+      fail(`Foreign PorcuPi upgrade transaction requires manual inspection: ${stage}`);
+    }
+  }
+  const actualPaths = new Set(actual.map((entry) => entry.path));
+  for (const entry of expected) {
+    if (
+      !actualPaths.has(entry.path)
+      && !movablePaths.some((path) => entry.path === path || entry.path.startsWith(`${path}/`))
+    ) fail(`Foreign PorcuPi upgrade transaction requires manual inspection: ${stage}`);
+  }
 }
 
 function validateScratchRemainder(root, expected, removablePaths) {
@@ -414,6 +437,8 @@ function readUpgradeTransaction({ paths, stage, owner, launcher }) {
     fail(`Foreign PorcuPi upgrade transaction requires manual inspection: ${stage}`);
   }
   if (pathExists(finalLeases)) validateCompositionLeaseDirectory(paths, receipt.compositionId);
+  validateScratchInventory(transaction.stageInventory, "PorcuPi upgrade transaction stage inventory");
+  validateUpgradeTransactionRemainder(stage, transaction.stageInventory);
   return transaction;
 }
 
@@ -465,9 +490,9 @@ function validateUpgradePublicationState({ paths, launcher, stage, transaction, 
     && canonicalJson(activation) === canonicalJson(transaction.targetActivation)
     && canonicalJson(runtimeReceipt) === canonicalJson(transaction.targetRuntimeReceipt);
   const previousRuntime = join(stage, "previous-runtime");
-  if (pathExists(previousRuntime) && !targetIsAuthoritative) {
+  if (pathExists(previousRuntime)) {
     validateRuntimeDirectory(stage, previousRuntime, transaction.sourceRuntimeReceipt, "Previous PorcuPi runtime");
-  } else if (!pathExists(previousRuntime) && kind !== "source" && !targetIsAuthoritative) {
+  } else if (kind !== "source" && !targetIsAuthoritative) {
     fail("Previous PorcuPi runtime is missing during upgrade recovery");
   }
   const sourceContents = shellLauncherContents(join(paths.runtime, "cli.mjs"));
@@ -979,6 +1004,7 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
       selectionIntentSha256: pathExists(join(paths.state, "selections.json"))
         ? sha256Bytes(readFileSync(join(paths.state, "selections.json")))
         : null,
+      stageInventory: scratchInventory(stageRoot),
     };
     atomicWrite(join(stageRoot, "transaction.json"), transaction);
     transactionCommitted = true;

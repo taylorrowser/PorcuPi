@@ -1,13 +1,11 @@
 import { randomUUID } from "node:crypto";
 import {
-  cpSync,
   lstatSync,
   mkdirSync,
   readdirSync,
-  realpathSync,
   writeFileSync,
 } from "node:fs";
-import { join, sep } from "node:path";
+import { join } from "node:path";
 import {
   buildComposition,
   compositionRecipe,
@@ -20,7 +18,12 @@ import {
 } from "./composition.mjs";
 import { runGuidedTerminal, truncateForTerminal, windowAround } from "./guided-terminal.mjs";
 import { cleanupRetainedCompositions, withLifecycleLock } from "./lifecycle.mjs";
-import { patchPendingMessage, patchSelectionSnapshot, readSelections } from "./resource-intent.mjs";
+import {
+  patchPendingMessage,
+  patchSelectionSnapshot,
+  readSelections,
+  stagePatchSelection,
+} from "./resource-intent.mjs";
 import {
   atomicWrite,
   canonicalJson,
@@ -31,9 +34,7 @@ import {
   platformIdentity,
   readActiveComposition,
   readJson,
-  sha256File,
 } from "./runtime.mjs";
-import { discoverPiArtifacts, resolveSourceRepository } from "./source-repository.mjs";
 
 const applyOwner = Object.freeze({ schemaVersion: 1, type: "porcupi-apply-stage" });
 
@@ -97,45 +98,6 @@ function confirmApply(patches, input, output) {
   });
 }
 
-function materializeSelectedPatches(stageRoot, sources, patches) {
-  const stagedRoot = join(stageRoot, "patches");
-  mkdirSync(stagedRoot, { mode: 0o700 });
-  const stagedByIdentity = new Map();
-  for (const source of sources.filter((candidate) => patches.some((patch) => patch.locator === candidate.locator))) {
-    const sourcePatches = patches.filter((patch) => patch.locator === source.locator);
-    if (sourcePatches.some((patch) => patch.commit !== source.commit)) {
-      fail(`Selected Patch Source Repository identity mismatch: ${source.locator}`);
-    }
-    const resolved = resolveSourceRepository(source.packageSource, { temporaryParent: stageRoot });
-    try {
-      if (resolved.locator !== source.locator || resolved.commit !== source.commit) {
-        fail(`Selected Patch Source Repository changed: ${source.locator}@${source.commit}`);
-      }
-      const discovered = new Map(discoverPiArtifacts(resolved.checkout).artifacts
-        .filter((artifact) => artifact.kind === "Patch")
-        .map((artifact) => [artifact.path, artifact]));
-      const realCheckout = realpathSync(resolved.checkout);
-      for (const patch of sourcePatches) {
-        const selected = discovered.get(patch.path);
-        if (!selected) fail(`Selected Patch is no longer a regular file at its exact source commit: ${patch.locator} · ${patch.path}`);
-        if (selected.sha256 !== patch.sha256) fail(`Selected Patch digest mismatch: ${patch.locator} · ${patch.path}`);
-        const sourcePath = join(resolved.checkout, patch.path);
-        const realPatch = realpathSync(sourcePath);
-        if (!realPatch.startsWith(`${realCheckout}${sep}`)) fail(`Selected Patch escapes its exact Source Repository: ${patch.path}`);
-        const index = patches.indexOf(patch);
-        const stagedPath = join(stagedRoot, `${String(index).padStart(6, "0")}.patch`);
-        cpSync(sourcePath, stagedPath, { errorOnExist: true });
-        if (sha256File(stagedPath) !== patch.sha256) fail(`Staged Patch digest mismatch: ${patch.locator} · ${patch.path}`);
-        stagedByIdentity.set(`${patch.locator}\0${patch.path}`, { ...patch, stagedPath });
-      }
-    } finally {
-      resolved.dispose();
-    }
-  }
-  return patches.map((patch) => stagedByIdentity.get(`${patch.locator}\0${patch.path}`)
-    ?? fail(`Selected Patch Source Repository is missing: ${patch.locator}`));
-}
-
 function receiptMatchesApply(receipt, lock, patches) {
   return receipt.porcupiVersion === porcupiVersion
     && canonicalJson(receipt.piBase) === canonicalJson(lock)
@@ -177,7 +139,7 @@ async function applyPatchesLocked({
   mkdirSync(stageRoot, { mode: 0o700 });
   writeFileSync(join(stageRoot, "owner.json"), `${JSON.stringify(applyOwner)}\n`, { mode: 0o600 });
   try {
-    const stagedPatches = materializeSelectedPatches(stageRoot, selections.sources, patches);
+    const stagedPatches = stagePatchSelection({ stageRoot, sources: selections.sources, piBase: lock });
     const candidateRoot = join(stageRoot, "composition");
     mkdirSync(candidateRoot, { mode: 0o700 });
     const receipt = buildComposition({ candidateRoot, stageRoot, patches: stagedPatches, lock });

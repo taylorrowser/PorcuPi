@@ -888,6 +888,20 @@ test("modified upgrade transaction targets are refused and left untouched", () =
   unlinkSync(targetRuntime);
   renameSync(savedRuntime, targetRuntime);
 
+  const stableRuntime = join(dataRoot(home), "runtime");
+  const escapedRuntime = join(root, "escaped-runtime");
+  renameSync(stableRuntime, escapedRuntime);
+  symlinkSync(escapedRuntime, stableRuntime);
+  const escapedRuntimeBefore = treeDigest(escapedRuntime);
+  const substituted = runPackedInstaller(artifact, home, "");
+  assert.notEqual(substituted.status, 0);
+  assert.match(`${substituted.stdout}${substituted.stderr}`, /runtime.*malformed|Foreign PorcuPi upgrade transaction/i);
+  assert.equal(lstatSync(stableRuntime).isSymbolicLink(), true);
+  assert.equal(realpathSync(stableRuntime), realpathSync(escapedRuntime));
+  assert.equal(treeDigest(escapedRuntime), escapedRuntimeBefore);
+  unlinkSync(stableRuntime);
+  renameSync(escapedRuntime, stableRuntime);
+
   const targetCli = join(targetRuntime, "cli.mjs");
   writeFileSync(targetCli, "\n// foreign modification\n", { flag: "a" });
   const modified = readFileSync(targetCli);
@@ -935,6 +949,7 @@ test("public launch, verify, and installer retry converge across upgrade publica
     "upgrade-transition-launcher-published",
     "upgrade-transition-launcher-receipt-written",
     "upgrade-optional-alias-verified",
+    "upgrade-source-runtime-retired",
     "upgrade-target-runtime-published",
     "upgrade-target-runtime-receipt-written",
     "upgrade-activation-written",
@@ -1065,7 +1080,7 @@ test("ordinary launch waits through a live upgrade launcher transition and obser
   assert.equal(runPorcuPiProcess(home, ["verify"]).status, 0);
 });
 
-test("release upgrade preserves a live Managed Pi Composition lease", async () => {
+test("release upgrade defers cleanup of an unreferenced Composition with a live lease", async () => {
   const root = temporaryRoot();
   const home = join(root, "home");
   mkdirSync(home);
@@ -1076,7 +1091,7 @@ test("release upgrade preserves a live Managed Pi Composition lease", async () =
   assert.equal(runInstaller(historicalRelease, home).status, 0);
   const managedRoot = dataRoot(home);
   const activationPath = join(managedRoot, "state", "activation.json");
-  const historicalId = JSON.parse(readFileSync(activationPath, "utf8")).active.compositionId;
+  const leasedId = JSON.parse(readFileSync(activationPath, "utf8")).active.compositionId;
   const launchLog = join(root, "held-upgrade-launch.log");
   const held = spawn(join(home, ".local", "bin", "porcupi"), ["held"], {
     stdio: "ignore",
@@ -1086,21 +1101,41 @@ test("release upgrade preserves a live Managed Pi Composition lease", async () =
       XDG_DATA_HOME: join(home, ".local", "share"),
       NODE_ENV: "test",
       PI_FIXTURE_LAUNCH_LOG: launchLog,
-      PI_FIXTURE_HOLD_MS: "6000",
+      PI_FIXTURE_HOLD_MS: "60000",
     },
   });
   childProcesses.push(held);
   for (let attempt = 0; attempt < 100 && !existsSync(launchLog); attempt += 1) await delay(20);
   assert.equal(existsSync(launchLog), true, "the Managed Pi lease holder did not start");
+  assert.ok(readdirSync(join(managedRoot, "leases", leasedId)).some((name) => name !== "owner.json"));
+
+  const repository = createApplicablePatchRepository(join(root, "selected-source"), [[
+    "patches/selected.patch",
+    textPatch("series.txt", "base", "selected"),
+  ]]);
+  const locator = await serveGitRepository(root, repository);
+  assert.equal(runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d").status, 0);
+  const applied = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(applied.status, 0, applied.stderr || applied.stdout);
+  const preUpgradeActiveId = JSON.parse(readFileSync(activationPath, "utf8")).active.compositionId;
+  assert.notEqual(preUpgradeActiveId, leasedId);
 
   const upgraded = runPackedInstaller(artifact, home, "0d0d0d", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
   assert.equal(upgraded.status, 0, upgraded.stderr || upgraded.stdout);
+  assert.match(upgraded.stdout, new RegExp(`Deferred cleanup of Managed Pi Composition ${leasedId}: a process lease is live or foreign`));
   assert.equal(held.exitCode, null, "release upgrade terminated the live Managed Pi process");
   const targetActivation = JSON.parse(readFileSync(activationPath, "utf8"));
-  assert.equal(targetActivation.previous.compositionId, historicalId);
-  assert.equal(existsSync(join(managedRoot, "compositions", historicalId)), true);
-  assert.ok(readdirSync(join(managedRoot, "leases", historicalId)).some((name) => name !== "owner.json"));
+  assert.equal(targetActivation.previous.compositionId, preUpgradeActiveId);
+  assert.notEqual(targetActivation.active.compositionId, leasedId);
+  assert.equal(existsSync(join(managedRoot, "compositions", leasedId)), true);
+  assert.ok(readdirSync(join(managedRoot, "leases", leasedId)).some((name) => name !== "owner.json"));
+
+  held.kill("SIGTERM");
   await new Promise((resolvePromise) => held.once("exit", resolvePromise));
+  const cleanup = runPorcuPi(home, ["rollback"], "0d", { PTY_WAIT_FOR: "Roll back Managed Pi" });
+  assert.equal(cleanup.status, 0, cleanup.stderr || cleanup.stdout);
+  assert.equal(existsSync(join(managedRoot, "compositions", leasedId)), false);
+  assert.equal(existsSync(join(managedRoot, "leases", leasedId)), false);
   assert.equal(runPorcuPiProcess(home, ["verify"]).status, 0);
 });
 
@@ -2602,7 +2637,7 @@ test("lifecycle locking and process leases defer cleanup until running Managed P
       XDG_DATA_HOME: join(home, ".local", "share"),
       NODE_ENV: "test",
       PI_FIXTURE_LAUNCH_LOG: launchLog,
-      PI_FIXTURE_HOLD_MS: "12000",
+      PI_FIXTURE_HOLD_MS: "60000",
     },
   });
   childProcesses.push(heldLaunch);
@@ -2632,6 +2667,7 @@ test("lifecycle locking and process leases defer cleanup until running Managed P
   assert.match(secondApply.stdout, /Deferred cleanup.*process lease/);
   assert.equal(existsSync(join(managedRoot, "compositions", initialId)), true);
 
+  heldLaunch.kill("SIGTERM");
   await new Promise((resolvePromise) => heldLaunch.once("exit", resolvePromise));
   const lock = `${managedRoot}.lifecycle-lock`;
   const driver = join(repositoryRoot, "test", "support", "pty-driver.py");

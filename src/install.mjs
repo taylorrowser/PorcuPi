@@ -248,14 +248,26 @@ function runtimeReceiptFor(root) {
   };
 }
 
-function validateRuntimeDirectory(path, receipt, label) {
+function validateRuntimeLocation(ownershipRoot, path, label) {
   let stat;
+  let realOwnershipRoot;
+  let realPath;
   try {
     stat = lstatSync(path);
+    realOwnershipRoot = realpathSync(ownershipRoot);
+    realPath = realpathSync(path);
   } catch {
-    fail(`${label} is missing: ${path}`);
+    fail(`${label} is missing or path-escaping: ${path}`);
   }
-  if (!stat.isDirectory() || stat.isSymbolicLink()) fail(`${label} is malformed: ${path}`);
+  if (
+    !stat.isDirectory()
+    || stat.isSymbolicLink()
+    || (realPath !== realOwnershipRoot && !realPath.startsWith(`${realOwnershipRoot}${sep}`))
+  ) fail(`${label} is malformed or path-escaping: ${path}`);
+}
+
+function validateRuntimeDirectory(ownershipRoot, path, receipt, label) {
+  validateRuntimeLocation(ownershipRoot, path, label);
   if (runtimeReceiptFor(path).inventorySha256 !== receipt.inventorySha256) fail(`${label} inventory mismatch: ${path}`);
 }
 
@@ -365,7 +377,7 @@ function readUpgradeTransaction(paths, stage, owner, launcher) {
   if (canonicalJson(migrated) !== canonicalJson(targetActivation)) {
     fail(`Foreign PorcuPi upgrade transaction requires manual inspection: ${stage}`);
   }
-  validateRuntimeDirectory(join(stage, "target-runtime"), transaction.targetRuntimeReceipt, "Staged target PorcuPi runtime");
+  validateRuntimeDirectory(stage, join(stage, "target-runtime"), transaction.targetRuntimeReceipt, "Staged target PorcuPi runtime");
   if (canonicalJson(transaction.targetRuntimeReceipt) !== canonicalJson(runtimeReceiptFor(join(stage, "target-runtime")))) {
     fail(`Foreign PorcuPi upgrade transaction requires manual inspection: ${stage}`);
   }
@@ -430,8 +442,9 @@ function replaceLauncher(path, contents, mode) {
   }
 }
 
-function runtimeKind(path, transaction) {
+function runtimeKind(ownershipRoot, path, transaction) {
   if (!pathExists(path)) return "missing";
+  validateRuntimeLocation(ownershipRoot, path, "PorcuPi runtime during upgrade recovery");
   const inventorySha256 = runtimeReceiptFor(path).inventorySha256;
   if (inventorySha256 === transaction.sourceRuntimeReceipt.inventorySha256) return "source";
   if (inventorySha256 === transaction.targetRuntimeReceipt.inventorySha256) return "target";
@@ -461,13 +474,13 @@ function validateUpgradePublicationState(paths, launcher, stage, transaction, en
     canonicalJson(runtimeReceipt) !== canonicalJson(transaction.sourceRuntimeReceipt)
     && canonicalJson(runtimeReceipt) !== canonicalJson(transaction.targetRuntimeReceipt)
   ) fail("PorcuPi runtime receipt changed during upgrade recovery");
-  const kind = runtimeKind(paths.runtime, transaction);
+  const kind = runtimeKind(paths.root, paths.runtime, transaction);
   const targetIsAuthoritative = kind === "target"
     && canonicalJson(activation) === canonicalJson(transaction.targetActivation)
     && canonicalJson(runtimeReceipt) === canonicalJson(transaction.targetRuntimeReceipt);
   const previousRuntime = join(stage, "previous-runtime");
   if (pathExists(previousRuntime) && !targetIsAuthoritative) {
-    validateRuntimeDirectory(previousRuntime, transaction.sourceRuntimeReceipt, "Previous PorcuPi runtime");
+    validateRuntimeDirectory(stage, previousRuntime, transaction.sourceRuntimeReceipt, "Previous PorcuPi runtime");
   } else if (!pathExists(previousRuntime) && kind !== "source" && !targetIsAuthoritative) {
     fail("Previous PorcuPi runtime is missing during upgrade recovery");
   }
@@ -518,6 +531,7 @@ function completeUpgradeTransaction(paths, launcher, stage, owner, environment, 
 
   if (publication.kind !== "target") {
     validateRuntimeDirectory(
+      stage,
       join(stage, "published-runtime"),
       transaction.targetRuntimeReceipt,
       "Prepared target PorcuPi runtime",
@@ -535,10 +549,13 @@ function completeUpgradeTransaction(paths, launcher, stage, owner, environment, 
     checkpoint("upgrade-optional-alias-verified");
 
     const previousRuntime = join(stage, "previous-runtime");
-    if (publication.kind === "source") renameSync(paths.runtime, previousRuntime);
+    if (publication.kind === "source") {
+      renameSync(paths.runtime, previousRuntime);
+      checkpoint("upgrade-source-runtime-retired");
+    }
     const publishedRuntime = join(stage, "published-runtime");
     if (!pathExists(paths.runtime)) renameSync(publishedRuntime, paths.runtime);
-    publication = { ...publication, kind: runtimeKind(paths.runtime, transaction) };
+    publication = { ...publication, kind: runtimeKind(paths.root, paths.runtime, transaction) };
     if (publication.kind !== "target") fail("Target PorcuPi runtime publication did not converge");
     checkpoint("upgrade-target-runtime-published");
   }

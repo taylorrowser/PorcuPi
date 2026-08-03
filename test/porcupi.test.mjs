@@ -15,10 +15,11 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import test, { after } from "node:test";
@@ -808,6 +809,299 @@ test("the packed release upgrades an intact historical v0.1.0 zero-Patch install
   assert.equal(existsSync(join(home, ".local", "bin", "porcupi")), false);
   assert.equal(existsSync(join(home, ".local", "bin", "pi")), false);
   shared.assertUnchanged();
+});
+
+test("the public exact-version installer recovers an interrupted upgrade after candidate publication", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const targetRelease = createReleaseFixture(root, base);
+  const artifact = packRelease(targetRelease, root);
+
+  const historicalInstall = runInstaller(historicalRelease, home, "0d790d0d");
+  assert.equal(historicalInstall.status, 0, historicalInstall.stderr || historicalInstall.stdout);
+  const interrupted = runPackedInstaller(artifact, home, "0d0d0d", {
+    PORCUPI_TEST_FAULT: "upgrade-candidate-published",
+    PTY_WAIT_FOR: "1 of 3 — Upgrade",
+  });
+  assert.notEqual(interrupted.status, 0, "the upgrade fault did not interrupt publication");
+
+  const oldLaunch = runPorcuPiProcess(home, ["--version"]);
+  assert.equal(oldLaunch.status, 0, oldLaunch.stderr || oldLaunch.stdout);
+  assert.equal(oldLaunch.stdout.trim(), "0.81.1");
+  const oldVerify = runPorcuPiProcess(home, ["verify"]);
+  assert.equal(oldVerify.status, 0, oldVerify.stderr || oldVerify.stdout);
+
+  const retry = runPackedInstaller(artifact, home, "", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
+  assert.equal(retry.status, 0, retry.stderr || retry.stdout);
+  assert.match(retry.stdout, /Recovered interrupted PorcuPi upgrade|Verified installed PorcuPi 0\.2\.0/);
+  assert.equal(runPorcuPiProcess(home, ["verify"]).status, 0);
+  assert.equal(existsSync(join(home, ".local", "bin", "pi")), true);
+  const uninstall = runPorcuPi(home, ["uninstall"], "0d0d0d");
+  assert.equal(uninstall.status, 0, uninstall.stderr || uninstall.stdout);
+  assert.equal(existsSync(dataRoot(home)), false);
+});
+
+test("modified upgrade transaction targets are refused and left untouched", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const targetRelease = createReleaseFixture(root, base);
+  const artifact = packRelease(targetRelease, root);
+  assert.equal(runInstaller(historicalRelease, home).status, 0);
+  const interrupted = runPackedInstaller(artifact, home, "0d0d0d", {
+    PORCUPI_TEST_FAULT: "upgrade-candidate-published",
+    PTY_WAIT_FOR: "1 of 3 — Upgrade",
+  });
+  assert.notEqual(interrupted.status, 0);
+  const temporary = join(dataRoot(home), "tmp");
+  const stage = join(temporary, readdirSync(temporary).find((name) => name.startsWith("upgrade-")));
+  const transactionPath = join(stage, "transaction.json");
+  const transactionBytes = readFileSync(transactionPath);
+  writeFileSync(transactionPath, "{ malformed\n");
+  const malformed = runPackedInstaller(artifact, home, "");
+  assert.notEqual(malformed.status, 0);
+  assert.match(`${malformed.stdout}${malformed.stderr}`, /Malformed PorcuPi upgrade transaction/);
+  assert.equal(readFileSync(transactionPath, "utf8"), "{ malformed\n");
+
+  const transaction = JSON.parse(transactionBytes);
+  transaction.stage = resolve(stage, "..", "escaping-upgrade-stage");
+  writeFileSync(transactionPath, `${JSON.stringify(transaction, null, 2)}\n`);
+  const escaping = runPackedInstaller(artifact, home, "");
+  assert.notEqual(escaping.status, 0);
+  assert.match(`${escaping.stdout}${escaping.stderr}`, /Foreign PorcuPi upgrade transaction requires manual inspection/);
+  assert.equal(JSON.parse(readFileSync(transactionPath, "utf8")).stage, transaction.stage);
+
+  writeFileSync(transactionPath, transactionBytes);
+  const targetRuntime = join(stage, "target-runtime");
+  const savedRuntime = join(stage, "saved-target-runtime");
+  renameSync(targetRuntime, savedRuntime);
+  symlinkSync(savedRuntime, targetRuntime);
+  const symbolic = runPackedInstaller(artifact, home, "");
+  assert.notEqual(symbolic.status, 0);
+  assert.match(`${symbolic.stdout}${symbolic.stderr}`, /malformed|Foreign PorcuPi upgrade transaction/i);
+  assert.equal(lstatSync(targetRuntime).isSymbolicLink(), true);
+  unlinkSync(targetRuntime);
+  renameSync(savedRuntime, targetRuntime);
+
+  const targetCli = join(targetRuntime, "cli.mjs");
+  writeFileSync(targetCli, "\n// foreign modification\n", { flag: "a" });
+  const modified = readFileSync(targetCli);
+  const retry = runPackedInstaller(artifact, home, "");
+  assert.notEqual(retry.status, 0);
+  assert.match(`${retry.stdout}${retry.stderr}`, /Staged target PorcuPi runtime inventory mismatch|Foreign PorcuPi upgrade transaction/);
+  assert.deepEqual(readFileSync(targetCli), modified);
+  const launch = runPorcuPiProcess(home, ["--version"]);
+  assert.equal(launch.status, 0, launch.stderr || launch.stdout);
+  assert.equal(launch.stdout.trim(), "0.81.1");
+  assert.equal(runPorcuPiProcess(home, ["verify"]).status, 0);
+});
+
+test("modified retired upgrade cleanup stages are reported and left untouched", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const targetRelease = createReleaseFixture(root, base);
+  const artifact = packRelease(targetRelease, root);
+  assert.equal(runInstaller(historicalRelease, home).status, 0);
+  const interrupted = runPackedInstaller(artifact, home, "0d0d0d", {
+    PORCUPI_TEST_FAULT: "upgrade-cleanup-retired",
+    PTY_WAIT_FOR: "1 of 3 — Upgrade",
+  });
+  assert.notEqual(interrupted.status, 0);
+  const temporary = join(dataRoot(home), "tmp");
+  const retiredName = readdirSync(temporary).find((name) => name.startsWith("upgrade-retired-"));
+  assert.ok(retiredName);
+  const retired = join(temporary, retiredName);
+  const foreign = join(retired, "foreign-file");
+  writeFileSync(foreign, "foreign\n");
+
+  const retry = runPackedInstaller(artifact, home, "");
+  assert.notEqual(retry.status, 0);
+  assert.match(`${retry.stdout}${retry.stderr}`, /Retired PorcuPi upgrade stage changed during cleanup/);
+  assert.equal(readFileSync(foreign, "utf8"), "foreign\n");
+});
+
+test("public launch, verify, and installer retry converge across upgrade publication interruptions", () => {
+  const boundaries = [
+    "upgrade-state-migrated",
+    "upgrade-candidate-directory-published",
+    "upgrade-transition-launcher-published",
+    "upgrade-transition-launcher-receipt-written",
+    "upgrade-optional-alias-verified",
+    "upgrade-target-runtime-published",
+    "upgrade-target-runtime-receipt-written",
+    "upgrade-activation-written",
+    "upgrade-stable-launcher-published",
+    "upgrade-stable-launcher-receipt-written",
+    "upgrade-cleanup-started",
+    "upgrade-composition-cleanup-complete",
+    "upgrade-cleanup-marker-written",
+    "upgrade-previous-runtime-removed",
+    "upgrade-cleanup-retired",
+    "upgrade-cleanup-complete",
+  ];
+  for (const boundary of boundaries) {
+    const root = temporaryRoot();
+    const home = join(root, "home");
+    mkdirSync(home);
+    const base = createPiBase(root);
+    const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+    const targetRelease = createReleaseFixture(root, base);
+    const artifact = packRelease(targetRelease, root);
+    assert.equal(runInstaller(historicalRelease, home, "0d790d0d").status, 0, boundary);
+
+    const interrupted = runPackedInstaller(artifact, home, "0d0d0d", {
+      PORCUPI_TEST_FAULT: boundary,
+      PTY_WAIT_FOR: "1 of 3 — Upgrade",
+    });
+    assert.notEqual(interrupted.status, 0, `${boundary}: the fault did not interrupt publication`);
+
+    const launch = runPorcuPiProcess(home, ["--version"]);
+    assert.equal(launch.status, 0, `${boundary}: ${launch.stderr || launch.stdout}`);
+    assert.equal(launch.stdout.trim(), "0.81.1", boundary);
+    const verified = runPorcuPiProcess(home, ["verify"]);
+    assert.equal(verified.status, 0, `${boundary}: ${verified.stderr || verified.stdout}`);
+    const retry = runPackedInstaller(artifact, home, "", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
+    assert.equal(retry.status, 0, `${boundary}: ${retry.stderr || retry.stdout}`);
+    assert.match(retry.stdout, /Recovered interrupted PorcuPi upgrade|Verified installed PorcuPi 0\.2\.0/, boundary);
+    assert.equal(existsSync(join(home, ".local", "bin", "pi")), true, boundary);
+  }
+});
+
+test("release upgrade refuses a competing live lifecycle owner without changing state", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const targetRelease = createReleaseFixture(root, base);
+  const artifact = packRelease(targetRelease, root);
+  assert.equal(runInstaller(historicalRelease, home, "0d790d0d").status, 0);
+  const managedRoot = dataRoot(home);
+  const before = treeDigest(managedRoot);
+  const lock = `${managedRoot}.lifecycle-lock`;
+  const holder = spawn(join(home, ".local", "bin", "porcupi"), ["pi", "enable"], {
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      NODE_ENV: "test",
+      PORCUPI_TEST_HOLD_LOCK_MS: "10000",
+    },
+  });
+  childProcesses.push(holder);
+  for (let attempt = 0; attempt < 100 && !existsSync(lock); attempt += 1) await delay(20);
+  assert.equal(existsSync(lock), true, "the competing lifecycle owner did not acquire the lock");
+
+  const contended = runPackedInstaller(artifact, home, "");
+  assert.notEqual(contended.status, 0);
+  assert.match(`${contended.stdout}${contended.stderr}`, /lifecycle operation is already in progress: pi enable/);
+  assert.equal(treeDigest(managedRoot), before);
+  holder.kill("SIGKILL");
+  await new Promise((resolvePromise) => holder.once("close", resolvePromise));
+
+  const retry = runPackedInstaller(artifact, home, "0d0d0d", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
+  assert.equal(retry.status, 0, retry.stderr || retry.stdout);
+  assert.equal(runPorcuPiProcess(home, ["verify"]).status, 0);
+});
+
+test("ordinary launch waits through a live upgrade launcher transition and observes the new installation", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const targetRelease = createReleaseFixture(root, base);
+  const artifact = packRelease(targetRelease, root);
+  assert.equal(runInstaller(historicalRelease, home).status, 0);
+  const boundaryFile = join(root, "upgrade-boundary");
+  const installer = spawn("python3", [
+    join(repositoryRoot, "test", "support", "pty-driver.py"),
+    "0d0d0d",
+    "npm",
+    "exec",
+    "--yes",
+    "--offline",
+    "--package",
+    artifact,
+    "--",
+    "porcupi",
+  ], {
+    cwd: dirname(artifact),
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      NODE_ENV: "test",
+      PTY_WAIT_FOR: "1 of 3 — Upgrade",
+      PORCUPI_TEST_HOLD_UPGRADE_BOUNDARY: "upgrade-transition-launcher-receipt-written",
+      PORCUPI_TEST_HOLD_UPGRADE_BOUNDARY_MS: "1500",
+      PORCUPI_TEST_UPGRADE_BOUNDARY_FILE: boundaryFile,
+    },
+  });
+  childProcesses.push(installer);
+  let installerOutput = "";
+  installer.stdout.on("data", (chunk) => { installerOutput += chunk; });
+  installer.stderr.on("data", (chunk) => { installerOutput += chunk; });
+  for (let attempt = 0; attempt < 300 && !existsSync(boundaryFile); attempt += 1) await delay(20);
+  assert.equal(existsSync(boundaryFile), true, "the upgrade did not reach its launcher transition");
+
+  const launch = runPorcuPiProcess(home, ["--version"]);
+  assert.equal(launch.status, 0, launch.stderr || launch.stdout);
+  assert.equal(launch.stdout.trim(), "0.81.1");
+  const installerResult = await new Promise((resolvePromise) => installer.once("close", (code, signal) => {
+    resolvePromise({ code, signal });
+  }));
+  assert.equal(installerResult.code, 0, installerOutput);
+  assert.equal(installerResult.signal, null);
+  assert.equal(runPorcuPiProcess(home, ["verify"]).status, 0);
+});
+
+test("release upgrade preserves a live Managed Pi Composition lease", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const targetRelease = createReleaseFixture(root, base);
+  const artifact = packRelease(targetRelease, root);
+  assert.equal(runInstaller(historicalRelease, home).status, 0);
+  const managedRoot = dataRoot(home);
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const historicalId = JSON.parse(readFileSync(activationPath, "utf8")).active.compositionId;
+  const launchLog = join(root, "held-upgrade-launch.log");
+  const held = spawn(join(home, ".local", "bin", "porcupi"), ["held"], {
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      NODE_ENV: "test",
+      PI_FIXTURE_LAUNCH_LOG: launchLog,
+      PI_FIXTURE_HOLD_MS: "6000",
+    },
+  });
+  childProcesses.push(held);
+  for (let attempt = 0; attempt < 100 && !existsSync(launchLog); attempt += 1) await delay(20);
+  assert.equal(existsSync(launchLog), true, "the Managed Pi lease holder did not start");
+
+  const upgraded = runPackedInstaller(artifact, home, "0d0d0d", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
+  assert.equal(upgraded.status, 0, upgraded.stderr || upgraded.stdout);
+  assert.equal(held.exitCode, null, "release upgrade terminated the live Managed Pi process");
+  const targetActivation = JSON.parse(readFileSync(activationPath, "utf8"));
+  assert.equal(targetActivation.previous.compositionId, historicalId);
+  assert.equal(existsSync(join(managedRoot, "compositions", historicalId)), true);
+  assert.ok(readdirSync(join(managedRoot, "leases", historicalId)).some((name) => name !== "owner.json"));
+  await new Promise((resolvePromise) => held.once("exit", resolvePromise));
+  assert.equal(runPorcuPiProcess(home, ["verify"]).status, 0);
 });
 
 test("the packed release preserves active Patches and scoped Pi resources through upgrade", async () => {

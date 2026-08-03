@@ -395,7 +395,7 @@ export function verifyManagedInstallation({ dataRoot, environment = process.env 
   return active.receipt;
 }
 
-export function publishComposition(paths, candidateRoot, receipt) {
+export function publishComposition(paths, candidateRoot, receipt, { afterCompositionPublished } = {}) {
   makeImmutable(candidateRoot);
   chmodSync(candidateRoot, 0o700);
   const compositionRoot = join(paths.compositions, receipt.compositionId);
@@ -409,6 +409,7 @@ export function publishComposition(paths, candidateRoot, receipt) {
     renameSync(candidateRoot, compositionRoot);
     chmodSync(compositionRoot, 0o555);
   }
+  afterCompositionPublished?.();
   const centralPath = join(paths.receipts, `${receipt.compositionId}.json`);
   if (pathExists(centralPath)) {
     if (canonicalJson(readJson(centralPath, "central Composition receipt")) !== canonicalJson(receipt)) {

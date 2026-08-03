@@ -661,6 +661,12 @@ function recoverUpgradeCleanupMarkers(paths) {
 }
 
 function retireUpgradeScratch(paths, stage, owner) {
+  validateUpgradeTemporaryNames(paths);
+  const persistedOwner = readUpgradeStageOwner(paths, stage);
+  if (canonicalJson(persistedOwner) !== canonicalJson(owner)) {
+    fail(`Foreign PorcuPi upgrade stage requires manual inspection: ${stage}`);
+  }
+  recoverUpgradeCleanupMarkers(paths);
   const { cleanupMarker, retiredStage } = prepareUpgradeCleanup({ paths, stage, owner });
   if (pathExists(stage)) renameSync(stage, retiredStage);
   if (pathExists(retiredStage)) removePreparedTree(retiredStage);

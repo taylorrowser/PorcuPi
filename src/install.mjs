@@ -582,6 +582,12 @@ function completeUpgradeTransaction(context) {
   checkpoint("upgrade-cleanup-started");
   cleanupRetainedCompositions(paths, transaction.targetActivation, output);
   checkpoint("upgrade-composition-cleanup-complete");
+  for (const [path, receipt, label] of [
+    [join(stage, "previous-runtime"), transaction.sourceRuntimeReceipt, "Previous PorcuPi runtime"],
+    [join(stage, "published-runtime"), transaction.targetRuntimeReceipt, "Prepared target PorcuPi runtime"],
+  ]) {
+    if (pathExists(path)) validateRuntimeDirectory(stage, path, receipt, label);
+  }
   const { cleanupMarker, retiredStage } = prepareUpgradeCleanup({
     paths,
     stage,

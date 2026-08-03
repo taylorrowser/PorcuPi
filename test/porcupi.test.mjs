@@ -909,6 +909,16 @@ test("modified upgrade transaction targets are refused and left untouched", () =
   unlinkSync(stableState);
   renameSync(escapedState, stableState);
 
+  const publishedCli = join(stage, "published-runtime", "cli.mjs");
+  const publishedCliBefore = readFileSync(publishedCli);
+  writeFileSync(publishedCli, "\n// foreign publication modification\n", { flag: "a" });
+  const modifiedPublication = readFileSync(publishedCli);
+  const publicationRetry = runPackedInstaller(artifact, home, "");
+  assert.notEqual(publicationRetry.status, 0);
+  assert.match(`${publicationRetry.stdout}${publicationRetry.stderr}`, /Prepared target PorcuPi runtime inventory mismatch/);
+  assert.deepEqual(readFileSync(publishedCli), modifiedPublication);
+  writeFileSync(publishedCli, publishedCliBefore);
+
   const targetCli = join(targetRuntime, "cli.mjs");
   writeFileSync(targetCli, "\n// foreign modification\n", { flag: "a" });
   const modified = readFileSync(targetCli);
@@ -920,6 +930,26 @@ test("modified upgrade transaction targets are refused and left untouched", () =
   assert.equal(launch.status, 0, launch.stderr || launch.stdout);
   assert.equal(launch.stdout.trim(), "0.81.1");
   assert.equal(runPorcuPiProcess(home, ["verify"]).status, 0);
+});
+
+test("modified previous runtimes are refused after target Activation", () => {
+  const { artifact, historicalRelease, home } = createUpgradeFixture();
+  assert.equal(runInstaller(historicalRelease, home).status, 0);
+  const interrupted = runPackedInstaller(artifact, home, "0d0d0d", {
+    PORCUPI_TEST_FAULT: "upgrade-activation-written",
+    PTY_WAIT_FOR: "1 of 3 — Upgrade",
+  });
+  assert.notEqual(interrupted.status, 0);
+  const temporary = join(dataRoot(home), "tmp");
+  const stage = join(temporary, readdirSync(temporary).find((name) => name.startsWith("upgrade-")));
+  const previousCli = join(stage, "previous-runtime", "cli.mjs");
+  writeFileSync(previousCli, "\n// foreign previous runtime modification\n", { flag: "a" });
+  const modifiedPreviousRuntime = readFileSync(previousCli);
+
+  const retry = runPackedInstaller(artifact, home, "");
+  assert.notEqual(retry.status, 0);
+  assert.match(`${retry.stdout}${retry.stderr}`, /Previous PorcuPi runtime inventory mismatch/);
+  assert.deepEqual(readFileSync(previousCli), modifiedPreviousRuntime);
 });
 
 test("modified retired upgrade cleanup stages are reported and left untouched", () => {
@@ -954,6 +984,7 @@ test("public launch, verify, and installer retry converge across upgrade publica
   const boundaries = [
     "upgrade-state-migrated",
     "upgrade-candidate-directory-published",
+    "upgrade-candidate-published",
     "upgrade-transition-launcher-published",
     "upgrade-transition-launcher-receipt-written",
     "upgrade-optional-alias-verified",

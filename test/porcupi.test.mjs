@@ -162,11 +162,17 @@ chmodSync(cli, 0o755);
   return { source, commit: git(source, "rev-parse", "HEAD") };
 }
 
-function createReleaseFixture(root, base, expectedVersion = "0.81.1") {
-  const release = join(root, "porcupi-release");
-  mkdirSync(release);
-  for (const path of ["LICENSE", "README.md", "install.sh", "package-lock.json", "package.json", "release", "scripts", "src"]) {
-    cpSync(join(repositoryRoot, path), join(release, path), { recursive: true });
+function createReleaseFixture(root, base, expectedVersion = "0.81.1", { historicalRef } = {}) {
+  const release = join(root, historicalRef ? `porcupi-release-${historicalRef}` : "porcupi-release");
+  if (historicalRef) {
+    execFileSync("git", ["clone", "--quiet", "--shared", "--no-checkout", repositoryRoot, release]);
+    execFileSync("git", ["checkout", "--quiet", "--detach", `${historicalRef}^{commit}`], { cwd: release });
+    rmSync(join(release, ".git"), { recursive: true, force: true });
+  } else {
+    mkdirSync(release);
+    for (const path of ["LICENSE", "README.md", "install.sh", "package-lock.json", "package.json", "release", "scripts", "src"]) {
+      cpSync(join(repositoryRoot, path), join(release, path), { recursive: true });
+    }
   }
   const modelData = join(release, "upstream", "model-data", "fixture");
   mkdirSync(modelData, { recursive: true });
@@ -226,36 +232,38 @@ function createReleaseFixture(root, base, expectedVersion = "0.81.1") {
   };
   writeFileSync(join(release, "upstream", "pi-base.json"), `${JSON.stringify(piBase, null, 2)}\n`);
 
-  const packageManifestPath = join(release, "package.json");
-  const packageManifest = JSON.parse(readFileSync(packageManifestPath, "utf8"));
-  const releaseRecordPath = join(release, "release", `v${packageManifest.version}.json`);
-  const releaseRecord = JSON.parse(readFileSync(releaseRecordPath, "utf8"));
-  releaseRecord.piBase = { repository: piBase.repository, tag: piBase.tag, commit: piBase.commit };
-  const packedInputs = [
-    `release/v${packageManifest.version}.json`,
-    "scripts/install.mjs",
-  ];
-  for (const directory of ["src", "upstream"]) {
-    const visit = (path) => {
-      for (const name of readdirSync(path).sort()) {
-        const child = join(path, name);
-        if (lstatSync(child).isDirectory()) visit(child);
-        else packedInputs.push(child.slice(release.length + 1));
-      }
-    };
-    visit(join(release, directory));
+  if (!historicalRef) {
+    const packageManifestPath = join(release, "package.json");
+    const packageManifest = JSON.parse(readFileSync(packageManifestPath, "utf8"));
+    const releaseRecordPath = join(release, "release", `v${packageManifest.version}.json`);
+    const releaseRecord = JSON.parse(readFileSync(releaseRecordPath, "utf8"));
+    releaseRecord.piBase = { repository: piBase.repository, tag: piBase.tag, commit: piBase.commit };
+    const packedInputs = [
+      `release/v${packageManifest.version}.json`,
+      "scripts/install.mjs",
+    ];
+    for (const directory of ["src", "upstream"]) {
+      const visit = (path) => {
+        for (const name of readdirSync(path).sort()) {
+          const child = join(path, name);
+          if (lstatSync(child).isDirectory()) visit(child);
+          else packedInputs.push(child.slice(release.length + 1));
+        }
+      };
+      visit(join(release, directory));
+    }
+    packageManifest.files = packedInputs;
+    writeFileSync(packageManifestPath, `${JSON.stringify(packageManifest, null, 2)}\n`);
+    const packageInputHash = createHash("sha256");
+    const packageInputPaths = ["package.json", ...packedInputs.filter((path) => !path.startsWith("release/"))].sort();
+    for (const path of packageInputPaths) {
+      packageInputHash.update(`${JSON.stringify(path)}\0`);
+      packageInputHash.update(readFileSync(join(release, path)));
+      packageInputHash.update("\0");
+    }
+    releaseRecord.packageInputsSha256 = packageInputHash.digest("hex");
+    writeFileSync(releaseRecordPath, `${JSON.stringify(releaseRecord, null, 2)}\n`);
   }
-  packageManifest.files = packedInputs;
-  writeFileSync(packageManifestPath, `${JSON.stringify(packageManifest, null, 2)}\n`);
-  const packageInputHash = createHash("sha256");
-  const packageInputPaths = ["package.json", ...packedInputs.filter((path) => !path.startsWith("release/"))].sort();
-  for (const path of packageInputPaths) {
-    packageInputHash.update(`${JSON.stringify(path)}\0`);
-    packageInputHash.update(readFileSync(join(release, path)));
-    packageInputHash.update("\0");
-  }
-  releaseRecord.packageInputsSha256 = packageInputHash.digest("hex");
-  writeFileSync(releaseRecordPath, `${JSON.stringify(releaseRecord, null, 2)}\n`);
   return release;
 }
 
@@ -682,6 +690,172 @@ test("the packed npm artifact is behaviorally equivalent to the exact-tag source
   assert.equal(existsSync(join(packedHome, ".local", "bin", "porcupi")), false);
   assert.equal(existsSync(join(packedHome, ".local", "bin", "pi")), false);
   assert.deepEqual(readFileSync(stockPi), stockBefore);
+});
+
+test("the packed release upgrades an intact historical v0.1.0 zero-Patch installation", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const targetRelease = createReleaseFixture(root, base);
+  const artifact = packRelease(targetRelease, root);
+  const olderTarget = join(root, "older-target-release");
+  cpSync(targetRelease, olderTarget, { recursive: true });
+  const olderManifestPath = join(olderTarget, "package.json");
+  const olderManifest = JSON.parse(readFileSync(olderManifestPath, "utf8"));
+  olderManifest.version = "0.1.0";
+  writeFileSync(olderManifestPath, `${JSON.stringify(olderManifest, null, 2)}\n`);
+  const shared = createSharedSentinels(root, home);
+  const environment = { PATH: `${dirname(shared.stockPi)}:${process.env.PATH}` };
+
+  const historicalInstall = runInstaller(historicalRelease, home, "0d790d0d", environment);
+  assert.equal(historicalInstall.status, 0, historicalInstall.stderr || historicalInstall.stdout);
+  const managedRoot = dataRoot(home);
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const historicalActivation = JSON.parse(readFileSync(activationPath, "utf8"));
+  const historicalReceipt = JSON.parse(readFileSync(
+    join(managedRoot, "receipts", `${historicalActivation.active.compositionId}.json`),
+    "utf8",
+  ));
+  assert.equal(historicalReceipt.porcupiVersion, "0.1.0");
+  assert.equal(existsSync(join(home, ".local", "bin", "pi")), true);
+  shared.assertUnchanged();
+
+  const beforeCancellation = treeDigest(managedRoot);
+  const cancelled = runPackedInstaller(artifact, home, "0d0d1b", {
+    ...environment,
+    PTY_WAIT_FOR: "1 of 3 — Upgrade",
+  });
+  assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+  assert.match(cancelled.stdout, /Installed PorcuPi: 0\.1\.0/);
+  assert.match(cancelled.stdout, /Target PorcuPi: 0\.2\.0/);
+  assert.match(cancelled.stdout, /Upgrade Readiness Check: ready/);
+  assert.match(cancelled.stdout, /Upgrade cancelled\. No authoritative state was changed/);
+  assert.equal(treeDigest(managedRoot), beforeCancellation);
+  shared.assertUnchanged();
+
+  const upgraded = runPackedInstaller(artifact, home, "0d0d0d", {
+    ...environment,
+    PTY_WAIT_FOR: "1 of 3 — Upgrade",
+  });
+  assert.equal(upgraded.status, 0, upgraded.stderr || upgraded.stdout);
+  assert.match(upgraded.stdout, /Upgraded PorcuPi from 0\.1\.0 to 0\.2\.0/);
+  assert.equal(existsSync(join(home, ".local", "bin", "pi")), true);
+  const targetActivation = JSON.parse(readFileSync(activationPath, "utf8"));
+  assert.equal(targetActivation.previous.compositionId, historicalActivation.active.compositionId);
+  assert.notEqual(targetActivation.active.compositionId, historicalActivation.active.compositionId);
+  const targetReceipt = JSON.parse(readFileSync(
+    join(managedRoot, "receipts", `${targetActivation.active.compositionId}.json`),
+    "utf8",
+  ));
+  assert.equal(targetReceipt.porcupiVersion, "0.2.0");
+  assert.deepEqual(targetReceipt.patches, []);
+  assert.equal(runPorcuPiProcess(home, ["--version"], environment).stdout.trim(), "0.81.1");
+  const verified = runPorcuPiProcess(home, ["verify"], environment);
+  assert.equal(verified.status, 0, verified.stderr || verified.stdout);
+
+  const rolledBack = runPorcuPi(home, ["rollback"], "0d", { ...environment, PTY_WAIT_FOR: "Roll back Managed Pi" });
+  assert.equal(rolledBack.status, 0, rolledBack.stderr || rolledBack.stdout);
+  assert.equal(JSON.parse(readFileSync(activationPath, "utf8")).active.compositionId, historicalActivation.active.compositionId);
+  const restored = runPorcuPi(home, ["rollback"], "0d", { ...environment, PTY_WAIT_FOR: "Roll back Managed Pi" });
+  assert.equal(restored.status, 0, restored.stderr || restored.stdout);
+  assert.equal(JSON.parse(readFileSync(activationPath, "utf8")).active.compositionId, targetActivation.active.compositionId);
+
+  const beforeDowngrade = treeDigest(managedRoot);
+  const downgrade = spawnSync(join(olderTarget, "install.sh"), [], {
+    cwd: olderTarget,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ...environment,
+      HOME: home,
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      NODE_ENV: "test",
+    },
+  });
+  assert.notEqual(downgrade.status, 0);
+  assert.match(`${downgrade.stdout}${downgrade.stderr}`, /unsupported PorcuPi downgrade.*0\.2\.0.*0\.1\.0/i);
+  assert.equal(treeDigest(managedRoot), beforeDowngrade);
+
+  const repeated = runPackedInstaller(artifact, home, "0d790d0d", environment);
+  assert.equal(repeated.status, 0, repeated.stderr || repeated.stdout);
+  assert.match(repeated.stdout, /Verified installed PorcuPi 0\.2\.0; no rebuild was needed/);
+  assert.doesNotMatch(repeated.stdout, /npm ci --ignore-scripts/);
+  shared.assertUnchanged();
+
+  const uninstall = runPorcuPi(home, ["uninstall"], "0d0d0d", environment);
+  assert.equal(uninstall.status, 0, uninstall.stderr || uninstall.stdout);
+  assert.equal(existsSync(managedRoot), false);
+  assert.equal(existsSync(join(home, ".local", "bin", "porcupi")), false);
+  assert.equal(existsSync(join(home, ".local", "bin", "pi")), false);
+  shared.assertUnchanged();
+});
+
+test("a failed Upgrade Readiness Check leaves the historical installation unchanged", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const historicalBase = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, historicalBase, "0.81.1", { historicalRef: "v0.1.0" });
+  const historicalInstall = runInstaller(historicalRelease, home);
+  assert.equal(historicalInstall.status, 0, historicalInstall.stderr || historicalInstall.stdout);
+
+  const targetRoot = join(root, "target");
+  mkdirSync(targetRoot);
+  const failingTargetBase = createPiBase(targetRoot, { buildFails: true });
+  const targetRelease = createReleaseFixture(targetRoot, failingTargetBase);
+  const artifact = packRelease(targetRelease, targetRoot);
+  const before = treeDigest(dataRoot(home));
+
+  const failed = runPackedInstaller(artifact, home, "");
+  assert.notEqual(failed.status, 0);
+  assert.match(failed.stdout, /Upgrade candidate: installed PorcuPi 0\.1\.0, target PorcuPi 0\.2\.0/);
+  assert.match(failed.stdout, /fixture build failed/);
+  assert.equal(treeDigest(dataRoot(home)), before);
+  assert.equal(runPorcuPiProcess(home, ["--version"]).stdout.trim(), "0.81.1");
+});
+
+test("interrupted v0.1.0 upgrades converge at each publication boundary", () => {
+  const root = temporaryRoot();
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const targetRelease = createReleaseFixture(root, base);
+  const artifact = packRelease(targetRelease, root);
+
+  for (const boundary of [
+    "upgrade-composition-published",
+    "upgrade-runtime-published",
+    "upgrade-activation-written",
+  ]) {
+    const home = join(root, boundary);
+    mkdirSync(home);
+    const historicalInstall = runInstaller(historicalRelease, home);
+    assert.equal(historicalInstall.status, 0, `${boundary}: ${historicalInstall.stderr || historicalInstall.stdout}`);
+
+    const interrupted = runPackedInstaller(artifact, home, "0d0d0d", {
+      PORCUPI_TEST_FAULT: boundary,
+      PTY_WAIT_FOR: "1 of 3 — Upgrade",
+    });
+    assert.notEqual(interrupted.status, 0, `${boundary}: fault did not interrupt the upgrade`);
+    const launchAfterInterruption = runPorcuPiProcess(home, ["--version"]);
+    assert.equal(launchAfterInterruption.status, 0, `${boundary}: ${launchAfterInterruption.stderr || launchAfterInterruption.stdout}`);
+    assert.equal(launchAfterInterruption.stdout.trim(), "0.81.1");
+
+    const installedManifest = JSON.parse(readFileSync(join(dataRoot(home), "runtime", "package.json"), "utf8"));
+    const retry = runPackedInstaller(
+      artifact,
+      home,
+      "0d0d0d",
+      { PTY_WAIT_FOR: installedManifest.version === "0.1.0" ? "1 of 3 — Upgrade" : "1 of 3 — Installation" },
+    );
+    assert.equal(retry.status, 0, `${boundary}: ${retry.stderr || retry.stdout}`);
+    assert.match(retry.stdout, /(?:Upgraded PorcuPi from 0\.1\.0 to 0\.2\.0|Recovered completed PorcuPi upgrade to 0\.2\.0)/);
+    const activation = JSON.parse(readFileSync(join(dataRoot(home), "state", "activation.json"), "utf8"));
+    const receipt = JSON.parse(readFileSync(join(dataRoot(home), "receipts", `${activation.active.compositionId}.json`), "utf8"));
+    assert.equal(receipt.porcupiVersion, "0.2.0");
+    assert.equal(runPorcuPiProcess(home, ["verify"]).status, 0);
+  }
 });
 
 test("guided installation can be cancelled without creating PorcuPi state", () => {

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for Patch Selection Intent in issue #16.
+Accepted for Patch Selection Intent in issue #16. Qualified for explicitly confirmed cross-release upgrades by ADR 0011 in issue #43.
 
 ## Context
 
@@ -35,7 +35,7 @@ The root and each entry reject unknown fields. Entry paths must be safe conventi
 
 Malformed roots, duplicate entries, unsafe values, unsupported fields, ranges, or invalid compatibility values invalidate and prominently ignore the entire overlay. A valid entry for a path that is not a discovered regular Patch is reported and ignored individually. Metadata never adds an Artifact.
 
-Patch display metadata is not retained as Selection Intent. Add saves only kind, path, exact source commit, and digest, and it explicitly reviews changed selected Patch digests when replacing a source commit. Patches never receive Pi Installation Scope or enter Pi package configuration. Saving intent only reports whether its canonical ordered Patch snapshot differs from the active Managed Pi Composition; `porcupi apply` remains the sole build and activation command.
+Patch display metadata is not retained as Selection Intent. Add saves only kind, path, exact source commit, and digest, and it explicitly reviews changed selected Patch digests when replacing a source commit. Patches never receive Pi Installation Scope or enter Pi package configuration. Saving intent only reports whether its canonical ordered Patch snapshot differs from the active Managed Pi Composition; `porcupi apply` remains the sole build and activation command during ordinary same-release Selection Intent management. ADR 0011 defines one narrow exception: an explicitly confirmed, supported cross-release Release Installation builds and activates the replacement Managed Pi from the exact retained Patch Selection Intent, including pending intent, as part of the atomic release upgrade.
 
 ## Consequences
 

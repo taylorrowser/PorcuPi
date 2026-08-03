@@ -1,4 +1,4 @@
-# ADR 0011: v0.1.0 zero-Patch Release Installation upgrade
+# ADR 0011: v0.1.0 Release Installation upgrade
 
 ## Status
 

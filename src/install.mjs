@@ -169,6 +169,7 @@ const upgradeCleanupFields = new Set([
   "schemaVersion", "type", "dataRoot", "sourceStage", "retiredStage", "targetVersion", "nonce", "inventory",
   "removablePaths",
 ]);
+const upgradeScratchReceiptFields = new Set(["schemaVersion", "type", "stage", "nonce", "inventory"]);
 const uuidV4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function scratchInventory(root) {
@@ -227,43 +228,57 @@ function validateScratchInventory(value, label) {
   return value;
 }
 
-function validateUpgradeTransactionRemainder(stage, expected) {
-  const expectedByPath = new Map(expected.map((entry) => [entry.path, entry]));
-  const movablePaths = ["composition", "published-runtime", "target-leases"];
-  const actual = scratchInventory(stage);
-  for (const entry of actual) {
-    if (
-      entry.path === "transaction.json"
-      || entry.path === "previous-runtime"
-      || entry.path.startsWith("previous-runtime/")
-    ) continue;
-    if (canonicalJson(entry) !== canonicalJson(expectedByPath.get(entry.path))) {
-      fail(`Foreign PorcuPi upgrade transaction requires manual inspection: ${stage}`);
-    }
-  }
-  const actualPaths = new Set(actual.map((entry) => entry.path));
-  for (const entry of expected) {
-    if (
-      !actualPaths.has(entry.path)
-      && !movablePaths.some((path) => entry.path === path || entry.path.startsWith(`${path}/`))
-    ) fail(`Foreign PorcuPi upgrade transaction requires manual inspection: ${stage}`);
-  }
+function pathMatchesAny(path, prefixes) {
+  return prefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 }
 
-function validateScratchRemainder(root, expected, removablePaths) {
+function validateScratchRemainder(root, expected, { ignoredPaths = [], removablePaths = [], message }) {
   const expectedByPath = new Map(expected.map((entry) => [entry.path, entry]));
   const actual = scratchInventory(root);
   const actualPaths = new Set(actual.map((entry) => entry.path));
   for (const entry of actual) {
-    if (canonicalJson(entry) !== canonicalJson(expectedByPath.get(entry.path))) {
-      fail(`Retired PorcuPi upgrade stage changed during cleanup: ${root}`);
-    }
+    if (pathMatchesAny(entry.path, ignoredPaths)) continue;
+    if (canonicalJson(entry) !== canonicalJson(expectedByPath.get(entry.path))) fail(message);
   }
   for (const entry of expected) {
-    if (
-      !actualPaths.has(entry.path)
-      && !removablePaths.some((path) => entry.path === path || entry.path.startsWith(`${path}/`))
-    ) fail(`Retired PorcuPi upgrade stage changed during cleanup: ${root}`);
+    if (!actualPaths.has(entry.path) && !pathMatchesAny(entry.path, removablePaths)) fail(message);
+  }
+}
+
+function validateUpgradeTransactionRemainder(stage, expected) {
+  validateScratchRemainder(stage, expected, {
+    ignoredPaths: ["previous-runtime", "transaction.json"],
+    removablePaths: ["composition", "published-runtime", "target-leases"],
+    message: `Foreign PorcuPi upgrade transaction requires manual inspection: ${stage}`,
+  });
+}
+
+function upgradeScratchInventory(stage) {
+  return scratchInventory(stage).filter((entry) => entry.path !== "scratch.json");
+}
+
+function writeUpgradeScratchReceipt(stage, owner) {
+  atomicWrite(join(stage, "scratch.json"), {
+    schemaVersion: 1,
+    type: "porcupi-upgrade-scratch",
+    stage,
+    nonce: owner.nonce,
+    inventory: upgradeScratchInventory(stage),
+  });
+}
+
+function validateUpgradeScratchReceipt(stage, owner) {
+  const receipt = readJson(join(stage, "scratch.json"), "PorcuPi upgrade scratch receipt");
+  if (
+    !exactObject(receipt, upgradeScratchReceiptFields)
+    || receipt.schemaVersion !== 1
+    || receipt.type !== "porcupi-upgrade-scratch"
+    || receipt.stage !== stage
+    || receipt.nonce !== owner.nonce
+  ) fail(`Foreign PorcuPi upgrade stage requires manual inspection: ${stage}`);
+  validateScratchInventory(receipt.inventory, "PorcuPi upgrade scratch inventory");
+  if (canonicalJson(upgradeScratchInventory(stage)) !== canonicalJson(receipt.inventory)) {
+    fail(`Foreign PorcuPi upgrade stage requires manual inspection: ${stage}`);
   }
 }
 
@@ -672,7 +687,10 @@ function recoverUpgradeCleanupMarkers(paths) {
       if (!stat.isDirectory() || stat.isSymbolicLink()) {
         fail(`Foreign PorcuPi retired upgrade stage requires manual inspection: ${marker.retiredStage}`);
       }
-      validateScratchRemainder(marker.retiredStage, marker.inventory, marker.removablePaths);
+      validateScratchRemainder(marker.retiredStage, marker.inventory, {
+        removablePaths: marker.removablePaths,
+        message: `Retired PorcuPi upgrade stage changed during cleanup: ${marker.retiredStage}`,
+      });
       removePreparedTree(marker.retiredStage);
       durableUnlink(markerPath);
     } else if (pathExists(marker.sourceStage)) {
@@ -680,18 +698,23 @@ function recoverUpgradeCleanupMarkers(paths) {
       if (!stat.isDirectory() || stat.isSymbolicLink()) {
         fail(`Foreign PorcuPi upgrade stage requires manual inspection: ${marker.sourceStage}`);
       }
-      validateScratchRemainder(marker.sourceStage, marker.inventory, marker.removablePaths);
+      validateScratchRemainder(marker.sourceStage, marker.inventory, {
+        removablePaths: marker.removablePaths,
+        message: `Retired PorcuPi upgrade stage changed during cleanup: ${marker.sourceStage}`,
+      });
     } else durableUnlink(markerPath);
   }
 }
 
-function retireUpgradeScratch(paths, stage, owner) {
+function retireUpgradeScratch(paths, stage, owner, { allowIncomplete = false } = {}) {
   validateUpgradeTemporaryNames(paths);
   const persistedOwner = readUpgradeStageOwner(paths, stage);
   if (canonicalJson(persistedOwner) !== canonicalJson(owner)) {
     fail(`Foreign PorcuPi upgrade stage requires manual inspection: ${stage}`);
   }
   recoverUpgradeCleanupMarkers(paths);
+  if (pathExists(join(stage, "scratch.json"))) validateUpgradeScratchReceipt(stage, owner);
+  else if (!allowIncomplete) fail(`Foreign PorcuPi upgrade stage requires manual inspection: ${stage}`);
   const { cleanupMarker, retiredStage } = prepareUpgradeCleanup({ paths, stage, owner });
   if (pathExists(stage)) renameSync(stage, retiredStage);
   if (pathExists(retiredStage)) removePreparedTree(retiredStage);
@@ -974,6 +997,8 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
       active: { compositionId: receipt.compositionId, patches: receipt.patches },
       previous: existing.active.activation.active,
     };
+    atomicWrite(join(stageRoot, "target-activation.json"), targetActivation);
+    writeUpgradeScratchReceipt(stageRoot, stageOwner);
     const confirmed = await confirmUpgrade({
       active: existing.active,
       installedVersion: existing.installedVersion,
@@ -989,7 +1014,6 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
       return { installed: false, upgraded: false, cancelled: true };
     }
 
-    atomicWrite(join(stageRoot, "target-activation.json"), targetActivation);
     const transaction = {
       schemaVersion: 1,
       type: "porcupi-upgrade-transaction",
@@ -1022,7 +1046,7 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
     output.write(`Preserved ${selectedArtifactReview(selections.sources).length} selected Artifacts, their Installation Scope, Pi-owned state, Stock Pi, and \`pi\` ownership.\n`);
     return { installed: true, upgraded: true, launcher, compositionId: receipt.compositionId };
   } catch (error) {
-    if (!transactionCommitted) retireUpgradeScratch(paths, stageRoot, stageOwner);
+    if (!transactionCommitted) retireUpgradeScratch(paths, stageRoot, stageOwner, { allowIncomplete: true });
     throw error;
   }
 }

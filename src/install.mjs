@@ -48,8 +48,9 @@ import { reconcilePiOwnershipLocked } from "./pi-ownership.mjs";
 import { readSelections } from "./resource-intent.mjs";
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
+const migrationContractKey = (sourceVersion, targetVersion) => `${sourceVersion} → ${targetVersion}`;
 const upgradeMigrationContracts = new Map([
-  ["0.1.0", Object.freeze({ sourceStateSchema: 1, targetStateSchema: 1 })],
+  [migrationContractKey("0.1.0", "0.2.0"), Object.freeze({ sourceStateSchema: 1, targetStateSchema: 1 })],
 ]);
 
 function initializeFreshRoot(paths) {
@@ -249,7 +250,7 @@ function validateExistingInstallation(paths, launcher, environment) {
 }
 
 async function upgradeManagedPi({ paths, launcher, existing, lock, input, output, environment }) {
-  const migration = upgradeMigrationContracts.get(existing.installedVersion);
+  const migration = upgradeMigrationContracts.get(migrationContractKey(existing.installedVersion, porcupiVersion));
   if (!migration) fail(`No versioned state migration supports PorcuPi ${existing.installedVersion} → ${porcupiVersion}`);
   if (existing.active.activation.schemaVersion !== migration.sourceStateSchema) {
     fail(`Upgrade requires PorcuPi ${existing.installedVersion} state schema ${migration.sourceStateSchema}`);

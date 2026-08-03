@@ -267,6 +267,36 @@ function createReleaseFixture(root, base, expectedVersion = "0.81.1", { historic
   return release;
 }
 
+function setReleaseFixtureVersion(release, version) {
+  const manifestPath = join(release, "package.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const previousReleaseRecord = `release/v${manifest.version}.json`;
+  const releaseRecordPath = `release/v${version}.json`;
+  manifest.version = version;
+  manifest.files = manifest.files.map((path) => path === previousReleaseRecord ? releaseRecordPath : path);
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+  const packageLockPath = join(release, "package-lock.json");
+  const packageLock = JSON.parse(readFileSync(packageLockPath, "utf8"));
+  packageLock.version = version;
+  packageLock.packages[""].version = version;
+  writeFileSync(packageLockPath, `${JSON.stringify(packageLock, null, 2)}\n`);
+
+  const releaseRecord = JSON.parse(readFileSync(join(release, previousReleaseRecord), "utf8"));
+  renameSync(join(release, previousReleaseRecord), join(release, releaseRecordPath));
+  releaseRecord.porcupiVersion = version;
+  releaseRecord.tag = `v${version}`;
+  const packageInputHash = createHash("sha256");
+  const packageInputPaths = ["package.json", ...manifest.files.filter((path) => !path.startsWith("release/"))].sort();
+  for (const path of packageInputPaths) {
+    packageInputHash.update(`${JSON.stringify(path)}\0`);
+    packageInputHash.update(readFileSync(join(release, path)));
+    packageInputHash.update("\0");
+  }
+  releaseRecord.packageInputsSha256 = packageInputHash.digest("hex");
+  writeFileSync(join(release, releaseRecordPath), `${JSON.stringify(releaseRecord, null, 2)}\n`);
+}
+
 function packRelease(release, root) {
   const destination = join(root, "packed");
   mkdirSync(destination);
@@ -778,6 +808,54 @@ test("the packed release upgrades an intact historical v0.1.0 zero-Patch install
   assert.equal(existsSync(join(home, ".local", "bin", "porcupi")), false);
   assert.equal(existsSync(join(home, ".local", "bin", "pi")), false);
   shared.assertUnchanged();
+});
+
+test("a version-aware exact target refuses a newer installation as an unsupported downgrade", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const futureRelease = createReleaseFixture(root, base);
+  setReleaseFixtureVersion(futureRelease, "0.3.0");
+  const futureArtifact = packRelease(futureRelease, root);
+  const futureInstall = runPackedInstaller(futureArtifact, home);
+  assert.equal(futureInstall.status, 0, futureInstall.stderr || futureInstall.stdout);
+
+  const targetRoot = join(root, "target");
+  mkdirSync(targetRoot);
+  const targetRelease = createReleaseFixture(targetRoot, base);
+  const artifact = packRelease(targetRelease, targetRoot);
+  const before = treeDigest(dataRoot(home));
+
+  const downgrade = runPackedInstaller(artifact, home, "");
+  assert.notEqual(downgrade.status, 0);
+  assert.match(
+    `${downgrade.stdout}${downgrade.stderr}`,
+    /Unsupported PorcuPi downgrade: installed 0\.3\.0, invoked target 0\.2\.0; no changes were made/,
+  );
+  assert.equal(treeDigest(dataRoot(home)), before);
+});
+
+test("a migration contract is bound to both exact release versions", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const historicalInstall = runInstaller(historicalRelease, home);
+  assert.equal(historicalInstall.status, 0, historicalInstall.stderr || historicalInstall.stdout);
+
+  const futureRelease = createReleaseFixture(root, base);
+  setReleaseFixtureVersion(futureRelease, "0.3.0");
+  const before = treeDigest(dataRoot(home));
+
+  const unsupported = runInstaller(futureRelease, home, "1b", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
+  assert.notEqual(unsupported.status, 0);
+  assert.match(
+    `${unsupported.stdout}${unsupported.stderr}`,
+    /No versioned state migration supports PorcuPi 0\.1\.0 → 0\.3\.0/,
+  );
+  assert.equal(treeDigest(dataRoot(home)), before);
 });
 
 test("a failed Upgrade Readiness Check leaves the historical installation unchanged", () => {

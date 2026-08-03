@@ -1,6 +1,6 @@
 {
   "name": "porcupi",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
@@ -19,7 +19,7 @@
     "porcupi": "scripts/install.mjs"
   },
   "files": [
-    "release/v0.1.0.json",
+    "release/v0.2.0.json",
     "scripts/install.mjs",
     "src/add.mjs",
     "src/apply.mjs",

@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import test, { after } from "node:test";
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const porcupiVersion = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")).version;
 const temporaryRoots = [];
 const childProcesses = [];
 
@@ -230,7 +231,6 @@ function createReleaseFixture(root, base, expectedVersion = "0.81.1") {
   const releaseRecordPath = join(release, "release", `v${packageManifest.version}.json`);
   const releaseRecord = JSON.parse(readFileSync(releaseRecordPath, "utf8"));
   releaseRecord.piBase = { repository: piBase.repository, tag: piBase.tag, commit: piBase.commit };
-  writeFileSync(releaseRecordPath, `${JSON.stringify(releaseRecord, null, 2)}\n`);
   const packedInputs = [
     `release/v${packageManifest.version}.json`,
     "scripts/install.mjs",
@@ -246,6 +246,14 @@ function createReleaseFixture(root, base, expectedVersion = "0.81.1") {
     visit(join(release, directory));
   }
   packageManifest.files = packedInputs;
+  const packageInputHash = createHash("sha256");
+  for (const path of packedInputs.filter((path) => !path.startsWith("release/")).sort()) {
+    packageInputHash.update(`${JSON.stringify(path)}\0`);
+    packageInputHash.update(readFileSync(join(release, path)));
+    packageInputHash.update("\0");
+  }
+  releaseRecord.packageInputsSha256 = packageInputHash.digest("hex");
+  writeFileSync(releaseRecordPath, `${JSON.stringify(releaseRecord, null, 2)}\n`);
   writeFileSync(packageManifestPath, `${JSON.stringify(packageManifest, null, 2)}\n`);
   return release;
 }
@@ -1782,7 +1790,7 @@ test("porcupi apply builds and atomically activates the exact ordered Patch seri
   const receiptPath = join(rootPath, "receipts", `${activation.active.compositionId}.json`);
   const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
   assert.deepEqual(receipt.patches, activation.active.patches);
-  assert.equal(receipt.porcupiVersion, "0.1.0");
+  assert.equal(receipt.porcupiVersion, porcupiVersion);
   assert.equal(receipt.piBase.commit, base.commit);
   assert.equal(receipt.recipe.id, "pi-v0.81.1-composition-v2");
   assert.equal(receipt.platform, `${process.platform}-${process.arch}`);

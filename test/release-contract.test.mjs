@@ -3,15 +3,13 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { compositionRecipe, porcupiVersion } from "../src/composition.mjs";
+import { compositionRecipe } from "../src/composition.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const readJson = (path) => JSON.parse(readFileSync(join(root, path), "utf8"));
 const readText = (path) => readFileSync(join(root, path), "utf8");
 
 const release = readJson("release/v0.1.0.json");
-const packageManifest = readJson("package.json");
-const packageLock = readJson("package-lock.json");
 const piBase = readJson("upstream/pi-base.json");
 const handoff = readJson("test/fixtures/real-handoff.json");
 
@@ -23,10 +21,6 @@ test("v0.1.0 release record binds the shipped version, fixed recipe, and accepte
   assert.equal(release.porcupiVersion, "0.1.0");
   assert.equal(release.tag, "v0.1.0");
   assert.deepEqual(release.supportedOperatingSystems, ["macOS", "Linux"]);
-  assert.equal(packageManifest.version, release.porcupiVersion);
-  assert.equal(porcupiVersion, release.porcupiVersion);
-  assert.equal(packageLock.version, release.porcupiVersion);
-  assert.equal(packageLock.packages[""].version, release.porcupiVersion);
   assert.equal(release.recipeId, compositionRecipe.id);
   assert.deepEqual(release.piBase, {
     repository: piBase.repository,

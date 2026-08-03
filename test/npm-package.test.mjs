@@ -11,6 +11,7 @@ const readJson = (path) => JSON.parse(readFileSync(join(root, path), "utf8"));
 
 const manifest = readJson("package.json");
 const release = readJson(`release/v${manifest.version}.json`);
+const historicalRelease = readJson("release/v0.1.0.json");
 const expectedFiles = ["LICENSE", "README.md", "package.json", ...manifest.files].sort();
 const temporaryRoots = [];
 
@@ -40,9 +41,11 @@ function packFixture(fixture) {
 test("the public porcupi package declares one exact release installer", () => {
   assert.equal(manifest.name, "porcupi");
   assert.equal(manifest.private, undefined);
+  assert.notEqual(manifest.version, historicalRelease.porcupiVersion, "v0.1.0 must remain source-only and immutable");
   assert.deepEqual(manifest.bin, { porcupi: "scripts/install.mjs" });
   assert.equal(manifest.version, release.porcupiVersion);
   assert.equal(release.tag, `v${manifest.version}`);
+  assert.match(release.packageInputsSha256, /^[a-f0-9]{64}$/);
   assert.deepEqual(manifest.files.filter((path) => path.startsWith("release/")), [`release/v${manifest.version}.json`]);
   assert.equal(manifest.scripts.prepack, "node scripts/validate-package.mjs");
   for (const lifecycle of ["preinstall", "install", "postinstall"]) {
@@ -63,6 +66,20 @@ test("npm pack contains exactly the declared release-fixed installer inventory",
   assert.deepEqual(packed.files.map(({ path }) => path).sort(), expectedFiles);
 });
 
+test("release packing refuses the historical source-only v0.1.0 identity", () => {
+  const fixture = packageFixture();
+  const fixtureManifestPath = join(fixture, "package.json");
+  const fixtureManifest = JSON.parse(readFileSync(fixtureManifestPath, "utf8"));
+  fixtureManifest.version = historicalRelease.porcupiVersion;
+  fixtureManifest.files = fixtureManifest.files.map((path) => path.startsWith("release/") ? "release/v0.1.0.json" : path);
+  writeFileSync(fixtureManifestPath, `${JSON.stringify(fixtureManifest, null, 2)}\n`);
+
+  const result = packFixture(fixture);
+
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}${result.stderr}`, /v0\.1\.0.*immutable.*not.*npm/i);
+});
+
 test("release packing rejects missing declared inputs", () => {
   const fixture = packageFixture();
   rmSync(join(fixture, "src", "install.mjs"));
@@ -80,6 +97,16 @@ test("the npm delivery ADR keeps GitHub canonical and npm lifecycle ownership na
   assert.match(adr, /npm.*does not own.*runtime.*state.*uninstall/is);
   assert.match(adr, /exact-tag source entrance/i);
   assert.match(adr, /v0\.1\.0.*not.*npm/is);
+});
+
+test("release packing rejects implementation bytes from a different release identity", () => {
+  const fixture = packageFixture();
+  writeFileSync(join(fixture, "src", "runtime.mjs"), "\n// changed after the release identity was fixed\n", { flag: "a" });
+
+  const result = packFixture(fixture);
+
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}${result.stderr}`, /release record does not match the exact package input bytes/i);
 });
 
 test("release packing rejects undeclared content in release-fixed input roots", () => {

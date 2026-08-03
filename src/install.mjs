@@ -323,7 +323,7 @@ function expectedTransitionLauncherReceipt(sourceReceipt, stage) {
   };
 }
 
-function readUpgradeTransaction(paths, stage, owner, launcher) {
+function readUpgradeTransaction({ paths, stage, owner, launcher }) {
   const transaction = readJson(join(stage, "transaction.json"), "PorcuPi upgrade transaction");
   if (
     !exactObject(transaction, upgradeTransactionFields)
@@ -437,7 +437,7 @@ function runtimeKind(ownershipRoot, path, transaction) {
   fail(`PorcuPi runtime changed during upgrade recovery: ${path}`);
 }
 
-function validateUpgradePublicationState(paths, launcher, stage, transaction, environment) {
+function validateUpgradePublicationState({ paths, launcher, stage, transaction, environment }) {
   const activation = readActivation(paths);
   if (
     canonicalJson(activation) !== canonicalJson(transaction.sourceActivation)
@@ -490,7 +490,7 @@ function validateUpgradePublicationState(paths, launcher, stage, transaction, en
   return { activation, kind };
 }
 
-function prepareUpgradeCleanup(paths, stage, owner, removablePaths = []) {
+function prepareUpgradeCleanup({ paths, stage, owner, removablePaths = [] }) {
   const retiredStage = join(paths.temporary, `upgrade-retired-${owner.nonce}`);
   const cleanupMarker = join(paths.temporary, `upgrade-cleanup-${owner.nonce}.json`);
   if (!pathExists(cleanupMarker)) atomicWrite(cleanupMarker, {
@@ -507,9 +507,10 @@ function prepareUpgradeCleanup(paths, stage, owner, removablePaths = []) {
   return { cleanupMarker, retiredStage };
 }
 
-function completeUpgradeTransaction(paths, launcher, stage, owner, environment, output) {
-  const transaction = readUpgradeTransaction(paths, stage, owner, launcher);
-  let publication = validateUpgradePublicationState(paths, launcher, stage, transaction, environment);
+function completeUpgradeTransaction(context) {
+  const { paths, launcher, stage, owner, environment, output } = context;
+  const transaction = readUpgradeTransaction(context);
+  let publication = validateUpgradePublicationState({ ...context, transaction });
   const candidateRoot = join(stage, "composition");
   if (pathExists(candidateRoot)) {
     publishComposition(paths, candidateRoot, transaction.compositionReceipt, {
@@ -581,12 +582,12 @@ function completeUpgradeTransaction(paths, launcher, stage, owner, environment, 
   checkpoint("upgrade-cleanup-started");
   cleanupRetainedCompositions(paths, transaction.targetActivation, output);
   checkpoint("upgrade-composition-cleanup-complete");
-  const { cleanupMarker, retiredStage } = prepareUpgradeCleanup(
+  const { cleanupMarker, retiredStage } = prepareUpgradeCleanup({
     paths,
     stage,
     owner,
-    ["previous-runtime", "published-runtime"],
-  );
+    removablePaths: ["previous-runtime", "published-runtime"],
+  });
   checkpoint("upgrade-cleanup-marker-written");
   removePreparedTree(join(stage, "previous-runtime"));
   checkpoint("upgrade-previous-runtime-removed");
@@ -654,7 +655,7 @@ function recoverUpgradeCleanupMarkers(paths) {
 }
 
 function retireUpgradeScratch(paths, stage, owner) {
-  const { cleanupMarker, retiredStage } = prepareUpgradeCleanup(paths, stage, owner);
+  const { cleanupMarker, retiredStage } = prepareUpgradeCleanup({ paths, stage, owner });
   if (pathExists(stage)) renameSync(stage, retiredStage);
   if (pathExists(retiredStage)) removePreparedTree(retiredStage);
   if (pathExists(cleanupMarker)) durableUnlink(cleanupMarker);
@@ -676,7 +677,7 @@ function recoverInterruptedUpgradesLocked(paths, launcher, environment, output) 
       retireUpgradeScratch(paths, stage, owner);
       continue;
     }
-    const transaction = completeUpgradeTransaction(paths, launcher, stage, owner, environment, output);
+    const transaction = completeUpgradeTransaction({ paths, launcher, stage, owner, environment, output });
     recovered.push(transaction);
     output?.write(`Recovered interrupted PorcuPi upgrade from ${transaction.installedVersion} to ${transaction.targetVersion}.\n`);
   }
@@ -970,7 +971,7 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
     atomicWrite(join(stageRoot, "transaction.json"), transaction);
     transactionCommitted = true;
     checkpoint("upgrade-state-migrated");
-    completeUpgradeTransaction(paths, launcher, stageRoot, stageOwner, environment, output);
+    completeUpgradeTransaction({ paths, launcher, stage: stageRoot, owner: stageOwner, environment, output });
 
     output.write(`\nUpgraded PorcuPi from ${existing.installedVersion} to ${porcupiVersion}.\n`);
     output.write(`Activated verified Managed Pi Composition ${receipt.compositionId} with ${receipt.patches.length} selected Patch${receipt.patches.length === 1 ? "" : "es"}.\n`);

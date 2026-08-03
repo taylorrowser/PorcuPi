@@ -970,28 +970,45 @@ test("public launch, verify, and installer retry converge across upgrade publica
     "upgrade-cleanup-retired",
     "upgrade-cleanup-complete",
   ];
-  for (const boundary of boundaries) {
-    const { artifact, historicalRelease, home } = createUpgradeFixture();
-    assert.equal(runInstaller(historicalRelease, home, "0d790d0d").status, 0, boundary);
-
-    const interrupted = runPackedInstaller(artifact, home, "0d0d0d", {
-      PORCUPI_TEST_FAULT: boundary,
-      PTY_WAIT_FOR: "1 of 3 — Upgrade",
-    });
-    assert.notEqual(interrupted.status, 0, `${boundary}: the fault did not interrupt publication`);
-
-    const retry = runPackedInstaller(artifact, home, "", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
-    assert.equal(retry.status, 0, `${boundary}: ${retry.stderr || retry.stdout}`);
-    assert.match(retry.stdout, /Recovered interrupted PorcuPi upgrade|Verified installed PorcuPi 0\.2\.0/, boundary);
+  const interruptAt = (artifact, home, boundary) => runPackedInstaller(artifact, home, "0d0d0d", {
+    PORCUPI_TEST_FAULT: boundary,
+    PTY_WAIT_FOR: "1 of 3 — Upgrade",
+  });
+  const assertPublicCommands = (home, boundary) => {
     const launch = runPorcuPiProcess(home, ["--version"]);
     assert.equal(launch.status, 0, `${boundary}: ${launch.stderr || launch.stdout}`);
     assert.equal(launch.stdout.trim(), "0.81.1", boundary);
     const verified = runPorcuPiProcess(home, ["verify"]);
     assert.equal(verified.status, 0, `${boundary}: ${verified.stderr || verified.stdout}`);
     assert.equal(existsSync(join(home, ".local", "bin", "pi")), true, boundary);
+  };
+  const assertUninstall = (home, boundary) => {
     const uninstall = runPorcuPi(home, ["uninstall"], "0d0d0d");
     assert.equal(uninstall.status, 0, `${boundary}: ${uninstall.stderr || uninstall.stdout}`);
     assert.equal(existsSync(dataRoot(home)), false, boundary);
+  };
+
+  for (const boundary of boundaries) {
+    const { artifact, historicalRelease, home: publicHome, root } = createUpgradeFixture();
+    assert.equal(runInstaller(historicalRelease, publicHome, "0d790d0d").status, 0, boundary);
+    const publicInterruption = interruptAt(artifact, publicHome, boundary);
+    assert.notEqual(publicInterruption.status, 0, `${boundary}: the public-command fault did not interrupt publication`);
+    assertPublicCommands(publicHome, boundary);
+    const publicRetry = runPackedInstaller(artifact, publicHome, "", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
+    assert.equal(publicRetry.status, 0, `${boundary}: ${publicRetry.stderr || publicRetry.stdout}`);
+    assert.match(publicRetry.stdout, /Recovered interrupted PorcuPi upgrade|Verified installed PorcuPi 0\.2\.0/, boundary);
+    assertUninstall(publicHome, boundary);
+
+    const installerHome = join(root, "installer-home");
+    mkdirSync(installerHome);
+    assert.equal(runInstaller(historicalRelease, installerHome, "0d790d0d").status, 0, boundary);
+    const installerInterruption = interruptAt(artifact, installerHome, boundary);
+    assert.notEqual(installerInterruption.status, 0, `${boundary}: the installer-retry fault did not interrupt publication`);
+    const retry = runPackedInstaller(artifact, installerHome, "", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
+    assert.equal(retry.status, 0, `${boundary}: ${retry.stderr || retry.stdout}`);
+    assert.match(retry.stdout, /Recovered interrupted PorcuPi upgrade|Verified installed PorcuPi 0\.2\.0/, boundary);
+    assertPublicCommands(installerHome, boundary);
+    assertUninstall(installerHome, boundary);
   }
 });
 

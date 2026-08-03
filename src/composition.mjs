@@ -302,9 +302,14 @@ function executeBuildRecipe(payloadRoot, stageRoot, lock) {
 
 function applyPatchSeries(checkout, patches, check) {
   for (const patch of patches) {
+    const identity = `${patch.locator}@${patch.commit}:${patch.path} (sha256 ${patch.sha256})`;
     const args = ["apply", ...(check ? ["--check"] : []), "--whitespace=error-all", patch.stagedPath];
-    run("git", args, { cwd: checkout });
-    if (check) run("git", ["apply", "--whitespace=error-all", patch.stagedPath], { cwd: checkout });
+    try {
+      run("git", args, { cwd: checkout });
+      if (check) run("git", ["apply", "--whitespace=error-all", patch.stagedPath], { cwd: checkout });
+    } catch (error) {
+      fail(`Patch ${check ? "preflight" : "application"} blocked by ${identity}: ${error.message}`);
+    }
   }
 }
 

@@ -1,9 +1,14 @@
 import { spawn } from "node:child_process";
-import { lstatSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { cpSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { atomicWrite, canonicalJson, fail, managedLayout } from "./runtime.mjs";
-import { isFullGitCommit, parseRequestedGitSource } from "./source-repository.mjs";
+import { atomicWrite, canonicalJson, fail, managedLayout, sha256File } from "./runtime.mjs";
+import {
+  discoverPiArtifacts,
+  isFullGitCommit,
+  parseRequestedGitSource,
+  resolveSourceRepository,
+} from "./source-repository.mjs";
 
 const installationScopes = new Set(["global", "project"]);
 const selectionRootFields = new Set(["schemaVersion", "sources"]);
@@ -41,6 +46,60 @@ export function patchPendingMessage(pending) {
   return pending
     ? "Patch Selection Intent is pending `porcupi apply`; active Managed Pi Composition is unchanged.\n"
     : "Patch Selection Intent matches the active Managed Pi Composition.\n";
+}
+
+export function stageSelectionIntent({ stageRoot, sources, piBase }) {
+  const patches = patchSelectionSnapshot(sources);
+  const patchesRoot = join(stageRoot, "patches");
+  mkdirSync(patchesRoot, { mode: 0o700 });
+  const stagedPatches = new Map();
+
+  for (const source of sources) {
+    let resolved;
+    try {
+      resolved = resolveSourceRepository(source.packageSource, { temporaryParent: stageRoot });
+      if (resolved.locator !== source.locator || resolved.commit !== source.commit) {
+        fail(`exact Source Repository changed: ${source.locator}@${source.commit}`);
+      }
+      const discovered = new Map(discoverPiArtifacts(resolved.checkout, { piBase }).artifacts
+        .map((artifact) => [artifactKey(artifact), artifact]));
+      for (const artifact of source.artifacts) {
+        const identity = `${source.locator}@${source.commit}:${artifact.path}`;
+        const candidate = discovered.get(artifactKey(artifact));
+        if (!candidate) {
+          fail(`Upgrade Readiness Check blocked by selected ${artifact.kind} ${identity}: it is not discoverable with the target Pi Base`);
+        }
+        if (artifact.kind !== "Patch") continue;
+        if (candidate.sha256 !== artifact.sha256) {
+          fail(`Upgrade Readiness Check blocked by selected Patch ${identity}: expected sha256 ${artifact.sha256}, found ${candidate.sha256}`);
+        }
+        if (candidate.compatible === false) {
+          fail(`Upgrade Readiness Check blocked by selected Patch ${identity}: it does not support target Pi Base ${piBase.tag} (${piBase.commit})`);
+        }
+        const index = patches.findIndex((patch) => patch.locator === source.locator && patch.path === artifact.path);
+        const stagedPath = join(patchesRoot, `${String(index).padStart(6, "0")}.patch`);
+        cpSync(join(resolved.checkout, artifact.path), stagedPath, { errorOnExist: true });
+        if (sha256File(stagedPath) !== artifact.sha256) {
+          fail(`Upgrade Readiness Check blocked by selected Patch ${identity}: staged bytes do not match sha256 ${artifact.sha256}`);
+        }
+        stagedPatches.set(`${source.locator}\0${artifact.path}`, {
+          locator: source.locator,
+          commit: source.commit,
+          path: artifact.path,
+          sha256: artifact.sha256,
+          stagedPath,
+        });
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Upgrade Readiness Check blocked")) throw error;
+      fail(`Upgrade Readiness Check blocked by Source Repository ${source.locator}@${source.commit}: ${error.message}`);
+    } finally {
+      resolved?.dispose();
+    }
+  }
+
+  return patches.map((patch) => stagedPatches.get(`${patch.locator}\0${patch.path}`)
+    ?? fail(`Upgrade Readiness Check blocked by selected Patch ${patch.locator}@${patch.commit}:${patch.path}: staged bytes are missing`));
 }
 
 function selectionStatePath(dataRoot) {

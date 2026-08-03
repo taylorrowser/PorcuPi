@@ -765,7 +765,7 @@ test("the packed release upgrades an intact historical v0.1.0 zero-Patch install
   });
   assert.equal(upgraded.status, 0, upgraded.stderr || upgraded.stdout);
   assert.match(upgraded.stdout, /Upgraded PorcuPi from 0\.1\.0 to 0\.2\.0/);
-  assert.match(upgraded.stdout, /Selection Intent: empty — selected Artifact upgrades are handled separately/);
+  assert.match(upgraded.stdout, /Selection Intent: empty/);
   assert.equal(existsSync(join(home, ".local", "bin", "pi")), true);
   const targetActivation = JSON.parse(readFileSync(activationPath, "utf8"));
   assert.equal(targetActivation.previous.compositionId, historicalActivation.active.compositionId);
@@ -808,6 +808,139 @@ test("the packed release upgrades an intact historical v0.1.0 zero-Patch install
   assert.equal(existsSync(join(home, ".local", "bin", "porcupi")), false);
   assert.equal(existsSync(join(home, ".local", "bin", "pi")), false);
   shared.assertUnchanged();
+});
+
+test("the packed release preserves active Patches and scoped Pi resources through upgrade", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  const project = join(root, "project");
+  mkdirSync(home);
+  mkdirSync(project);
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const targetRoot = join(root, "target-release");
+  mkdirSync(targetRoot);
+  const targetRelease = createReleaseFixture(targetRoot, base);
+  const artifact = packRelease(targetRelease, targetRoot);
+
+  const repository = createApplicablePatchRepository(join(root, "selected-source"), [[
+    "patches/selected.patch",
+    textPatch("series.txt", "base", "selected"),
+  ]]);
+  mkdirSync(join(repository.source, "extensions"));
+  mkdirSync(join(repository.source, "skills", "upgrade-skill"), { recursive: true });
+  writeFileSync(join(repository.source, "extensions", "upgrade.ts"), "export default function upgrade() {}\n");
+  writeFileSync(join(repository.source, "skills", "upgrade-skill", "SKILL.md"), "---\nname: upgrade-skill\ndescription: Upgrade fixture.\n---\nUpgrade.\n");
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Add upgrade resources");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+  const packageLog = join(root, "package.log");
+  const environment = { PI_FIXTURE_PACKAGE_LOG: packageLog };
+
+  const historicalInstall = runInstaller(historicalRelease, home, "0d790d0d", environment);
+  assert.equal(historicalInstall.status, 0, historicalInstall.stderr || historicalInstall.stdout);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e206e0d", environment, project);
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  assert.match(add.stdout, /1 global, 1 project Pi resource\(s\), 1 Patch\(es\)/);
+  const apply = runPorcuPi(home, ["apply"], "0d", { ...environment, PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(apply.status, 0, apply.stderr || apply.stdout);
+
+  const managedRoot = dataRoot(home);
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const historicalActivation = JSON.parse(readFileSync(activationPath, "utf8"));
+  const selectionsBefore = readFileSync(join(managedRoot, "state", "selections.json"));
+  const globalSettingsBefore = readFileSync(join(home, ".pi", "agent", "settings.json"));
+  const projectSettingsBefore = readFileSync(join(project, ".pi", "settings.json"));
+  const packageLogBefore = readFileSync(packageLog);
+  writeFileSync(join(home, ".pi", "agent", "credentials.json"), "credential-sentinel\n");
+  mkdirSync(join(home, ".pi", "agent", "sessions"), { recursive: true });
+  writeFileSync(join(home, ".pi", "agent", "sessions", "session"), "session-sentinel\n");
+  mkdirSync(join(project, ".pi", "resources"), { recursive: true });
+  writeFileSync(join(project, ".pi", "resources", "trusted"), "project-sentinel\n");
+  const sharedBefore = treeDigest(join(home, ".pi"));
+  const projectSharedBefore = treeDigest(join(project, ".pi"));
+
+  const upgraded = runPackedInstaller(artifact, home, "0d0d0d", {
+    ...environment,
+    PTY_WAIT_FOR: "1 of 3 — Upgrade",
+  });
+
+  assert.equal(upgraded.status, 0, upgraded.stderr || upgraded.stdout);
+  assert.match(upgraded.stdout, /Patch Selection Intent: current — matches the active Patch selection/);
+  assert.match(upgraded.stdout, /Active Patches \(1\):/);
+  assert.match(upgraded.stdout, /Selected Patches \(1\):/);
+  assert.match(upgraded.stdout, /Patch .*:patches\/selected\.patch/);
+  const canonicalProject = realpathSync(project);
+  assert.match(upgraded.stdout, new RegExp(`Extension .*:extensions/upgrade\\.ts \\[project: ${canonicalProject.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]`));
+  assert.match(upgraded.stdout, /Skill .*:skills\/upgrade-skill\/SKILL\.md \[global\]/);
+  assert.match(upgraded.stdout, /Pi package lifecycle: retained under Pi ownership/);
+  assert.deepEqual(readFileSync(join(managedRoot, "state", "selections.json")), selectionsBefore);
+  assert.deepEqual(readFileSync(join(home, ".pi", "agent", "settings.json")), globalSettingsBefore);
+  assert.deepEqual(readFileSync(join(project, ".pi", "settings.json")), projectSettingsBefore);
+  assert.deepEqual(readFileSync(packageLog), packageLogBefore);
+  assert.equal(treeDigest(join(home, ".pi")), sharedBefore);
+  assert.equal(treeDigest(join(project, ".pi")), projectSharedBefore);
+  assert.equal(existsSync(join(home, ".local", "bin", "pi")), true);
+
+  const targetActivation = JSON.parse(readFileSync(activationPath, "utf8"));
+  assert.deepEqual(targetActivation.previous, historicalActivation.active);
+  assert.deepEqual(targetActivation.active.patches, historicalActivation.active.patches);
+  const targetReceipt = JSON.parse(readFileSync(
+    join(managedRoot, "receipts", `${targetActivation.active.compositionId}.json`),
+    "utf8",
+  ));
+  assert.equal(targetReceipt.porcupiVersion, "0.2.0");
+  assert.deepEqual(targetReceipt.patches, targetActivation.active.patches);
+  assert.equal(readFileSync(join(managedRoot, "compositions", targetActivation.active.compositionId, "payload", "series.txt"), "utf8"), "selected\n");
+  assert.equal(runPorcuPiProcess(home, ["verify"], environment).status, 0);
+});
+
+test("the packed release activates preserved pending Patch Selection Intent", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const targetRoot = join(root, "target-release");
+  mkdirSync(targetRoot);
+  const targetRelease = createReleaseFixture(targetRoot, base);
+  const artifact = packRelease(targetRelease, targetRoot);
+  const repository = createApplicablePatchRepository(join(root, "pending-source"), [[
+    "patches/pending.patch",
+    textPatch("series.txt", "base", "pending"),
+  ]]);
+  const locator = await serveGitRepository(root, repository);
+
+  const historicalInstall = runInstaller(historicalRelease, home);
+  assert.equal(historicalInstall.status, 0, historicalInstall.stderr || historicalInstall.stdout);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  assert.match(add.stdout, /Patch Selection Intent is pending `porcupi apply`/);
+
+  const managedRoot = dataRoot(home);
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const historicalActivation = JSON.parse(readFileSync(activationPath, "utf8"));
+  assert.deepEqual(historicalActivation.active.patches, []);
+  const selectionsBefore = readFileSync(join(managedRoot, "state", "selections.json"));
+  const beforeCancellation = treeDigest(managedRoot);
+
+  const cancelled = runPackedInstaller(artifact, home, "0d0d1b", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
+  assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+  assert.match(cancelled.stdout, /Patch Selection Intent: pending — differs from the active Patch selection/);
+  assert.match(cancelled.stdout, /Active Patches \(0\):/);
+  assert.match(cancelled.stdout, /Selected Patches \(1\):/);
+  assert.equal(treeDigest(managedRoot), beforeCancellation);
+
+  const upgraded = runPackedInstaller(artifact, home, "0d0d0d", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
+  assert.equal(upgraded.status, 0, upgraded.stderr || upgraded.stdout);
+  assert.match(upgraded.stdout, /Patch Selection Intent: pending — differs from the active Patch selection/);
+  assert.deepEqual(readFileSync(join(managedRoot, "state", "selections.json")), selectionsBefore);
+  const targetActivation = JSON.parse(readFileSync(activationPath, "utf8"));
+  assert.deepEqual(targetActivation.previous, historicalActivation.active);
+  assert.equal(targetActivation.active.patches.length, 1);
+  assert.match(targetActivation.active.patches[0].path, /patches\/pending\.patch/);
+  assert.equal(readFileSync(join(managedRoot, "compositions", targetActivation.active.compositionId, "payload", "series.txt"), "utf8"), "pending\n");
 });
 
 test("a version-aware exact target refuses a newer installation as an unsupported downgrade", () => {
@@ -879,6 +1012,47 @@ test("a failed Upgrade Readiness Check leaves the historical installation unchan
   assert.match(failed.stdout, /Upgrade candidate: installed PorcuPi 0\.1\.0, target PorcuPi 0\.2\.0/);
   assert.match(failed.stdout, /fixture build failed/);
   assert.equal(treeDigest(dataRoot(home)), before);
+  assert.equal(runPorcuPiProcess(home, ["--version"]).stdout.trim(), "0.81.1");
+});
+
+test("a selected Patch readiness blocker names the exact Patch and leaves the installation unchanged", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const historicalBase = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, historicalBase, "0.81.1", { historicalRef: "v0.1.0" });
+  const historicalInstall = runInstaller(historicalRelease, home);
+  assert.equal(historicalInstall.status, 0, historicalInstall.stderr || historicalInstall.stdout);
+
+  const repository = createApplicablePatchRepository(join(root, "blocked-source"), [[
+    "patches/blocked.patch",
+    textPatch("series.txt", "base", "patched"),
+  ]]);
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+
+  const targetRoot = join(root, "target");
+  mkdirSync(targetRoot);
+  const targetBase = createPiBase(targetRoot);
+  writeFileSync(join(targetBase.source, "series.txt"), "target\n");
+  git(targetBase.source, "add", "series.txt");
+  git(targetBase.source, "commit", "-m", "Change target Patch context");
+  git(targetBase.source, "tag", "--force", "v0.81.1");
+  targetBase.commit = git(targetBase.source, "rev-parse", "HEAD");
+  const targetRelease = createReleaseFixture(targetRoot, targetBase);
+  const artifact = packRelease(targetRelease, targetRoot);
+  const managedRoot = dataRoot(home);
+  const before = treeDigest(managedRoot);
+  const selections = JSON.parse(readFileSync(join(managedRoot, "state", "selections.json"), "utf8"));
+  const selectedPatch = selections.sources[0].artifacts.find((candidate) => candidate.kind === "Patch");
+
+  const failed = runPackedInstaller(artifact, home, "", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
+
+  assert.notEqual(failed.status, 0);
+  assert.match(failed.stdout, new RegExp(`Patch preflight blocked by .*:patches/blocked\\.patch \\(sha256 ${selectedPatch.sha256}\\)`));
+  assert.match(failed.stdout, new RegExp(`target Pi Base: v0\\.81\\.1 \\(${targetBase.commit}\\)`));
+  assert.equal(treeDigest(managedRoot), before);
   assert.equal(runPorcuPiProcess(home, ["--version"]).stdout.trim(), "0.81.1");
 });
 

@@ -86,21 +86,20 @@ function runAddWizard({ source, artifacts, diagnostics, currentArtifacts, previo
             const focused = artifacts[artifactCursor];
             if (focused.description) output.write(`${truncateForTerminal(output, `  Details: ${focused.description}`)}\n`);
             if (isPatchSeries(focused)) {
+              output.write(`${truncateForTerminal(output, `  Members: ${focused.members.length} Patch File${focused.members.length === 1 ? "" : "s"} in declared order`)}\n`);
               const compatibility = focused.compatibilityDeclared
                 ? focused.compatible ? "supports this exact Pi Base" : "does not support this exact Pi Base"
                 : "has no compatibility declaration; the fixed pipeline remains authoritative";
               output.write(`${truncateForTerminal(output, `  Compatibility: ${compatibility}`)}\n`);
             }
           }
-          const orderedDiagnostics = [
-            ...diagnostics.filter((diagnostic) => diagnostic.path === "porcupi.json"),
-            ...diagnostics.filter((diagnostic) => diagnostic.path !== "porcupi.json"),
-          ];
-          for (const diagnostic of orderedDiagnostics.slice(0, 5)) {
-            if (diagnostic.path === "porcupi.json") output.write(`${truncateForTerminal(output, `  ${diagnostic.reason} (porcupi.json)`)}\n`);
-            else output.write(`${truncateForTerminal(output, `  Rejected ${diagnostic.path}: ${diagnostic.reason}`)}\n`);
+          const metadataDiagnostics = diagnostics.filter((diagnostic) => diagnostic.path === "porcupi.json");
+          const candidateDiagnostics = diagnostics.filter((diagnostic) => diagnostic.path !== "porcupi.json");
+          for (const diagnostic of metadataDiagnostics) output.write(`  ${diagnostic.reason} (porcupi.json)\n`);
+          for (const diagnostic of candidateDiagnostics.slice(0, 5)) {
+            output.write(`${truncateForTerminal(output, `  Rejected ${diagnostic.path}: ${diagnostic.reason}`)}\n`);
           }
-          if (diagnostics.length > 5) output.write(`  … ${diagnostics.length - 5} more rejected candidates\n`);
+          if (candidateDiagnostics.length > 5) output.write(`  … ${candidateDiagnostics.length - 5} more rejected candidates\n`);
           output.write("\n[↑/↓ j/k] move  [Space/Enter] toggle  [a] select all  [d] deselect all\n[n → l] Next  [Esc] cancel\n");
         } else if (page === 1) {
           const selectedArtifacts = chosenWithScopes();
@@ -126,15 +125,16 @@ function runAddWizard({ source, artifacts, diagnostics, currentArtifacts, previo
           output.write("3 of 3 — Review and save\n");
           output.write(`Repository: ${source.locator}\nExact commit: ${source.commit}\n`);
           if (previousCommit && previousCommit !== source.commit) output.write(`Source-wide change: ${previousCommit} → ${source.commit}\n`);
-          const digestChanges = new Map(selectedArtifacts.filter((artifact) => {
+          const seriesChanges = new Map(selectedArtifacts.filter((artifact) => {
             const previousPatch = previousPatches.get(artifact.id);
             return isPatchSeries(artifact) && previousPatch
-              && previousPatch.members[0].sha256 !== artifact.members[0].sha256;
+              && JSON.stringify(previousPatch.members.map(({ path, sha256 }) => ({ path, sha256 })))
+                !== JSON.stringify(artifact.members.map(({ path, sha256 }) => ({ path, sha256 })));
           }).map((artifact) => [artifact.id, {
-            previous: previousPatches.get(artifact.id).members[0].sha256,
-            next: artifact.members[0].sha256,
+            previous: previousPatches.get(artifact.id).members.map(({ path, sha256 }) => ({ path, sha256 })),
+            next: artifact.members.map(({ path, sha256 }) => ({ path, sha256 })),
           }]));
-          if (digestChanges.size > 0) output.write(`Patch byte changes: ${digestChanges.size}; focus each changed Patch to review its digests.\n`);
+          if (seriesChanges.size > 0) output.write(`Patch Series changes: ${seriesChanges.size}; focus each changed series to review membership, order, paths, and digests.\n`);
           const globalCount = selectedArtifacts.filter((artifact) => artifact.scope === "global").length;
           const projectCount = selectedArtifacts.filter((artifact) => artifact.scope === "project").length;
           const patchCount = selectedArtifacts.filter(isPatchSeries).length;
@@ -143,7 +143,7 @@ function runAddWizard({ source, artifacts, diagnostics, currentArtifacts, previo
           for (let index = reviewWindow.start; index < reviewWindow.end; index += 1) {
             const artifact = selectedArtifacts[index];
             const context = isPatchSeries(artifact)
-              ? `Managed Pi · sha256:${artifact.members[0].sha256.slice(0, 12)}`
+              ? `Managed Pi · ${artifact.members.length} Patch File${artifact.members.length === 1 ? "" : "s"}`
               : artifact.scope === "project" ? `project — ${artifact.projectRoot}` : "global";
             const kind = isPatchSeries(artifact) ? "Patch Series" : artifact.kind;
             output.write(`${truncateForTerminal(output, `${index === reviewCursor ? "›" : " "} [${context}] ${kind.padEnd(12)} ${artifactStructuralIdentity(artifact)}`)}\n`);
@@ -151,8 +151,25 @@ function runAddWizard({ source, artifacts, diagnostics, currentArtifacts, previo
           if (selectedArtifacts.length > 0) {
             output.write(`  ${reviewWindow.start} above · ${selectedArtifacts.length - reviewWindow.end} below\n`);
             const focused = selectedArtifacts[reviewCursor];
-            const digestChange = digestChanges.get(artifactStructuralIdentity(focused));
-            if (digestChange) output.write(`Patch bytes changed: ${artifactStructuralIdentity(focused)} sha256:${digestChange.previous.slice(0, 12)} → sha256:${digestChange.next.slice(0, 12)}\n`);
+            if (isPatchSeries(focused)) {
+              for (const [memberIndex, member] of focused.members.entries()) {
+                output.write(`  ${memberIndex + 1}. ${member.path} · sha256:${member.sha256}\n`);
+              }
+            }
+            const seriesChange = seriesChanges.get(artifactStructuralIdentity(focused));
+            if (seriesChange) {
+              if (
+                seriesChange.previous.length === 1
+                && seriesChange.next.length === 1
+                && seriesChange.previous[0].path === seriesChange.next[0].path
+              ) {
+                output.write(`Patch bytes changed: ${artifactStructuralIdentity(focused)} sha256:${seriesChange.previous[0].sha256} → sha256:${seriesChange.next[0].sha256}\n`);
+              } else {
+                output.write(`Patch Series changed: ${artifactStructuralIdentity(focused)}\n`);
+                output.write(`  Previous: ${seriesChange.previous.map((member) => `${member.path}@sha256:${member.sha256}`).join(" → ")}\n`);
+                output.write(`  Next: ${seriesChange.next.map((member) => `${member.path}@sha256:${member.sha256}`).join(" → ")}\n`);
+              }
+            }
           }
           if (selectedArtifacts.length === 0) output.write("  Saving removes this Source Repository's prior PorcuPi selections.\n");
           output.write("\nSelecting this source trusts its code and dependencies with your user authority.\n");
@@ -222,7 +239,10 @@ export async function addResources(requestedSource, {
       for (const series of previous.artifacts.filter(isPatchSeries)) {
         const discovered = discoveredPatches.get(series.id);
         if (discovered?.members.length !== series.members.length
-          || discovered.members.some((member, index) => member.sha256 !== series.members[index].sha256)) {
+          || discovered.members.some((member, index) => (
+            member.path !== series.members[index].path
+            || member.sha256 !== series.members[index].sha256
+          ))) {
           fail(`Saved Patch digest does not match its exact Source Repository commit: ${series.id}`);
         }
       }

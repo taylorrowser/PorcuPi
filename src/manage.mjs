@@ -72,7 +72,13 @@ function runManageWizard({ items, project, patchPending, input, output }) {
           output.write(`  ${itemWindow.start} above · ${items.length - itemWindow.end} below\n`);
           if (items[itemCursor]) {
             output.write(`Focused exact source: ${items[itemCursor].locator}@${items[itemCursor].commit}\n`);
-            if (isPatchSeries(items[itemCursor])) output.write(`Focused Patch digest: sha256:${items[itemCursor].members[0].sha256}\n`);
+            if (isPatchSeries(items[itemCursor])) {
+              const focused = items[itemCursor];
+              output.write(`Focused inventory: ${focused.members.length} Patch File${focused.members.length === 1 ? "" : "s"} in retained order\n`);
+              for (const [memberIndex, member] of focused.members.entries()) {
+                output.write(`  ${memberIndex + 1}. ${member.path} · sha256:${member.sha256}\n`);
+              }
+            }
           }
           output.write("\n[↑/↓ j/k] move  [Space/Enter] keep/remove  [a] keep all  [d] remove all\n[n → l] Next  [Esc] cancel\n");
         } else if (page === 1) {

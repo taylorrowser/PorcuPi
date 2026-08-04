@@ -10,7 +10,7 @@
     "name": "porcupi",
     "version": "0.2.0",
     "executable": "porcupi",
-    "packageInputsSha256": "6259b615faaf579c63cb00c57fa3e1fd4bd4080dcb638bc976b23114e7cc7dd6"
+    "packageInputsSha256": "b7e55d2606ca4c18196a46203b2d2322151cc1c9207a9092fa6191afc1985d16"
   },
   "supportedOperatingSystems": [
     "macOS",
@@ -22,7 +22,7 @@
     "commit": "20be4b18d4c57487f8993d2762bace129f0cf7c6"
   },
   "recipeId": "pi-v0.81.1-composition-v2",
-  "packageInputsSha256": "6259b615faaf579c63cb00c57fa3e1fd4bd4080dcb638bc976b23114e7cc7dd6",
+  "packageInputsSha256": "b7e55d2606ca4c18196a46203b2d2322151cc1c9207a9092fa6191afc1985d16",
   "acceptanceEvidence": {
     "workflow": ".github/workflows/release-installation-gate.yml",
     "reportSchemaVersion": 1,

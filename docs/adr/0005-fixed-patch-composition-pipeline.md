@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for `porcupi apply` in issue #17.
+Accepted for `porcupi apply` in issue #17. Its standalone-Patch ordering is generalized to declared Patch Series by ADR 0013 in issue #47.
 
 ## Context
 
@@ -12,7 +12,7 @@ Patch sources must not gain a build interface. Preflight and build must also con
 
 ## Decision
 
-`porcupi apply` previews the canonical Patch series ordered lexically by `(canonical Source Repository locator, full source-relative path)` and requires one terminal confirmation. Zero Patches is a valid series.
+`porcupi apply` previews the canonical Patch flattening and requires one terminal confirmation. ADR 0013 orders selected series lexically by `(canonical Source Repository locator, stable series identity)` and preserves declared member order within each series; implicit one-file series therefore retain the original full-path order. Zero Patch Files is valid.
 
 After confirmation, PorcuPi resolves each retained package source to its retained full commit inside an owner-marked apply stage. It verifies the canonical locator, commit, convention-discovered regular-file path, and SHA-256, then copies each Patch into a canonically numbered staged file and verifies that copy. Both later passes use only those staged bytes.
 

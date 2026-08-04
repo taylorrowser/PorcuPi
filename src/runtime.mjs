@@ -261,23 +261,31 @@ export function run(command, args, { cwd, environment = process.env, capture = f
 
 function validatePatchIdentities(value, label) {
   if (!Array.isArray(value)) fail(`Malformed ${label}`);
-  let previousKey;
-  const keys = new Set();
+  let previousSeriesKey;
+  const identities = new Set();
+  const memberOwners = new Set();
   for (const patch of value) {
     if (
       (!exactObject(patch, patchIdentityFields) && !exactObject(patch, legacyPatchIdentityFields))
       || !validText(patch.locator)
-      || (Object.hasOwn(patch, "seriesId") && (!validText(patch.seriesId) || patch.seriesId !== patch.path))
+      || (Object.hasOwn(patch, "seriesId") && !validText(patch.seriesId))
       || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(patch.commit || "")
       || !validRelativePath(patch.path)
       || !patch.path.startsWith("patches/")
       || !patch.path.endsWith(".patch")
       || !/^[a-f0-9]{64}$/.test(patch.sha256 || "")
     ) fail(`Malformed ${label}`);
-    const key = `${patch.locator}\0${patch.seriesId ?? patch.path}\0${patch.path}`;
-    if (keys.has(key) || (previousKey !== undefined && lexicalCompare(previousKey, key) >= 0)) fail(`Malformed ${label}`);
-    keys.add(key);
-    previousKey = key;
+    const seriesKey = `${patch.locator}\0${patch.seriesId ?? patch.path}`;
+    const identity = `${seriesKey}\0${patch.path}`;
+    const memberOwner = `${patch.locator}\0${patch.path}`;
+    if (
+      identities.has(identity)
+      || memberOwners.has(memberOwner)
+      || (previousSeriesKey !== undefined && lexicalCompare(previousSeriesKey, seriesKey) > 0)
+    ) fail(`Malformed ${label}`);
+    identities.add(identity);
+    memberOwners.add(memberOwner);
+    previousSeriesKey = seriesKey;
   }
   return value;
 }

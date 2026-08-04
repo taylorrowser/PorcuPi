@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for standalone Patch File evolution in issue #46.
+Accepted for standalone Patch File evolution in issue #46. Declared multi-file series are added by ADR 0013 in issue #47.
 
 ## Context
 
@@ -29,4 +29,4 @@ ADR 0004's convention discovery, path and regular-file rejection, digest, and na
 - Selection Intent, Composition receipts, Activation, verification, rollback, uninstall, and pending comparison can distinguish series identity from exact member identity.
 - Existing v0.1 selections migrate one-for-one without inferred grouping or selected-content changes.
 - Moving a standalone Patch File changes its implicit series identity.
-- Declared multi-file series, author-chosen identifiers, and non-path member ordering remain deferred.
+- ADR 0013 now defines declared multi-file series, author-chosen identifiers, and explicit member ordering without changing implicit-series behavior.

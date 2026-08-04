@@ -52,17 +52,18 @@ export function expandedPatchSnapshot(patches) {
 export function patchSelectionSnapshot(sources) {
   return sources.flatMap((source) => source.artifacts
     .filter(isPatchSeries)
-    .flatMap((series) => series.members.map((member) => ({
+    .map((series) => ({ source, series })))
+    .sort((left, right) => lexicalCompare(
+      `${left.source.locator}\0${left.series.id}`,
+      `${right.source.locator}\0${right.series.id}`,
+    ))
+    .flatMap(({ source, series }) => series.members.map((member) => ({
       locator: source.locator,
       seriesId: series.id,
       commit: member.commit,
       path: member.path,
       sha256: member.sha256,
-    }))))
-    .sort((left, right) => lexicalCompare(
-      `${left.locator}\0${left.seriesId}\0${left.path}`,
-      `${right.locator}\0${right.seriesId}\0${right.path}`,
-    ));
+    })));
 }
 
 export function patchIntentPending(sources, activePatches) {
@@ -249,22 +250,22 @@ export function readSelections(dataRoot) {
         if (!legacy && isPatchSeries(artifact)) {
           return !hasOnlyKeys(artifact, patchSeriesFields)
             || typeof artifact.id !== "string"
-            || !artifact.id.startsWith("patches/")
-            || !artifact.id.endsWith(".patch")
-            || artifact.id.includes("\\")
+            || artifact.id.length === 0
             || /[\x00-\x1f\x7f]/.test(artifact.id)
-            || artifact.id.split("/").some((part) => part === "" || part === "." || part === "..")
             || !Array.isArray(artifact.members)
-            || artifact.members.length !== 1
+            || artifact.members.length === 0
             || artifact.members.some((member) => (
               !hasOnlyKeys(member, patchMemberFields)
               || member.commit !== source.commit
               || typeof member.path !== "string"
-              || member.path !== artifact.id
+              || member.path.includes("\\")
+              || /[\x00-\x1f\x7f]/.test(member.path)
+              || member.path.split("/").some((part) => part === "" || part === "." || part === "..")
               || !member.path.startsWith("patches/")
               || !member.path.endsWith(".patch")
               || !/^[a-f0-9]{64}$/.test(member.sha256 || "")
-            ));
+            ))
+            || new Set(artifact.members.map((member) => member.path)).size !== artifact.members.length;
         }
         const resourceFields = artifact.scope === "project" ? projectResourceFields : globalResourceFields;
         return !hasOnlyKeys(artifact, resourceFields)
@@ -291,11 +292,15 @@ export function readSelections(dataRoot) {
       fail("Malformed PorcuPi Selection Intent");
     }
     const artifactKeys = source.artifacts.map(artifactKey);
+    const patchMembers = source.artifacts
+      .filter(isPatchSeries)
+      .flatMap((series) => series.members.map((member) => member.path));
     if (
       locators.has(source.locator)
       || packageSource.locator !== source.locator
       || packageSource.ref !== source.commit
       || new Set(artifactKeys).size !== artifactKeys.length
+      || new Set(patchMembers).size !== patchMembers.length
     ) {
       fail("Malformed PorcuPi Selection Intent");
     }

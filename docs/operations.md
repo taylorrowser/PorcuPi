@@ -24,7 +24,7 @@ porcupi add
 
 The guided flow resolves a ref to one full Git commit before review. It lets you select Pi Skills, Extensions, Prompts, and Themes and assign global or current-project scope. Pi performs its public package lifecycle; PorcuPi does not approve project trust or replace Pi's package behavior.
 
-Each tracked regular `patches/**/*.patch` file appears in the same selection flow as an implicit one-file Patch Series. Its stable source identity is its structural path, and its member identity records the exact commit, path, and SHA-256. Patch Series have no Pi Installation Scope and are never installed as Pi packages.
+A strict root `porcupi.json` can group one or more ordered tracked regular `patches/**/*.patch` files into one declared Patch Series with a stable source-local identifier. Each unclaimed Patch File appears as an implicit one-file Patch Series identified by its structural path. Selection binds each series identity and complete ordered member commit, path, and SHA-256 inventory. Patch Series have no Pi Installation Scope and are never installed as Pi packages.
 
 ## Review or change retained intent
 
@@ -40,7 +40,7 @@ Manage reviews every retained Source Repository, removes selections, and moves P
 porcupi apply
 ```
 
-Apply previews the complete canonical flattening of selected Patch Series and each exact member identity. After confirmation it verifies and sequentially preflights the same staged bytes, runs the release's fixed build and verification recipe, publishes a complete immutable Composition, and atomically activates it. The former active Composition becomes the one previous target. Any failure before activation leaves active and previous unchanged.
+Apply previews the complete canonical flattening of selected Patch Series by canonical source locator and stable series identity, preserving each declared member order and showing every exact member identity. After confirmation it verifies and sequentially preflights the same staged bytes, runs the release's fixed build and verification recipe, publishes a complete immutable Composition, and atomically activates it. The former active Composition becomes the one previous target. Any failure before activation leaves active and previous unchanged.
 
 Selecting zero Patches and applying returns to the exact release Pi Base. Applying an identity that is already active is a verified no-op.
 

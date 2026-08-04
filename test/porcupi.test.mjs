@@ -2600,6 +2600,102 @@ test("porcupi add discovers only exact regular nested Patches and leaves them pe
   }]);
 });
 
+test("declared single- and multi-file Patch Series complete add, manage, apply, verify, and rollback journeys", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createApplicablePatchRepository(root, [
+    ["patches/020-first.patch", textPatch("series.txt", "base", "first")],
+    ["patches/010-second.patch", textPatch("series.txt", "first", "second")],
+    ["patches/030-single.patch", newFilePatch("single-series.txt", "single")],
+  ]);
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    patchSeries: [
+      {
+        id: "coordinated-change",
+        displayName: "Coordinated change",
+        description: "Two dependent reviewable Patch Files.",
+        members: ["patches/020-first.patch", "patches/010-second.patch"],
+      },
+      {
+        id: "single-change",
+        displayName: "Single declared change",
+        members: ["patches/030-single.patch"],
+      },
+    ],
+  }, null, 2)}\n`);
+  git(repository.source, "add", "porcupi.json");
+  git(repository.source, "commit", "-m", "Declare coordinated Patch Series");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  assert.match(add.stdout, /Patch Series\s+Coordinated change — coordinated-change/);
+  assert.match(add.stdout, /Two dependent reviewable Patch Files/);
+  assert.match(add.stdout, /2 Patch Series selected/);
+  const managedRoot = dataRoot(home);
+  const selections = JSON.parse(readFileSync(join(managedRoot, "state", "selections.json"), "utf8"));
+  assert.deepEqual(selections.sources[0].artifacts, [
+    {
+      kind: "PatchSeries",
+      id: "coordinated-change",
+      members: [
+        {
+          commit: repository.commit,
+          path: "patches/020-first.patch",
+          sha256: createHash("sha256").update(readFileSync(join(repository.source, "patches/020-first.patch"))).digest("hex"),
+        },
+        {
+          commit: repository.commit,
+          path: "patches/010-second.patch",
+          sha256: createHash("sha256").update(readFileSync(join(repository.source, "patches/010-second.patch"))).digest("hex"),
+        },
+      ],
+    },
+    {
+      kind: "PatchSeries",
+      id: "single-change",
+      members: [{
+        commit: repository.commit,
+        path: "patches/030-single.patch",
+        sha256: createHash("sha256").update(readFileSync(join(repository.source, "patches/030-single.patch"))).digest("hex"),
+      }],
+    },
+  ]);
+
+  const manage = runPorcuPi(home, ["manage"], "1b", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+  assert.equal(manage.status, 0, manage.stderr || manage.stdout);
+  assert.match(manage.stdout, /Patch Series\s+.*coordinated-change/);
+  assert.match(manage.stdout, /2 Patch Files/);
+
+  const apply = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(apply.status, 0, apply.stderr || apply.stdout);
+  assert.ok(apply.stdout.indexOf("patches/020-first.patch") < apply.stdout.indexOf("patches/010-second.patch"));
+  const activation = JSON.parse(readFileSync(join(managedRoot, "state", "activation.json"), "utf8"));
+  assert.deepEqual(activation.active.patches.map(({ seriesId, path }) => ({ seriesId, path })), [
+    { seriesId: "coordinated-change", path: "patches/020-first.patch" },
+    { seriesId: "coordinated-change", path: "patches/010-second.patch" },
+    { seriesId: "single-change", path: "patches/030-single.patch" },
+  ]);
+  assert.equal(readFileSync(join(managedRoot, "compositions", activation.active.compositionId, "payload", "series.txt"), "utf8"), "second\n");
+  assert.equal(readFileSync(join(managedRoot, "compositions", activation.active.compositionId, "payload", "single-series.txt"), "utf8"), "single\n");
+
+  const verify = runPorcuPiProcess(home, ["verify"]);
+  assert.equal(verify.status, 0, verify.stderr || verify.stdout);
+  assert.match(verify.stdout, /Verified Managed Pi Composition/);
+  const rollback = runPorcuPi(home, ["rollback"], "0d", { PTY_WAIT_FOR: "Roll back Managed Pi" });
+  assert.equal(rollback.status, 0, rollback.stderr || rollback.stdout);
+  assert.match(rollback.stdout, /Activated retained Managed Pi Composition/);
+  const rolledBack = JSON.parse(readFileSync(join(managedRoot, "state", "activation.json"), "utf8"));
+  assert.equal(readFileSync(join(managedRoot, "compositions", rolledBack.active.compositionId, "payload", "series.txt"), "utf8"), "base\n");
+});
+
 test("porcupi apply builds and atomically activates the exact ordered Patch series", async () => {
   const root = temporaryRoot();
   const home = join(root, "home");
@@ -2638,9 +2734,9 @@ test("porcupi apply builds and atomically activates the exact ordered Patch seri
   const canonicalLocator = `127.0.0.1:${new URL(locator).port}/owner/resources`;
   const canonicalSecondLocator = `127.0.0.1:${new URL(secondLocator).port}/owner/resources`;
   const expectedOrder = [
-    `${canonicalLocator} · patches/0002-first.patch`,
-    `${canonicalLocator} · patches/nested/0001-second.patch`,
-    `${canonicalSecondLocator} · patches/independent.patch`,
+    `${canonicalLocator}@${repository.commit} · patches/0002-first.patch`,
+    `${canonicalLocator}@${repository.commit} · patches/nested/0001-second.patch`,
+    `${canonicalSecondLocator}@${secondRepository.commit} · patches/independent.patch`,
   ].sort();
   for (let index = 1; index < expectedOrder.length; index += 1) {
     assert.ok(apply.stdout.indexOf(expectedOrder[index - 1]) < apply.stdout.indexOf(expectedOrder[index]));
@@ -3230,6 +3326,71 @@ test("re-adding a Patch source reviews exact commit and digest replacement witho
   assert.deepEqual(readFileSync(activationPath), activationBefore);
 });
 
+test("re-adding declared Patch Series reviews its complete inventory while display metadata leaves identity stable", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createApplicablePatchRepository(root, [
+    ["patches/one.patch", "first revision\n"],
+    ["patches/two.patch", "second revision\n"],
+  ]);
+  const metadataPath = join(repository.source, "porcupi.json");
+  writeFileSync(metadataPath, `${JSON.stringify({
+    schemaVersion: 1,
+    patchSeries: [{ id: "stable-series", displayName: "Original display", members: ["patches/one.patch", "patches/two.patch"] }],
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Declare original series");
+  const originalCommit = git(repository.source, "rev-parse", "HEAD");
+  git(repository.source, "tag", "original-series");
+
+  git(repository.source, "mv", "patches/two.patch", "patches/renamed.patch");
+  writeFileSync(join(repository.source, "patches", "one.patch"), "first revision changed\n");
+  writeFileSync(metadataPath, `${JSON.stringify({
+    schemaVersion: 1,
+    patchSeries: [{ id: "stable-series", displayName: "Improved display", members: ["patches/renamed.patch", "patches/one.patch"] }],
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Revise series display and inventory");
+  const updatedCommit = git(repository.source, "rev-parse", "HEAD");
+  git(repository.source, "tag", "updated-series");
+
+  writeFileSync(metadataPath, `${JSON.stringify({
+    schemaVersion: 1,
+    patchSeries: [{ id: "replacement-series", displayName: "Replacement identity", members: ["patches/renamed.patch", "patches/one.patch"] }],
+  }, null, 2)}\n`);
+  git(repository.source, "add", "porcupi.json");
+  git(repository.source, "commit", "-m", "Publish a different series identity");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+  assert.equal(runPorcuPi(home, ["add", `${locator}@original-series`], "616e6e0d").status, 0);
+
+  const update = runPorcuPi(home, ["add", `${locator}@updated-series`], "6e6e0d");
+
+  assert.equal(update.status, 0, update.stderr || update.stdout);
+  assert.match(update.stdout, /Improved display — stable-series/);
+  assert.match(update.stdout, new RegExp(`Source-wide change: ${originalCommit} → ${updatedCommit}`));
+  assert.match(update.stdout, /Patch Series changed: stable-series/);
+  assert.match(update.stdout, /Previous: patches\/one\.patch@sha256:.* → patches\/two\.patch@sha256:/);
+  assert.match(update.stdout, /Next: patches\/renamed\.patch@sha256:.* → patches\/one\.patch@sha256:/);
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
+  assert.equal(selections.sources[0].artifacts[0].id, "stable-series");
+  assert.deepEqual(selections.sources[0].artifacts[0].members.map((member) => member.path), [
+    "patches/renamed.patch",
+    "patches/one.patch",
+  ]);
+
+  const savedBeforeIdentityChange = readFileSync(selectionsPath);
+  const differentIdentity = runPorcuPi(home, ["add", `${locator}@main`], "1b");
+  assert.equal(differentIdentity.status, 0, differentIdentity.stderr || differentIdentity.stdout);
+  assert.match(differentIdentity.stdout, /\[ \] Patch Series Replacement identity — replacement-series/);
+  assert.deepEqual(readFileSync(selectionsPath), savedBeforeIdentityChange);
+});
+
 test("invalid Patch metadata is prominently ignored as a whole without suppressing convention discovery", async () => {
   const root = temporaryRoot();
   const home = join(root, "home");
@@ -3272,6 +3433,50 @@ test("invalid Patch metadata is prominently ignored as a whole without suppressi
   assert.equal(contradictory.status, 0, contradictory.stderr || contradictory.stdout);
   assert.match(contradictory.stdout, /duplicate Patch entry patches\/alpha\.patch/);
   assert.doesNotMatch(contradictory.stdout, /First claim|Contradictory claim/);
+  const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
+  assert.deepEqual(selections.sources[0].artifacts.map((artifact) => artifact.id), [
+    "patches/alpha.patch",
+    "patches/nested/beta.patch",
+  ]);
+});
+
+test("invalid declared Patch Series members are diagnosed without ambiguous or suppressed implicit series", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createPatchRepository(root);
+  const gitlinkCommit = git(repository.source, "rev-parse", "HEAD");
+  git(repository.source, "update-index", "--add", "--cacheinfo", `160000,${gitlinkCommit},patches/submodule.patch`);
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    patchSeries: [
+      { id: "duplicate-members", members: ["patches/alpha.patch", "patches/alpha.patch"] },
+      { id: "overlap-one", members: ["patches/alpha.patch"] },
+      { id: "overlap-two", members: ["patches/alpha.patch"] },
+      { id: "unsafe-member", members: ["patches/../outside.patch"] },
+      { id: "missing-member", members: ["patches/missing.patch"] },
+      { id: "symbolic-member", members: ["patches/symbolic.patch"] },
+      { id: "submodule-member", members: ["patches/submodule.patch"] },
+    ],
+  }, null, 2)}\n`);
+  git(repository.source, "add", "porcupi.json");
+  git(repository.source, "commit", "-m", "Declare invalid Patch Series fixtures");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  assert.match(add.stdout, /Declared Patch Series duplicate-members is invalid.*duplicate member patches\/alpha\.patch/);
+  assert.match(add.stdout, /Declared Patch Series overlap-one is invalid.*also declared by Patch Series/);
+  assert.match(add.stdout, /Declared Patch Series overlap-two is invalid.*also declared by Patch Series/);
+  assert.match(add.stdout, /Declared Patch Series unsafe-member is invalid.*unsafe member path/);
+  assert.match(add.stdout, /Declared Patch Series missing-member is invalid.*missing member/);
+  assert.match(add.stdout, /Declared Patch Series symbolic-member is invalid.*symbolic/);
+  assert.match(add.stdout, /Declared Patch Series submodule-member is invalid.*Git submodule/);
   const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
   assert.deepEqual(selections.sources[0].artifacts.map((artifact) => artifact.id), [
     "patches/alpha.patch",

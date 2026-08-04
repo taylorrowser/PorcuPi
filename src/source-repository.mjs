@@ -482,13 +482,13 @@ function readPatchMetadata(checkout, patches, piBase, diagnostics) {
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("must be a regular file");
     value = JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
-    if (error?.code === "ENOENT") return patches;
+    if (error?.code === "ENOENT") return { patches, patchSeries: [] };
     const reason = error instanceof SyntaxError ? "malformed JSON" : "metadata root is not a readable regular file";
     diagnostics.push({ path: "porcupi.json", reason: `Patch metadata is invalid and ignored as a whole: ${reason}` });
-    return patches;
+    return { patches, patchSeries: [] };
   }
 
-  const rootKeys = new Set(["schemaVersion", "patches"]);
+  const rootKeys = new Set(["schemaVersion", "patches", "patchSeries"]);
   const entryKeys = new Set([
     "path",
     "displayName",
@@ -496,22 +496,27 @@ function readPatchMetadata(checkout, patches, piBase, diagnostics) {
     "supportedPiBaseVersions",
     "supportedPiBaseCommits",
   ]);
+  const seriesKeys = new Set(["id", "displayName", "description", "members"]);
   const invalid = (reason) => {
     diagnostics.push({ path: "porcupi.json", reason: `Patch metadata is invalid and ignored as a whole: ${reason}` });
-    return patches;
+    return { patches, patchSeries: [] };
   };
-  if (!exactObjectKeys(value, rootKeys) || value.schemaVersion !== 1 || !Array.isArray(value.patches)) {
-    return invalid("expected only schemaVersion 1 and a patches array");
+  if (
+    !exactObjectKeys(value, rootKeys)
+    || value.schemaVersion !== 1
+    || (value.patches !== undefined && !Array.isArray(value.patches))
+    || (value.patchSeries !== undefined && !Array.isArray(value.patchSeries))
+    || (value.patches === undefined && value.patchSeries === undefined)
+  ) {
+    return invalid("expected only schemaVersion 1, patches, and patchSeries arrays");
   }
+  const patchEntries = value.patches ?? [];
+  const declaredSeries = value.patchSeries ?? [];
   const seen = new Set();
-  for (const entry of value.patches) {
+  for (const entry of patchEntries) {
     if (
       !exactObjectKeys(entry, entryKeys)
-      || !metadataText(entry.path)
-      || !entry.path.startsWith("patches/")
-      || !entry.path.endsWith(".patch")
-      || entry.path.includes("\\")
-      || entry.path.split("/").some((part) => part === "" || part === "." || part === "..")
+      || !safePatchPath(entry.path)
     ) {
       return invalid("unsupported field or unsafe Patch path");
     }
@@ -530,37 +535,129 @@ function readPatchMetadata(checkout, patches, piBase, diagnostics) {
     }
   }
 
-  const entries = new Map(value.patches.map((entry) => [entry.path, entry]));
+  const seriesIds = new Set();
+  for (const series of declaredSeries) {
+    if (
+      !exactObjectKeys(series, seriesKeys)
+      || !metadataText(series.id)
+      || (series.displayName !== undefined && !metadataText(series.displayName))
+      || (series.description !== undefined && !metadataText(series.description))
+      || !Array.isArray(series.members)
+      || series.members.length === 0
+      || series.members.some((member) => !metadataText(member))
+    ) return invalid("declared Patch Series require only a stable id, optional display text, and one or more member paths");
+    if (seriesIds.has(series.id)) return invalid(`duplicate Patch Series id ${series.id}`);
+    seriesIds.add(series.id);
+  }
+
+  const entries = new Map(patchEntries.map((entry) => [entry.path, entry]));
   const discovered = new Set(patches.map((patch) => patch.path));
-  for (const entry of value.patches) {
+  for (const entry of patchEntries) {
     if (!discovered.has(entry.path)) diagnostics.push({
       path: "porcupi.json",
       reason: `Patch metadata entry ${entry.path} does not address a discovered regular Patch and is ignored`,
     });
   }
-  return patches.map((patch) => {
-    const entry = entries.get(patch.path);
-    if (!entry) return patch;
-    const versionCompatible = entry.supportedPiBaseVersions === undefined
-      || entry.supportedPiBaseVersions.includes(piBase?.tag);
-    const commitCompatible = entry.supportedPiBaseCommits === undefined
-      || entry.supportedPiBaseCommits.includes(piBase?.commit);
-    return {
-      ...patch,
-      ...(entry.displayName === undefined ? {} : { displayName: entry.displayName }),
-      ...(entry.description === undefined ? {} : { description: entry.description }),
-      compatible: versionCompatible && commitCompatible,
-      compatibilityDeclared: entry.supportedPiBaseVersions !== undefined || entry.supportedPiBaseCommits !== undefined,
-    };
-  });
+  return {
+    patches: patches.map((patch) => {
+      const entry = entries.get(patch.path);
+      if (!entry) return patch;
+      const versionCompatible = entry.supportedPiBaseVersions === undefined
+        || entry.supportedPiBaseVersions.includes(piBase?.tag);
+      const commitCompatible = entry.supportedPiBaseCommits === undefined
+        || entry.supportedPiBaseCommits.includes(piBase?.commit);
+      return {
+        ...patch,
+        ...(entry.displayName === undefined ? {} : { displayName: entry.displayName }),
+        ...(entry.description === undefined ? {} : { description: entry.description }),
+        compatible: versionCompatible && commitCompatible,
+        compatibilityDeclared: entry.supportedPiBaseVersions !== undefined || entry.supportedPiBaseCommits !== undefined,
+      };
+    }),
+    patchSeries: declaredSeries,
+  };
+}
+
+function safePatchPath(path) {
+  return metadataText(path)
+    && path.startsWith("patches/")
+    && path.endsWith(".patch")
+    && !path.includes("\\")
+    && !path.split("/").some((part) => part === "" || part === "." || part === "..");
+}
+
+function implicitPatchArtifact(patch) {
+  return {
+    kind: "PatchSeries",
+    id: patch.path,
+    members: [{ path: patch.path, sha256: patch.sha256 }],
+    ...(patch.displayName === undefined ? {} : { displayName: patch.displayName }),
+    ...(patch.description === undefined ? {} : { description: patch.description }),
+    ...(patch.compatible === undefined ? {} : { compatible: patch.compatible }),
+    ...(patch.compatibilityDeclared === undefined ? {} : { compatibilityDeclared: patch.compatibilityDeclared }),
+  };
+}
+
+function declaredPatchArtifacts(metadata, inventory, diagnostics) {
+  const invalidReasons = new Map();
+  const memberClaims = new Map();
+  const invalidate = (series, reason) => {
+    if (!invalidReasons.has(series.id)) invalidReasons.set(series.id, []);
+    invalidReasons.get(series.id).push(reason);
+  };
+
+  for (const series of metadata.patchSeries) {
+    const seenMembers = new Set();
+    for (const path of series.members) {
+      if (seenMembers.has(path)) invalidate(series, `duplicate member ${path}`);
+      seenMembers.add(path);
+      if (!safePatchPath(path)) {
+        invalidate(series, `unsafe member path ${JSON.stringify(path)}`);
+        continue;
+      }
+      const candidate = inventory.get(path);
+      if (!candidate) invalidate(series, `missing member ${path}`);
+      else if (candidate.reason) invalidate(series, `${path} ${candidate.reason}`);
+      if (!memberClaims.has(path)) memberClaims.set(path, []);
+      memberClaims.get(path).push(series);
+    }
+  }
+  for (const [path, claims] of memberClaims) {
+    const uniqueClaims = [...new Set(claims)];
+    if (uniqueClaims.length > 1) {
+      for (const series of uniqueClaims) invalidate(series, `member ${path} is also declared by Patch Series ${uniqueClaims.filter((candidate) => candidate !== series).map((candidate) => candidate.id).join(", ")}`);
+    }
+  }
+
+  let validSeries = metadata.patchSeries.filter((series) => !invalidReasons.has(series.id));
+  const claimed = new Set(validSeries.flatMap((series) => series.members));
+  for (const series of validSeries) {
+    if (inventory.get(series.id)?.sha256 && !claimed.has(series.id)) {
+      invalidate(series, `identity ${series.id} conflicts with an implicit Patch Series`);
+    }
+  }
+  validSeries = metadata.patchSeries.filter((series) => !invalidReasons.has(series.id));
+  for (const series of metadata.patchSeries) {
+    const reasons = invalidReasons.get(series.id);
+    if (reasons) diagnostics.push({
+      path: "porcupi.json",
+      reason: `Declared Patch Series ${series.id} is invalid and ignored: ${[...new Set(reasons)].join("; ")}`,
+    });
+  }
+  return validSeries.map((series) => ({
+    kind: "PatchSeries",
+    id: series.id,
+    members: series.members.map((path) => ({ path, sha256: inventory.get(path).sha256 })),
+    ...(series.displayName === undefined ? {} : { displayName: series.displayName }),
+    ...(series.description === undefined ? {} : { description: series.description }),
+  }));
 }
 
 function discoverPatchArtifacts(checkout, diagnostics, piBase) {
   const realCheckout = realpathSync(checkout);
-  const inventory = git(["ls-files", "--stage", "-z", "--", "patches"], { cwd: checkout });
-  if (!inventory) return [];
-  const artifacts = [];
-  for (const record of inventory.split("\0").filter(Boolean)) {
+  const rawInventory = git(["ls-files", "--stage", "-z", "--", "patches"], { cwd: checkout });
+  const inventory = new Map();
+  for (const record of rawInventory.split("\0").filter(Boolean)) {
     const match = record.match(/^([0-9]{6}) [a-f0-9]+ [0-9]\t(.+)$/);
     if (!match) {
       diagnostics.push({ path: "patches", reason: "Patch Git inventory is malformed" });
@@ -572,10 +669,12 @@ function discoverPatchArtifacts(checkout, diagnostics, piBase) {
       continue;
     }
     if (mode === "120000") {
+      inventory.set(path, { reason: "is symbolic" });
       diagnostics.push({ path, reason: "Patch candidate is symbolic" });
       continue;
     }
     if (mode === "160000") {
+      inventory.set(path, { reason: "is a Git submodule" });
       diagnostics.push({ path, reason: "Patch candidate is a Git submodule" });
       continue;
     }
@@ -592,20 +691,26 @@ function discoverPatchArtifacts(checkout, diagnostics, piBase) {
       ) {
         throw new Error("not a repository-bounded regular file");
       }
-      artifacts.push({ path, sha256: sha256File(absolute) });
+      inventory.set(path, { path, sha256: sha256File(absolute) });
     } catch {
+      inventory.set(path, { reason: "is not a repository-bounded regular file" });
       diagnostics.push({ path, reason: "Patch candidate is not a repository-bounded regular file" });
     }
   }
-  return readPatchMetadata(checkout, artifacts, piBase, diagnostics).map((patch) => ({
-    kind: "PatchSeries",
-    id: patch.path,
-    members: [{ path: patch.path, sha256: patch.sha256 }],
-    ...(patch.displayName === undefined ? {} : { displayName: patch.displayName }),
-    ...(patch.description === undefined ? {} : { description: patch.description }),
-    ...(patch.compatible === undefined ? {} : { compatible: patch.compatible }),
-    ...(patch.compatibilityDeclared === undefined ? {} : { compatibilityDeclared: patch.compatibilityDeclared }),
-  }));
+
+  const regularPatches = [...inventory.values()].filter((candidate) => candidate.sha256);
+  const metadata = readPatchMetadata(checkout, regularPatches, piBase, diagnostics);
+  const declared = declaredPatchArtifacts(metadata, inventory, diagnostics);
+  const claimed = new Set(declared.flatMap((series) => series.members.map((member) => member.path)));
+  for (const patch of metadata.patches) {
+    if (claimed.has(patch.path) && (patch.displayName !== undefined || patch.description !== undefined || patch.compatibilityDeclared)) {
+      diagnostics.push({ path: "porcupi.json", reason: `Patch metadata entry ${patch.path} is ignored because the Patch File belongs to a declared Patch Series` });
+    }
+  }
+  return [
+    ...declared,
+    ...metadata.patches.filter((patch) => !claimed.has(patch.path)).map(implicitPatchArtifact),
+  ];
 }
 
 export function discoverPiArtifacts(root, { piBase } = {}) {

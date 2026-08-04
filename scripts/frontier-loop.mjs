@@ -19,6 +19,7 @@ const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const defaultParent = 40;
 const defaultPollSeconds = 60;
 const maximumAgentAttempts = 3;
+const maximumDiagnosticEscalations = 2;
 
 function fail(message) {
   throw new Error(message);
@@ -127,6 +128,16 @@ export function failureBaseState(inMemory, persisted) {
 
 export function panesAreRunning(deadStatuses) {
   return deadStatuses.some((status) => status === "0");
+}
+
+export function validationFailureAction({ attempt, maximumAttempts, diagnosticEscalations, maximumDiagnosticEscalations: maximumEscalations }) {
+  if (attempt < maximumAttempts) return "remediate";
+  if (diagnosticEscalations < maximumEscalations) return "diagnose";
+  return "fail";
+}
+
+export function shouldDiagnoseResume(state) {
+  return state?.phase === "failed" && /^Validation failed/.test(state.lastError ?? "");
 }
 
 function parentIssues(parent) {
@@ -276,7 +287,11 @@ function remediationPrompt(issue, reasonLog) {
 
 function implementationPrompt(issue, resumed) {
   const action = resumed ? "Continue and finish" : "Implement";
-  return `/skill:implement ${action} GitHub issue #${issue.number} (${issue.title}) on the current branch. Read the complete issue, parent spec, repository instructions, glossary, and relevant ADRs. Work autonomously at the agreed public-process test seam. Claiming has already been handled. Run focused checks regularly and the full suite at the end, perform code review, and commit all work with the issue number in the commit message. Do not push, create or merge a PR, or close the issue; the tmux orchestrator owns those steps.`;
+  return `/skill:implement ${action} GitHub issue #${issue.number} (${issue.title}) on the current branch. Read the complete issue, parent spec, repository instructions, glossary, and relevant ADRs. Treat the child issue's acceptance criteria as the implementation boundary; the parent spec supplies constraints, while open sibling tickets remain deferred. Work autonomously at the agreed public-process test seam. Claiming has already been handled. Run focused checks regularly and the full suite at the end, perform code review, and commit all work with the issue number in the commit message. Do not push, create or merge a PR, or close the issue; the tmux orchestrator owns those steps.`;
+}
+
+function diagnosisPrompt(issue, reasonLog) {
+  return `/skill:diagnosing-bugs Independently diagnose and fix the repeatedly failing implementation of GitHub issue #${issue.number} (${issue.title}) on the current branch. The latest explicit VALIDATION: FAIL in ${reasonLog} is the red-capable feedback signal; reproduce each finding at the correct seam before changing code. Read the issue, parent spec, repository instructions, glossary, relevant ADRs, all existing branch commits, and prior validation history. Generate ranked falsifiable hypotheses, then proceed autonomously through diagnosis, regression tests, root-cause fixes, cleanup, focused checks, the full suite, and code review. Be willing to revert or redesign earlier implementation rather than layering patches. Treat this child issue's acceptance criteria as the scope boundary and leave open sibling tickets deferred. Commit every completed fix with issue #${issue.number} in the commit message. Do not push, create or merge a PR, or close issues; the tmux orchestrator owns those steps.`;
 }
 
 function waitForPullRequestChecks(prNumber, worktree, logPath) {
@@ -328,8 +343,10 @@ function publishAndMerge(issue, worktree, branch, logPath) {
 }
 
 function processIssue(issue, paths, state) {
+  const diagnoseOnResume = shouldDiagnoseResume(state);
   const prepared = prepareWorktree(issue, paths, state);
   const issueLog = join(paths.root, `issue-${issue.number}.log`);
+  let diagnosticEscalations = 0;
   state = writeState(paths, state, {
     phase: prepared.resumed ? "resuming" : "implementing",
     message: `${prepared.resumed ? "Resuming" : "Implementing"} #${issue.number}: ${issue.title}`,
@@ -339,6 +356,7 @@ function processIssue(issue, paths, state) {
     worktree: prepared.worktree,
     issueLog,
     pullRequest: null,
+    diagnosticEscalations,
     lastError: null,
   });
   const login = viewerLogin();
@@ -346,10 +364,25 @@ function processIssue(issue, paths, state) {
     commandOutput("gh", ["issue", "edit", String(issue.number), "--add-assignee", "@me"]);
   }
   log(state.message);
-  runAgent(prepared.worktree, implementationPrompt(issue, prepared.resumed), issueLog, prepared.resumed ? "resumed implementation" : "initial implementation");
+  if (diagnoseOnResume) {
+    diagnosticEscalations += 1;
+    state = writeState(paths, state, {
+      phase: "diagnosing",
+      diagnosticEscalations,
+      message: `Independent diagnostic instance ${diagnosticEscalations}/${maximumDiagnosticEscalations} for #${issue.number}`,
+    });
+    log(state.message);
+    runAgent(prepared.worktree, diagnosisPrompt(issue, issueLog), issueLog, `independent diagnostic instance ${diagnosticEscalations}`);
+  } else {
+    runAgent(prepared.worktree, implementationPrompt(issue, prepared.resumed), issueLog, prepared.resumed ? "resumed implementation" : "initial implementation");
+  }
 
-  for (let attempt = 1; attempt <= maximumAgentAttempts; attempt += 1) {
-    state = writeState(paths, state, { phase: "validating", message: `Validating #${issue.number} (attempt ${attempt}/${maximumAgentAttempts})` });
+  let attempt = 1;
+  while (true) {
+    state = writeState(paths, state, {
+      phase: "validating",
+      message: `Validating #${issue.number} (attempt ${attempt}/${maximumAgentAttempts}, diagnostics ${diagnosticEscalations}/${maximumDiagnosticEscalations})`,
+    });
     log(state.message);
     const commitCount = Number(commandOutput("git", ["rev-list", "--count", `origin/${defaultBranch()}..HEAD`], { cwd: prepared.worktree }));
     const clean = commandOutput("git", ["status", "--porcelain"], { cwd: prepared.worktree }) === "";
@@ -370,14 +403,37 @@ function processIssue(issue, paths, state) {
         worktree: null,
         issueLog: null,
         pullRequest: null,
+        diagnosticEscalations: 0,
       });
     }
-    if (attempt === maximumAgentAttempts) fail(`Validation failed ${maximumAgentAttempts} times for #${issue.number}; inspect ${issueLog}`);
-    state = writeState(paths, state, { phase: "remediating", message: `Remediating validation findings for #${issue.number}` });
+
+    const action = validationFailureAction({
+      attempt,
+      maximumAttempts: maximumAgentAttempts,
+      diagnosticEscalations,
+      maximumDiagnosticEscalations,
+    });
+    if (action === "fail") {
+      fail(`Validation failed after ${diagnosticEscalations} independent diagnostic escalations for #${issue.number}; inspect ${issueLog}`);
+    }
+    if (action === "remediate") {
+      state = writeState(paths, state, { phase: "remediating", message: `Remediating validation findings for #${issue.number}` });
+      log(state.message);
+      runAgent(prepared.worktree, remediationPrompt(issue, issueLog), issueLog, `remediation ${attempt} after diagnostic ${diagnosticEscalations}`);
+      attempt += 1;
+      continue;
+    }
+
+    diagnosticEscalations += 1;
+    state = writeState(paths, state, {
+      phase: "diagnosing",
+      diagnosticEscalations,
+      message: `Independent diagnostic instance ${diagnosticEscalations}/${maximumDiagnosticEscalations} for #${issue.number}`,
+    });
     log(state.message);
-    runAgent(prepared.worktree, remediationPrompt(issue, issueLog), issueLog, `remediation ${attempt}`);
+    runAgent(prepared.worktree, diagnosisPrompt(issue, issueLog), issueLog, `independent diagnostic instance ${diagnosticEscalations}`);
+    attempt = 1;
   }
-  return state;
 }
 
 function stopped(paths) {

@@ -5,6 +5,8 @@ import {
   findFrontier,
   panesAreRunning,
   parsePullRequestNumber,
+  shouldDiagnoseResume,
+  validationFailureAction,
   validationPassed,
 } from "../scripts/frontier-loop.mjs";
 
@@ -55,4 +57,16 @@ test("a tmux session is running only while at least one pane is live", () => {
   assert.equal(panesAreRunning(["1"]), false);
   assert.equal(panesAreRunning(["1", "0"]), true);
   assert.equal(panesAreRunning([]), false);
+});
+
+test("validation exhaustion escalates to an independent diagnostic instance", () => {
+  assert.equal(validationFailureAction({ attempt: 1, maximumAttempts: 3, diagnosticEscalations: 0, maximumDiagnosticEscalations: 2 }), "remediate");
+  assert.equal(validationFailureAction({ attempt: 3, maximumAttempts: 3, diagnosticEscalations: 0, maximumDiagnosticEscalations: 2 }), "diagnose");
+  assert.equal(validationFailureAction({ attempt: 3, maximumAttempts: 3, diagnosticEscalations: 2, maximumDiagnosticEscalations: 2 }), "fail");
+});
+
+test("a preserved validation failure resumes with diagnosis instead of another implementation pass", () => {
+  assert.equal(shouldDiagnoseResume({ phase: "failed", lastError: "Validation failed 3 times for #45" }), true);
+  assert.equal(shouldDiagnoseResume({ phase: "failed", lastError: "Remote checks failed for PR #45" }), false);
+  assert.equal(shouldDiagnoseResume({ phase: "validating", lastError: null }), false);
 });

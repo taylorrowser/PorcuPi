@@ -8,12 +8,13 @@ For every available frontier ticket, it:
 2. invokes `/skill:implement` in a fresh, non-persistent Pi session;
 3. runs `npm ci --ignore-scripts`, the syntax checks, and the full test suite independently;
 4. invokes an independent two-axis Standards/Spec reviewer in another fresh Pi session;
-5. gives the implementation agent up to two remediation passes when validation fails;
-6. pushes a ticket branch and opens a closing pull request;
-7. waits for registered GitHub checks and merges the pull request;
-8. fetches the new default-branch state and selects the next unblocked, unassigned sub-issue.
+5. gives fresh implementation agents up to two remediation passes when validation fails;
+6. if those passes are exhausted, launches a separate Pi instance with `/skill:diagnosing-bugs`, then gives the diagnosed branch a fresh validation/remediation cycle; up to two independent diagnostic escalations are allowed;
+7. pushes a ticket branch and opens a closing pull request;
+8. waits for registered GitHub checks and merges the pull request;
+9. fetches the new default-branch state and selects the next unblocked, unassigned sub-issue.
 
-The loop stops successfully when every child of #40 is closed. It stops on an unrecoverable implementation, validation, GitHub, or merge failure and preserves that ticket's worktree and logs for inspection. Starting it again resumes the preserved ticket.
+The loop stops successfully when every child of #40 is closed. A repeatedly failing validation is handed to a separate diagnostic Pi process before the loop gives up. It stops only after exhausting both diagnostic escalations or on another unrecoverable implementation, GitHub, or merge failure, preserving that ticket's worktree and logs for inspection. Starting it again sends a preserved validation failure directly to a fresh diagnostic instance rather than repeating the ordinary implementation pass.
 
 ## Safety boundary
 
@@ -58,7 +59,7 @@ Stop after interrupting the current operation:
 npm run frontier:stop
 ```
 
-If a ticket exhausts its remediation attempts, inspect the worktree and issue log shown by `frontier:status`. After correcting the failure or leaving useful work in place, run `frontier:start` again; the loop resumes the recorded ticket and asks a fresh implementation agent to finish it.
+During diagnostic escalation, `frontier:status` reports the `diagnosing` phase and diagnostic instance count. If a ticket exhausts both independent diagnostic escalations, inspect the preserved worktree and issue log shown by `frontier:status`. Running `frontier:start` again gives the recorded validation failure a new diagnostic budget and launches a fresh diagnosing instance.
 
 ## Overrides
 

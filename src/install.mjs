@@ -196,6 +196,7 @@ function scratchInventory(root) {
     }
   };
   visit(root);
+  entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
   return entries;
 }
 

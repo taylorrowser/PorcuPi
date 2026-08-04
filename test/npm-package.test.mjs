@@ -99,6 +99,26 @@ test("the npm delivery ADR keeps GitHub canonical and npm lifecycle ownership na
   assert.match(adr, /v0\.1\.0.*not.*npm/is);
 });
 
+test("release packing rejects npm, source, or acceptance evidence split from the release identity", () => {
+  const cases = [
+    [(releaseRecord) => { releaseRecord.npmArtifact.name = "not-porcupi"; }, /npm artifact identity does not match/i],
+    [(releaseRecord) => { releaseRecord.source.tag = "v9.9.9"; }, /source identity does not match/i],
+    [(releaseRecord) => { releaseRecord.acceptanceEvidence.sourceRevisionField = "unbound"; }, /acceptance evidence contract does not match/i],
+  ];
+  for (const [mutate, diagnosis] of cases) {
+    const fixture = packageFixture();
+    const releasePath = join(fixture, `release/v${manifest.version}.json`);
+    const fixtureRelease = JSON.parse(readFileSync(releasePath, "utf8"));
+    mutate(fixtureRelease);
+    writeFileSync(releasePath, `${JSON.stringify(fixtureRelease, null, 2)}\n`);
+
+    const result = packFixture(fixture);
+
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stdout}${result.stderr}`, diagnosis);
+  }
+});
+
 test("release packing rejects implementation bytes from a different release identity", () => {
   const fixture = packageFixture();
   writeFileSync(join(fixture, "src", "runtime.mjs"), "\n// changed after the release identity was fixed\n", { flag: "a" });

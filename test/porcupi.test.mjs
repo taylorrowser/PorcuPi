@@ -103,6 +103,11 @@ function createPiBase(root, { version = "0.81.1", buildFails = false } = {}) {
 import { join } from "node:path";
 const output = join(process.cwd(), "packages", "coding-agent", "dist");
 mkdirSync(output, { recursive: true });
+if (process.env.PI_FIXTURE_LEXICAL_PREFIX_PATHS) {
+  mkdirSync(join(output, "prefix"), { recursive: true });
+  writeFileSync(join(output, "prefix", "child"), "nested\\n");
+  writeFileSync(join(output, "prefix-sibling"), "sibling\\n");
+}
 const cli = join(output, "cli.js");
 writeFileSync(cli, \`#!/usr/bin/env node
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -263,6 +268,12 @@ function createReleaseFixture(root, base, expectedVersion = "0.81.1", { historic
       packageInputHash.update("\0");
     }
     releaseRecord.packageInputsSha256 = packageInputHash.digest("hex");
+    releaseRecord.npmArtifact = {
+      name: packageManifest.name,
+      version: packageManifest.version,
+      executable: "porcupi",
+      packageInputsSha256: releaseRecord.packageInputsSha256,
+    };
     writeFileSync(releaseRecordPath, `${JSON.stringify(releaseRecord, null, 2)}\n`);
   }
   return release;
@@ -287,6 +298,7 @@ function setReleaseFixtureVersion(release, version) {
   renameSync(join(release, previousReleaseRecord), join(release, releaseRecordPath));
   releaseRecord.porcupiVersion = version;
   releaseRecord.tag = `v${version}`;
+  releaseRecord.source.tag = `v${version}`;
   const packageInputHash = createHash("sha256");
   const packageInputPaths = ["package.json", ...manifest.files.filter((path) => !path.startsWith("release/"))].sort();
   for (const path of packageInputPaths) {
@@ -295,6 +307,12 @@ function setReleaseFixtureVersion(release, version) {
     packageInputHash.update("\0");
   }
   releaseRecord.packageInputsSha256 = packageInputHash.digest("hex");
+  releaseRecord.npmArtifact = {
+    name: manifest.name,
+    version,
+    executable: "porcupi",
+    packageInputsSha256: releaseRecord.packageInputsSha256,
+  };
   writeFileSync(join(release, releaseRecordPath), `${JSON.stringify(releaseRecord, null, 2)}\n`);
 }
 
@@ -841,6 +859,18 @@ test("the public exact-version installer recovers an interrupted upgrade after c
   const uninstall = runPorcuPi(home, ["uninstall"], "0d0d0d");
   assert.equal(uninstall.status, 0, uninstall.stderr || uninstall.stdout);
   assert.equal(existsSync(dataRoot(home)), false);
+});
+
+test("the packed release upgrades payloads with lexical prefix paths", () => {
+  const { artifact, historicalRelease, home } = createUpgradeFixture();
+  assert.equal(runInstaller(historicalRelease, home).status, 0);
+
+  const upgraded = runPackedInstaller(artifact, home, "0d0d0d", {
+    PI_FIXTURE_LEXICAL_PREFIX_PATHS: "1",
+    PTY_WAIT_FOR: "1 of 3 — Upgrade",
+  });
+  assert.equal(upgraded.status, 0, upgraded.stderr || upgraded.stdout);
+  assert.match(upgraded.stdout, /Upgraded PorcuPi from 0\.1\.0 to 0\.2\.0/);
 });
 
 test("modified upgrade transaction targets are refused and left untouched", () => {

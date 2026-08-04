@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for Tracked Branch retention in issue #49. Candidate review and adoption remain deferred to issues #50–#52.
+Accepted for Tracked Branch retention in issue #49. This decision amends ADR 0003's retained Selection Intent inventory by adding the optional canonical Tracked Branch identity; exact-commit Pi package delegation remains unchanged. Candidate review and adoption remain deferred to issues #50–#52.
 
 ## Context
 

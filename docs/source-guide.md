@@ -1,6 +1,6 @@
 # Use and publish PorcuPi Source Repositories
 
-This guide explains how to consume a Source Repository with PorcuPi v0.1.0 and how to make Extensions, Skills, prompt templates, Themes, and Patches discoverable from one. It covers the source contract; use the [installation guide](install.md) to install PorcuPi and the [operations guide](operations.md) for lifecycle recovery.
+This guide explains how to consume a Source Repository with PorcuPi v0.2.0 and how to make Extensions, Skills, prompt templates, Themes, and Patches discoverable from one. It covers the source contract; use the [Release Installation guide](release-installation.md) to install PorcuPi and the [operations guide](operations.md) for lifecycle recovery.
 
 PorcuPi has two intentionally different integration paths:
 
@@ -127,7 +127,7 @@ A source does not need every directory. Prefer one root Pi package manifest when
 
 ### Resource discovery choices
 
-PorcuPi v0.1.0 mirrors the package rules of its supported Pi Base, v0.81.1:
+PorcuPi v0.2.0 mirrors the package rules of its supported Pi Base, v0.81.1:
 
 1. If the root regular `package.json` contains a `pi` object, that manifest controls resource discovery. Conventional directories are not additionally scanned.
 2. Otherwise, PorcuPi uses the root convention directories described below.
@@ -254,7 +254,7 @@ A Patch File is a declarative Git-compatible file that changes PorcuPi's exact P
 
 ### Target the exact Pi Base
 
-PorcuPi v0.1.0 composes Patches onto:
+PorcuPi v0.2.0 composes Patches onto:
 
 - repository: `https://github.com/earendil-works/pi.git`
 - tag: `v0.81.1`

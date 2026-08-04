@@ -26,7 +26,7 @@ Name claiming and publication require a maintainer. Automated tests must not cla
 - [ ] Require collision refusal, fresh install, v0.1.0 upgrade, launch, full verify, rollback, and uninstall to pass through public processes.
 - [ ] Require both exact-source parity jobs on macOS/Linux.
 - [ ] Require the separate real `pi-wait-for-user` source handoff gate when its accepted fixture is part of the release contract.
-- [ ] Inspect every durable `report.json`, `report.md`, and referenced command log. Confirm exact package, packed integrity, repository revision/tag, Pi Base, fixture, platform, command, outcome, and duration identities.
+- [ ] Inspect every durable `report.json`, `report.md`, referenced command log, and `package/<filename>` tarball. Confirm the report's exact tarball path and packed integrity match the uploaded candidate alongside repository revision/tag, Pi Base, fixture, platform, command, outcome, and duration identities.
 
 ## Publish without splitting identity
 

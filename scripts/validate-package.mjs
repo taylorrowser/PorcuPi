@@ -102,6 +102,7 @@ if (
   release.acceptanceEvidence?.workflow !== ".github/workflows/release-installation-gate.yml"
   || release.acceptanceEvidence?.reportSchemaVersion !== 1
   || release.acceptanceEvidence?.packedIntegrityField !== "report.json#/packedIntegrity/integrity"
+  || release.acceptanceEvidence?.packedTarballField !== "report.json#/package/artifact"
   || release.acceptanceEvidence?.sourceRevisionField !== "report.json#/repository/revision"
   || typeof release.acceptanceEvidence?.packedReportArtifact !== "string"
   || typeof release.acceptanceEvidence?.sourceParityReportArtifact !== "string"

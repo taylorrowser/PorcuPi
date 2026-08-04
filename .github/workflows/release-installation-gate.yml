@@ -51,7 +51,7 @@ jobs:
           args=(--journey=packed-release --stock-pi=${{ matrix.stock_pi }})
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then args+=(--require-tag); fi
           npm run test:release-installation -- "${args[@]}"
-      - name: Upload durable packed-release report and logs
+      - name: Upload exact tested tarball, durable packed-release report, and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -85,7 +85,7 @@ jobs:
           args=(--journey=source-parity)
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then args+=(--require-tag); fi
           npm run test:release-installation -- "${args[@]}"
-      - name: Upload durable source-parity report and logs
+      - name: Upload exact tested tarball, durable source-parity report, and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:

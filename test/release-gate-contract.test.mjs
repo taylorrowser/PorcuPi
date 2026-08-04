@@ -12,13 +12,17 @@ const fixture = JSON.parse(readFileSync(join(root, "test", "fixtures", "real-han
 function releaseGateRepository(t, tagState) {
   const repository = mkdtempSync(join(tmpdir(), "porcupi-release-gate-tag-"));
   t.after(() => rmSync(repository, { recursive: true, force: true }));
-  for (const path of ["scripts", "release", "upstream"]) mkdirSync(join(repository, path), { recursive: true });
+  for (const path of ["scripts", "release", "upstream", "test/support"]) mkdirSync(join(repository, path), { recursive: true });
   writeFileSync(
     join(repository, "scripts", "release-installation-gate.mjs"),
     readFileSync(join(root, "scripts", "release-installation-gate.mjs")),
   );
   writeFileSync(join(repository, "scripts", "install.mjs"), "#!/usr/bin/env node\n");
-  writeFileSync(join(repository, ".gitignore"), "artifacts/\n");
+  writeFileSync(
+    join(repository, "test", "support", "pty-driver.py"),
+    readFileSync(join(root, "test", "support", "pty-driver.py")),
+  );
+  writeFileSync(join(repository, ".gitignore"), "artifacts/\nacceptance-tmp/\n");
   writeFileSync(join(repository, "package.json"), `${JSON.stringify({
     name: "porcupi",
     version: "0.2.0",
@@ -143,6 +147,59 @@ test("packed release tag enforcement rejects a missing or mismatched exact tag",
   }
 });
 
+test("the exact packed candidate survives gate cleanup beside its durable evidence", (t) => {
+  const repository = releaseGateRepository(t, "missing");
+  const fakeBin = join(repository, "fake-bin");
+  mkdirSync(fakeBin);
+  const fakeNpm = join(fakeBin, "npm");
+  writeFileSync(fakeNpm, `#!/usr/bin/env node
+import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+if (process.argv[2] === "pack") {
+  const destination = process.argv[process.argv.indexOf("--pack-destination") + 1];
+  const filename = "porcupi-0.2.0.tgz";
+  const bytes = Buffer.from("exact-packed-candidate\\n");
+  mkdirSync(destination, { recursive: true });
+  writeFileSync(join(destination, filename), bytes);
+  process.stdout.write(JSON.stringify([{
+    name: "porcupi",
+    version: "0.2.0",
+    filename,
+    size: bytes.length,
+    shasum: createHash("sha1").update(bytes).digest("hex"),
+    integrity: \`sha512-\${createHash("sha512").update(bytes).digest("base64")}\`,
+  }]));
+}
+`, { mode: 0o755 });
+
+  const result = spawnSync(process.execPath, [
+    join(repository, "scripts", "release-installation-gate.mjs"),
+    "--journey=packed-release",
+  ], {
+    cwd: repository,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH || ""}`,
+      PORCUPI_ACCEPTANCE_ROOT: join(repository, "acceptance-tmp"),
+    },
+  });
+  assert.notEqual(result.status, 0, "the fake journey intentionally stops after packing");
+
+  const output = join(
+    repository,
+    "artifacts", "acceptance", "release-installation",
+    `packed-release-${process.platform}-${process.arch}-stock-absent`,
+  );
+  const report = JSON.parse(readFileSync(join(output, "report.json"), "utf8"));
+  assert.equal(report.package.artifact, `package/${report.package.filename}`);
+  const candidate = join(output, report.package.artifact);
+  assert.equal(existsSync(candidate), true, "the reported candidate must remain available for publication");
+  assert.equal(readFileSync(candidate, "utf8"), "exact-packed-candidate\n");
+});
+
 test("Release Installation documentation leads with one exact npm version and preserves historical boundaries", () => {
   const readme = readFileSync(join(root, "README.md"), "utf8");
   const install = readFileSync(join(root, "docs", "release-installation.md"), "utf8");
@@ -175,4 +232,5 @@ test("Release Installation documentation leads with one exact npm version and pr
   assert.equal(release.source.tag, "v0.2.0");
   assert.equal(release.acceptanceEvidence.workflow, ".github/workflows/release-installation-gate.yml");
   assert.equal(release.acceptanceEvidence.reportSchemaVersion, 1);
+  assert.equal(release.acceptanceEvidence.packedTarballField, "report.json#/package/artifact");
 });

@@ -221,7 +221,7 @@ function external(name, command, args, {
 }
 
 function packArtifact() {
-  const destination = join(runRoot, "packed");
+  const destination = join(outputRoot, "package");
   mkdirSync(destination, { recursive: true });
   const packed = external("pack-exact-npm-artifact", "npm", ["pack", "--json", "--pack-destination", destination]);
   const [metadata] = JSON.parse(packed.stdout);
@@ -236,6 +236,7 @@ function packArtifact() {
     version: metadata.version,
     executable: release.npmArtifact.executable,
     filename: metadata.filename,
+    artifact: `package/${metadata.filename}`,
     size: metadata.size,
     shasum: metadata.shasum,
     integrity: metadata.integrity,
@@ -411,6 +412,7 @@ function report(status, error) {
       name: manifest.name,
       version: manifest.version,
       executable: manifest.bin?.porcupi ? "porcupi" : null,
+      artifact: null,
       packageInputsSha256: release.packageInputsSha256,
     },
     packedIntegrity: packageEvidence ? { shasum: packageEvidence.shasum, integrity: packageEvidence.integrity, size: packageEvidence.size } : null,
@@ -444,6 +446,7 @@ function report(status, error) {
     `- **Result:** ${status}`,
     `- **Journey:** \`${journey}\``,
     `- **Package:** \`${record.package.name}@${record.package.version}\``,
+    `- **Exact tested tarball:** \`${record.package.artifact ?? "unavailable"}\``,
     `- **Packed integrity:** \`${record.packedIntegrity?.integrity ?? "unavailable"}\``,
     `- **Repository:** \`${record.repository.url}\` at \`${record.repository.revision}\` (tag \`${record.repository.tag}\`: \`${record.repository.tagRevision ?? "not present in candidate run"}\`)`,
     `- **Pi Base:** \`${record.piBase.tag}\` at \`${record.piBase.commit}\``,

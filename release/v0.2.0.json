@@ -27,6 +27,7 @@
     "workflow": ".github/workflows/release-installation-gate.yml",
     "reportSchemaVersion": 1,
     "packedIntegrityField": "report.json#/packedIntegrity/integrity",
+    "packedTarballField": "report.json#/package/artifact",
     "sourceRevisionField": "report.json#/repository/revision",
     "packedReportArtifact": "release-installation-packed-<platform>-<architecture>-stock-<absent|present>",
     "sourceParityReportArtifact": "release-installation-source-parity-<platform>-<architecture>"

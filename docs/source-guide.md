@@ -31,7 +31,7 @@ porcupi add "https://github.com/example/pi-resources"
 
 Tracking retains an update channel, not a mutable checkout. Selection Intent, every selected Patch Series member, and Pi package settings remain bound to the same credential-free source at the exact accepted commit. The add review shows that commit before confirmation, and `porcupi manage` labels the source as tracked and shows its accepted commit.
 
-Tags and full commits remain pinned and never acquire Tracked Branch behavior. Use a full commit when you deliberately want an immutable channel:
+Tags and full commits remain pinned and never acquire Tracked Branch behavior. Use a full commit when you deliberately want an immutable snapshot:
 
 ```sh
 source_commit=$(git rev-parse HEAD)
@@ -91,13 +91,13 @@ porcupi manage
 
 Resource changes are reconciled through Pi when confirmed. Patch changes remain pending until the next `porcupi apply`. Selecting zero Patches and applying returns Managed Pi to PorcuPi's exact zero-Patch Pi Base.
 
-To advance a source, add it again at a new branch, tag, or full commit and review the complete replacement:
+To advance the same Tracked Branch to a fast-forward commit, run `porcupi add` again with the same branch and review the complete replacement:
 
 ```sh
-porcupi add https://github.com/example/pi-resources@NEW_FULL_COMMIT
+porcupi add https://github.com/example/pi-resources@main
 ```
 
-Ordinary Pi package updates do not advance PorcuPi's pinned Git ref. PorcuPi never silently retargets saved Artifacts whose paths, source identity, or Patch digests changed.
+To change channels or replace a pinned source, remove that Source Repository's selections before selecting a different branch, tag, or full commit. Ordinary Pi package updates do not advance PorcuPi's exact Git ref. PorcuPi never silently retargets saved Artifacts whose paths, source identity, or Patch digests changed.
 
 ## Prepare a Source Repository
 

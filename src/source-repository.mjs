@@ -17,6 +17,11 @@ export function isCanonicalTrackedBranch(value) {
     && spawnSync("git", ["check-ref-format", value], { stdio: "ignore" }).status === 0;
 }
 
+export function sourceSnapshotSummary(source, exactCommitState) {
+  const channel = source.trackedBranch ? `Tracked Branch: ${source.trackedBranch}` : "Pinned source";
+  return `${channel}\n${exactCommitState} exact commit: ${source.commit}\n`;
+}
+
 const themeColors = [
   "accent", "border", "borderAccent", "borderMuted", "success", "error", "warning", "muted", "dim", "text",
   "thinkingText", "selectedBg", "userMessageBg", "userMessageText", "customMessageBg", "customMessageText",

@@ -60,6 +60,9 @@ test("the source guide defines Tracked Branch publication and exact-snapshot sem
   assert.match(guide, /omitted ref.*default branch.*Tracked Branch/i);
   assert.match(guide, /Selection Intent.*exact accepted commit/i);
   assert.match(guide, /tags and full commits remain pinned/i);
+  assert.doesNotMatch(guide, /immutable channel/i);
+  assert.match(guide, /advance the same Tracked Branch.*add.*same branch/is);
+  assert.match(guide, /remove.*before selecting a different branch, tag, or full commit/is);
   assert.match(guide, /merging selected-content changes.*update candidate/i);
   assert.match(guide, /Selected content comprises selected resource bytes.*Patch Series membership, order, bytes, and compatibility/i);
   assert.match(guide, /Documentation, tests, unrelated files, and new independent unselected Artifacts do not/i);

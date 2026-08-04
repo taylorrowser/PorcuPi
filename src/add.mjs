@@ -5,6 +5,7 @@ import {
   branchContainsAcceptedCommit,
   discoverPiArtifacts,
   resolveSourceRepository,
+  sourceSnapshotSummary,
 } from "./source-repository.mjs";
 import {
   artifactKey,
@@ -17,11 +18,6 @@ import {
   resolveProjectContext,
   saveSelectionSources,
 } from "./resource-intent.mjs";
-
-function writeResolvedSourceSnapshot(output, source) {
-  output.write(source.trackedBranch ? `Tracked Branch: ${source.trackedBranch}\n` : "Pinned source\n");
-  output.write(`Resolved exact commit: ${source.commit}\n`);
-}
 
 function replacementSources(selections, source, artifacts) {
   const withoutSource = selections.sources.filter((candidate) => candidate.locator !== source.locator);
@@ -79,7 +75,7 @@ function runAddWizard({ source, artifacts, diagnostics, currentArtifacts, previo
         if (page === 0) {
           output.write("1 of 3 — Select Artifacts\n");
           output.write(`Repository: ${source.locator}\n`);
-          writeResolvedSourceSnapshot(output, source);
+          output.write(sourceSnapshotSummary(source, "Resolved"));
           output.write("\n");
           if (artifacts.length === 0) output.write("  No selectable Artifacts were discovered.\n");
           const artifactWindow = windowAround(output, artifactCursor, artifacts.length, 15 + Math.min(5, diagnostics.length));
@@ -136,7 +132,7 @@ function runAddWizard({ source, artifacts, diagnostics, currentArtifacts, previo
           reviewCursor = Math.min(reviewCursor, Math.max(0, selectedArtifacts.length - 1));
           output.write("3 of 3 — Review and save\n");
           output.write(`Repository: ${source.locator}\n`);
-          writeResolvedSourceSnapshot(output, source);
+          output.write(sourceSnapshotSummary(source, "Resolved"));
           if (previousCommit && previousCommit !== source.commit) output.write(`Source-wide change: ${previousCommit} → ${source.commit}\n`);
           const seriesChanges = new Map(selectedArtifacts.filter((artifact) => {
             const previousPatch = previousPatches.get(artifact.id);
@@ -306,8 +302,7 @@ export async function addResources(requestedSource, {
         ? `${projectCount} project Pi resource selections`
         : `${globalCount + projectCount} Pi resource selections (${globalCount} global, ${projectCount} project)`;
     output.write(`\nSaved ${scopeSummary} and ${patchCount} Patch Series selection${patchCount === 1 ? "" : "s"} from ${resolved.locator}.\n`);
-    output.write(resolved.trackedBranch ? `Tracked Branch: ${resolved.trackedBranch}\n` : "Pinned source\n");
-    output.write(`Accepted exact commit: ${resolved.commit}\n`);
+    output.write(sourceSnapshotSummary(resolved, "Accepted"));
     output.write("Pi owns package checkout, dependencies, updates, and loading. Managed Pi activation is unchanged.\n");
     output.write(patchPendingMessage(patchIntentPending(sources, active.activation.active.patches)));
     return { saved: true, count: result.length };

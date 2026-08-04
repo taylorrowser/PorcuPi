@@ -145,6 +145,17 @@ function validRelativePath(value) {
     && !value.split("/").some((part) => part === "" || part === "." || part === "..");
 }
 
+function validSourceLocator(value) {
+  if (!validText(value) || value.includes("\\")) return false;
+  const slash = value.indexOf("/");
+  if (slash < 1 || slash === value.length - 1) return false;
+  const host = value.slice(0, slash);
+  const path = value.slice(slash + 1);
+  return host === host.toLowerCase()
+    && !path.endsWith(".git")
+    && !path.split("/").some((part) => part === "" || part === "." || part === "..");
+}
+
 function lexicalCompare(left, right) {
   return left === right ? 0 : left < right ? -1 : 1;
 }
@@ -273,7 +284,7 @@ function validatePatchIdentities(value, label) {
   for (const patch of value) {
     if (
       (!exactObject(patch, patchIdentityFields) && !exactObject(patch, legacyPatchIdentityFields))
-      || !validText(patch.locator)
+      || !validSourceLocator(patch.locator)
       || (Object.hasOwn(patch, "seriesId") && !validText(patch.seriesId))
       || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(patch.commit || "")
       || !validRelativePath(patch.path)

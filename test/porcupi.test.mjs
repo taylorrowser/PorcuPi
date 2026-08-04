@@ -2490,6 +2490,19 @@ test("strict Composition receipts reject validly rebound identity, source-snapsh
       expected: /Malformed Managed Pi Composition receipt/,
     },
     {
+      name: "noncanonical-source-locator",
+      mutate: (receipt) => {
+        receipt.patches = [{
+          locator: "EXAMPLE.test/source",
+          seriesId: "coordinated-change",
+          commit: "a".repeat(40),
+          path: "patches/member.patch",
+          sha256: "b".repeat(64),
+        }];
+      },
+      expected: /Malformed Managed Pi Composition receipt/,
+    },
+    {
       name: "mixed-source-commits",
       mutate: (receipt) => {
         receipt.patches = [

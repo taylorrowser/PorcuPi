@@ -478,7 +478,42 @@ function exactVersion(value) {
   return typeof value === "string" && /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value);
 }
 
-function readPatchMetadata(checkout, patches, piBase, diagnostics) {
+const compatibilityFields = [
+  ["supportedPiBaseVersions", exactVersion],
+  ["supportedPiBaseCommits", isFullGitCommit],
+];
+
+function compatibilityDeclared(value) {
+  return compatibilityFields.some(([key]) => value?.[key] !== undefined);
+}
+
+function compatibilityValidationError(value, identity) {
+  for (const [key, validator] of compatibilityFields) {
+    const values = value[key];
+    if (values !== undefined && (
+      !Array.isArray(values)
+      || values.length === 0
+      || values.some((candidate) => !validator(candidate))
+      || new Set(key === "supportedPiBaseCommits" ? values.map((candidate) => candidate.toLowerCase()) : values).size !== values.length
+    )) return `${key} for ${identity} must contain unique exact values`;
+  }
+  return undefined;
+}
+
+function compatibilityStatus(declaration, piBase) {
+  if (!declaration || !compatibilityDeclared(declaration)) return {};
+  const versionCompatible = declaration.supportedPiBaseVersions === undefined
+    || declaration.supportedPiBaseVersions.includes(piBase?.tag);
+  const commitCompatible = declaration.supportedPiBaseCommits === undefined
+    || declaration.supportedPiBaseCommits.some((commit) => commit.toLowerCase() === piBase?.commit?.toLowerCase());
+  return { compatible: versionCompatible && commitCompatible, compatibilityDeclared: true };
+}
+
+function effectiveCompatibility(entry, sourceDefault) {
+  return compatibilityDeclared(entry) ? entry : sourceDefault;
+}
+
+function readSourceMetadata(checkout, patches, piBase, diagnostics) {
   const path = join(checkout, "porcupi.json");
   let value;
   try {
@@ -486,13 +521,22 @@ function readPatchMetadata(checkout, patches, piBase, diagnostics) {
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("must be a regular file");
     value = JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
-    if (error?.code === "ENOENT") return { patches, patchSeries: [], patchEntries: [] };
+    if (error?.code === "ENOENT") return {
+      patches, patchSeries: [], patchEntries: [], resourceEntries: [], sourceCompatibility: undefined,
+    };
     const reason = error instanceof SyntaxError ? "malformed JSON" : "metadata root is not a readable regular file";
-    diagnostics.push({ path: "porcupi.json", reason: `Patch metadata is invalid and ignored as a whole: ${reason}` });
-    return { patches, patchSeries: [], patchEntries: [] };
+    diagnostics.push({ path: "porcupi.json", reason: `Source metadata is invalid and ignored as a whole: ${reason}` });
+    return { patches, patchSeries: [], patchEntries: [], resourceEntries: [], sourceCompatibility: undefined };
   }
 
-  const rootKeys = new Set(["schemaVersion", "patches", "patchSeries"]);
+  const rootKeys = new Set([
+    "schemaVersion",
+    "patches",
+    "patchSeries",
+    "resources",
+    "supportedPiBaseVersions",
+    "supportedPiBaseCommits",
+  ]);
   const entryKeys = new Set([
     "path",
     "displayName",
@@ -500,22 +544,39 @@ function readPatchMetadata(checkout, patches, piBase, diagnostics) {
     "supportedPiBaseVersions",
     "supportedPiBaseCommits",
   ]);
-  const seriesKeys = new Set(["id", "displayName", "description", "members"]);
+  const seriesKeys = new Set([
+    "id",
+    "displayName",
+    "description",
+    "members",
+    "supportedPiBaseVersions",
+    "supportedPiBaseCommits",
+  ]);
+  const resourceKeys = new Set([
+    "kind",
+    "path",
+    "supportedPiBaseVersions",
+    "supportedPiBaseCommits",
+  ]);
   const invalid = (reason) => {
-    diagnostics.push({ path: "porcupi.json", reason: `Patch metadata is invalid and ignored as a whole: ${reason}` });
-    return { patches, patchSeries: [], patchEntries: [] };
+    diagnostics.push({ path: "porcupi.json", reason: `Source metadata is invalid and ignored as a whole: ${reason}` });
+    return { patches, patchSeries: [], patchEntries: [], resourceEntries: [], sourceCompatibility: undefined };
   };
   if (
     !exactObjectKeys(value, rootKeys)
     || value.schemaVersion !== 1
     || (value.patches !== undefined && !Array.isArray(value.patches))
     || (value.patchSeries !== undefined && !Array.isArray(value.patchSeries))
-    || (value.patches === undefined && value.patchSeries === undefined)
+    || (value.resources !== undefined && !Array.isArray(value.resources))
   ) {
-    return invalid("expected only schemaVersion 1, patches, and patchSeries arrays");
+    return invalid("expected only schemaVersion 1, exact Pi Base compatibility, and patches, patchSeries, or resources arrays");
   }
+  const sourceCompatibilityError = compatibilityValidationError(value, "Source Repository default");
+  if (sourceCompatibilityError) return invalid(sourceCompatibilityError);
+  const sourceCompatibility = compatibilityDeclared(value) ? value : undefined;
   const patchEntries = value.patches ?? [];
   const declaredSeries = value.patchSeries ?? [];
+  const resourceEntries = value.resources ?? [];
   const seen = new Set();
   for (const entry of patchEntries) {
     if (
@@ -528,15 +589,8 @@ function readPatchMetadata(checkout, patches, piBase, diagnostics) {
     seen.add(entry.path);
     if (entry.displayName !== undefined && !metadataText(entry.displayName)) return invalid(`invalid displayName for ${entry.path}`);
     if (entry.description !== undefined && !metadataText(entry.description)) return invalid(`invalid description for ${entry.path}`);
-    for (const [key, validator] of [["supportedPiBaseVersions", exactVersion], ["supportedPiBaseCommits", isFullGitCommit]]) {
-      const values = entry[key];
-      if (values !== undefined && (
-        !Array.isArray(values)
-        || values.length === 0
-        || values.some((candidate) => !validator(candidate))
-        || new Set(values).size !== values.length
-      )) return invalid(`${key} for ${entry.path} must contain unique exact values`);
-    }
+    const compatibilityError = compatibilityValidationError(entry, entry.path);
+    if (compatibilityError) return invalid(compatibilityError);
   }
 
   const seriesIds = new Set();
@@ -551,6 +605,22 @@ function readPatchMetadata(checkout, patches, piBase, diagnostics) {
     ) return invalid("declared Patch Series require only a stable id, optional display text, and one or more member paths");
     if (seriesIds.has(series.id)) return invalid(`duplicate Patch Series id ${series.id}`);
     seriesIds.add(series.id);
+    const compatibilityError = compatibilityValidationError(series, `Patch Series ${series.id}`);
+    if (compatibilityError) return invalid(compatibilityError);
+  }
+
+  const resourceIdentities = new Set();
+  for (const resource of resourceEntries) {
+    if (
+      !exactObjectKeys(resource, resourceKeys)
+      || !artifactKinds.includes(resource.kind)
+      || !safeArtifactPath(resource.path)
+    ) return invalid("resource compatibility entries require only a supported kind, safe path, and exact Pi Base values");
+    const identity = `${resource.kind}:${resource.path}`;
+    if (resourceIdentities.has(identity)) return invalid(`duplicate resource compatibility entry ${identity}`);
+    resourceIdentities.add(identity);
+    const compatibilityError = compatibilityValidationError(resource, identity);
+    if (compatibilityError) return invalid(compatibilityError);
   }
 
   const entries = new Map(patchEntries.map((entry) => [entry.path, entry]));
@@ -564,22 +634,29 @@ function readPatchMetadata(checkout, patches, piBase, diagnostics) {
   return {
     patches: patches.map((patch) => {
       const entry = entries.get(patch.path);
-      if (!entry) return patch;
-      const versionCompatible = entry.supportedPiBaseVersions === undefined
-        || entry.supportedPiBaseVersions.includes(piBase?.tag);
-      const commitCompatible = entry.supportedPiBaseCommits === undefined
-        || entry.supportedPiBaseCommits.includes(piBase?.commit);
+      if (!entry) return { ...patch, ...compatibilityStatus(sourceCompatibility, piBase) };
       return {
         ...patch,
         ...(entry.displayName === undefined ? {} : { displayName: entry.displayName }),
         ...(entry.description === undefined ? {} : { description: entry.description }),
-        compatible: versionCompatible && commitCompatible,
-        compatibilityDeclared: entry.supportedPiBaseVersions !== undefined || entry.supportedPiBaseCommits !== undefined,
+        ...compatibilityStatus(effectiveCompatibility(entry, sourceCompatibility), piBase),
       };
     }),
-    patchSeries: declaredSeries,
+    patchSeries: declaredSeries.map((series) => ({
+      ...series,
+      ...compatibilityStatus(effectiveCompatibility(series, sourceCompatibility), piBase),
+    })),
     patchEntries,
+    resourceEntries,
+    sourceCompatibility,
   };
+}
+
+function safeArtifactPath(path) {
+  return metadataText(path)
+    && !path.startsWith("/")
+    && !path.includes("\\")
+    && !path.split("/").some((part) => part === "" || part === "." || part === "..");
 }
 
 function safePatchPath(path) {
@@ -654,6 +731,8 @@ function declaredPatchArtifacts(metadata, inventory, diagnostics) {
     members: series.members.map((path) => ({ path, sha256: inventory.get(path).sha256 })),
     ...(series.displayName === undefined ? {} : { displayName: series.displayName }),
     ...(series.description === undefined ? {} : { description: series.description }),
+    ...(series.compatible === undefined ? {} : { compatible: series.compatible }),
+    ...(series.compatibilityDeclared === undefined ? {} : { compatibilityDeclared: series.compatibilityDeclared }),
   }));
 }
 
@@ -703,7 +782,7 @@ function discoverPatchArtifacts(checkout, diagnostics, piBase) {
   }
 
   const regularPatches = [...inventory.values()].filter((candidate) => candidate.sha256);
-  const metadata = readPatchMetadata(checkout, regularPatches, piBase, diagnostics);
+  const metadata = readSourceMetadata(checkout, regularPatches, piBase, diagnostics);
   const declared = declaredPatchArtifacts(metadata, inventory, diagnostics);
   const claimed = new Set(declared.flatMap((series) => series.members.map((member) => member.path)));
   for (const entry of metadata.patchEntries) {
@@ -711,10 +790,32 @@ function discoverPatchArtifacts(checkout, diagnostics, piBase) {
       diagnostics.push({ path: "porcupi.json", reason: `Patch metadata entry ${entry.path} is ignored because the Patch File belongs to a declared Patch Series` });
     }
   }
-  return [
-    ...declared,
-    ...metadata.patches.filter((patch) => !claimed.has(patch.path)).map(implicitPatchArtifact),
-  ];
+  return {
+    artifacts: [
+      ...declared,
+      ...metadata.patches.filter((patch) => !claimed.has(patch.path)).map(implicitPatchArtifact),
+    ],
+    metadata,
+  };
+}
+
+function applyResourceCompatibility(artifacts, metadata, piBase, diagnostics) {
+  const discovered = new Set(artifacts.map((artifact) => `${artifact.kind}:${artifact.path}`));
+  for (const entry of metadata.resourceEntries) {
+    const identity = `${entry.kind}:${entry.path}`;
+    if (!discovered.has(identity)) diagnostics.push({
+      path: "porcupi.json",
+      reason: `Resource compatibility entry ${identity} does not address a discovered regular resource and is ignored`,
+    });
+  }
+  const entries = new Map(metadata.resourceEntries.map((entry) => [`${entry.kind}:${entry.path}`, entry]));
+  return artifacts.map((artifact) => ({
+    ...artifact,
+    ...compatibilityStatus(
+      effectiveCompatibility(entries.get(`${artifact.kind}:${artifact.path}`), metadata.sourceCompatibility),
+      piBase,
+    ),
+  }));
 }
 
 export function discoverPiArtifacts(root, { piBase } = {}) {
@@ -744,7 +845,9 @@ export function discoverPiArtifacts(root, { piBase } = {}) {
       .filter((path) => validateArtifact(checkout, kind, path, diagnostics))
       .map((path) => ({ kind, path: relativePath(checkout, path) })));
   }
-  artifacts.push(...discoverPatchArtifacts(checkout, diagnostics, piBase));
+  const patchDiscovery = discoverPatchArtifacts(checkout, diagnostics, piBase);
+  artifacts = applyResourceCompatibility(artifacts, patchDiscovery.metadata, piBase, diagnostics);
+  artifacts.push(...patchDiscovery.artifacts);
   artifacts.sort((left, right) => `${left.kind}\0${left.kind === "PatchSeries" ? left.id : left.path}`
     .localeCompare(`${right.kind}\0${right.kind === "PatchSeries" ? right.id : right.path}`));
   diagnostics.sort((left, right) => left.path.localeCompare(right.path));

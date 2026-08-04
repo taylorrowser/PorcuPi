@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for declared Patch Series in issue #47.
+Accepted for declared Patch Series in issue #47. Compatibility is extended to declared series and every other Artifact by ADR 0014 in issue #48.
 
 ## Context
 
@@ -34,7 +34,7 @@ The declared stable identifier is the Artifact identity. Changing display text, 
 
 Apply sorts selected series lexically by canonical Source Repository locator and stable series identifier, then preserves each declaration's member order. It stages every exact member byte sequence once and runs ADR 0005's unchanged sequential preflight and fixed composition pipeline over the flattened list. Composition identity, embedded and central receipts, and Activation Patch snapshots preserve that complete flattened order and repeat the stable series identifier on every member.
 
-The existing `patches` metadata array remains the optional presentation and exact Pi Base compatibility overlay for implicit one-file series. An entry for a Patch File claimed by a valid declaration does not create another Artifact and is visibly ignored. Broader source defaults and per-Artifact compatibility are deferred to issue #48.
+The existing `patches` metadata array remains the optional presentation and exact Pi Base compatibility overlay for implicit one-file series. An entry for a Patch File claimed by a valid declaration does not create another Artifact and is visibly ignored. ADR 0014 adds source defaults and per-Artifact compatibility without changing this ownership rule.
 
 ## Consequences
 

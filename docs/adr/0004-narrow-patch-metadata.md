@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for Patch Selection Intent in issue #16. Qualified for explicitly confirmed cross-release upgrades by ADR 0011 in issue #43, implicit one-file Patch Series representation by ADR 0012 in issue #46, and declared Patch Series by ADR 0013 in issue #47.
+Accepted for Patch Selection Intent in issue #16. Qualified for explicitly confirmed cross-release upgrades by ADR 0011 in issue #43, implicit one-file Patch Series representation by ADR 0012 in issue #46, declared Patch Series by ADR 0013 in issue #47, and source-wide/per-Artifact compatibility by ADR 0014 in issue #48.
 
 ## Context
 

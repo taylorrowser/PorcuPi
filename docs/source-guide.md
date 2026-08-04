@@ -114,7 +114,7 @@ pi-resources/
     └── 0002-expose-capability-to-extensions.patch
 ```
 
-A source does not need every directory. Prefer one root Pi package manifest when publishing resources with dependencies or nonconventional paths. Keep Patch metadata in the separate optional root `porcupi.json`; `package.json` cannot declare Patches, and `porcupi.json` cannot declare Pi resources.
+A source does not need every directory. Prefer one root Pi package manifest when publishing resources with dependencies or nonconventional paths. Keep PorcuPi compatibility and Patch Series metadata in the separate optional root `porcupi.json`; `package.json` cannot declare Patches, and `porcupi.json` resource entries only overlay compatibility on resources already discovered through Pi's rules—they cannot declare new Pi resources.
 
 ### Resource discovery choices
 
@@ -305,11 +305,29 @@ List declared members in their exact metadata order. For implicit-only sources, 
 
 ### Declare Patch Series and optional metadata
 
-Standalone Patch Files need no manifest to become implicit Patch Series. Use an optional regular root `porcupi.json` when several Patch Files form one coordinated Artifact or when its stable identity must survive member path changes:
+Standalone Patch Files and Pi resources need no `porcupi.json`. Use an optional regular root file to declare a coordinated Patch Series, improve implicit-series presentation, or narrow exact Pi Base eligibility:
 
 ```json
 {
   "schemaVersion": 1,
+  "supportedPiBaseVersions": ["v0.81.1"],
+  "supportedPiBaseCommits": [
+    "20be4b18d4c57487f8993d2762bace129f0cf7c6"
+  ],
+  "resources": [
+    {
+      "kind": "Extension",
+      "path": "extensions/example.ts",
+      "supportedPiBaseVersions": ["v0.81.1"]
+    },
+    {
+      "kind": "Theme",
+      "path": "themes/example.json",
+      "supportedPiBaseCommits": [
+        "20be4b18d4c57487f8993d2762bace129f0cf7c6"
+      ]
+    }
+  ],
   "patchSeries": [
     {
       "id": "example-capability",
@@ -318,6 +336,10 @@ Standalone Patch Files need no manifest to become implicit Patch Series. Use an 
       "members": [
         "patches/0001-add-example-core.patch",
         "patches/0002-integrate-example.patch"
+      ],
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": [
+        "20be4b18d4c57487f8993d2762bace129f0cf7c6"
       ]
     }
   ],
@@ -325,24 +347,25 @@ Standalone Patch Files need no manifest to become implicit Patch Series. Use an 
     {
       "path": "patches/standalone-fix.patch",
       "displayName": "Standalone fix",
-      "supportedPiBaseVersions": ["v0.81.1"],
-      "supportedPiBaseCommits": [
-        "20be4b18d4c57487f8993d2762bace129f0cf7c6"
-      ]
+      "supportedPiBaseVersions": ["v0.81.1"]
     }
   ]
 }
 ```
 
+The root `supportedPiBaseVersions` and `supportedPiBaseCommits` form an optional source-wide compatibility default. Each is a nonempty set of unique exact release versions or full SHA-1/SHA-256 commit object IDs. If both dimensions are present, the current Pi Base must match both. A declaration is only an author filter: a match never skips Patch preflight, target build, model-data/resource validation, public conformance, version, or smoke checks.
+
+A `resources` entry identifies one already discovered Extension, Skill, Prompt, or Theme by its exact `kind` and source-relative `path`. It does not add a resource. `patchSeries` entries and `patches` overlays identify Patch Series as described below. Compatibility on any such entry is a per-Artifact override: once an entry supplies either compatibility field, that entry's complete declaration replaces the source default rather than merging with it. An entry with no compatibility fields inherits the source default. Omitting compatibility both at the root and for an Artifact does not restrict or suppress discovery.
+
 `patchSeries` entries declare Artifacts. `id` is the nonempty, control-free, source-local stable identity; changing it creates a different Artifact. `displayName` and `description` are optional mutable presentation and are not retained in Selection Intent. `members` is a nonempty ordered list of unique safe `patches/**/*.patch` paths. A declared single-file series is valid too.
 
 Every member must be a tracked `100644` or `100755` repository-bounded regular file at the exact source commit. Unsafe, duplicate, missing, symbolic, submodule, special-mode, boundary-escaping, and non-regular members visibly invalidate that declaration. A Patch File claimed by more than one declaration invalidates every conflicting declaration. A valid declaration claims each member, so none also appears as an implicit series; an invalid declaration suppresses nothing.
 
-The optional `patches` array overlays only implicit one-file series with display text and exact Pi Base compatibility. Its entries permit only `path`, `displayName`, `description`, `supportedPiBaseVersions`, and `supportedPiBaseCommits`. Paths must identify convention-discovered regular Patch files; compatibility arrays must be nonempty sets of unique exact release versions or full Git object IDs, and both dimensions must match when both are present. An overlay entry for a declared member is visibly ignored rather than creating another Artifact.
+The optional `patches` array overlays only implicit one-file series with display text and compatibility. Its paths must identify convention-discovered regular Patch Files. An overlay entry for a declared member is visibly ignored rather than creating another Artifact.
 
-The schema is deliberately closed. The root permits only `schemaVersion`, `patchSeries`, and `patches`; each entry permits only the fields documented above; all display text must be nonempty and control-free. Malformed JSON, unknown fields, duplicate stable identifiers or overlay entries, invalid text, and invalid compatibility visibly invalidate the whole metadata overlay while leaving convention-discovered Patches available. A semantically invalid series declaration or an overlay naming an unavailable implicit file is diagnosed individually.
+The schema is deliberately closed. The root permits only `schemaVersion`, the two compatibility fields, `resources`, `patchSeries`, and `patches`; each entry permits only its documented fields; all paths and display text must be safe, nonempty, and control-free. Malformed JSON, unknown fields, duplicate identities, ranges, empty/duplicate compatibility sets, and invalid exact values visibly invalidate and ignore the whole metadata overlay without suppressing convention discovery. An otherwise valid overlay that names an unavailable discovered Artifact is diagnosed and ignored individually.
 
-Metadata cannot declare dependencies, hooks, scripts, cross-series ordering, ranges, build recipes, verifiers, force behavior, or activation policy. A compatibility match never bypasses PorcuPi's fixed preflight/build pipeline.
+Metadata cannot declare commands, hooks, dependencies, recipes, force options, custom verifiers, or activation policy. It also cannot declare scripts, cross-series ordering, ranges, or any other source-supplied behavior. Declared incompatibility is visible and prevents selecting or advancing that Artifact.
 
 ## Validate the source
 
@@ -357,7 +380,7 @@ Before publishing a commit, check all of the following.
 - Resource paths, globs, exclusions, runtime dependencies, and peer dependencies follow Pi v0.81.1's package contract.
 - Skills include a loadable `description`; prompts have closed frontmatter; Themes satisfy the complete supported format; Extensions export valid Pi factories.
 - Each Patch applies sequentially with `git apply --check --whitespace=error-all` to the exact Pi Base.
-- `porcupi.json`, if present, uses only schema version 1, declared Patch Series identity/member fields, and narrow implicit-series presentation/compatibility fields.
+- `porcupi.json`, if present, uses only schema version 1, optional exact source compatibility defaults, resource compatibility overlays, declared Patch Series fields, and narrow implicit-series overlays.
 
 ### End-to-end check
 
@@ -423,6 +446,7 @@ Review third-party source before selection. Use a separate OS account, VM, conta
 - [PorcuPi operations](operations.md)
 - [Filtered exact-commit Pi package decision](adr/0003-delegate-filtered-git-packages-to-pi.md)
 - [Patch discovery and metadata decision](adr/0004-narrow-patch-metadata.md)
+- [Per-Artifact Pi Base compatibility decision](adr/0014-artifact-pi-base-compatibility.md)
 - [Fixed Patch composition pipeline](adr/0005-fixed-patch-composition-pipeline.md)
 - [Real `pi-wait-for-user` Source Repository](https://github.com/taylorrowser/pi-wait-for-user)
 - [Its complete `porcupi.json` example](https://github.com/taylorrowser/pi-wait-for-user/blob/main/porcupi.json)

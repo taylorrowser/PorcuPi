@@ -52,6 +52,10 @@ export function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
+export function patchSeriesIdentityKey(locator, seriesId) {
+  return `${locator}\0${seriesId}`;
+}
+
 export function compositionIdentity(value) {
   return {
     schemaVersion: value.schemaVersion,
@@ -134,11 +138,32 @@ function validText(value) {
   return typeof value === "string" && value.length > 0 && !/[\x00-\x1f\x7f]/.test(value);
 }
 
+export function canonicalSourceLocator(host, path) {
+  if (
+    !validText(host)
+    || !validText(path)
+    || /[\\\/@]/.test(host)
+    || path.includes("\\")
+    || path.includes("@")
+    || path.endsWith(".git")
+  ) return null;
+  const parts = path.split("/");
+  if (parts.length < 2 || parts.some((part) => part === "" || part === "." || part === "..")) return null;
+  return `${host.toLowerCase()}/${path}`;
+}
+
 function validRelativePath(value) {
   return validText(value)
     && !value.startsWith("/")
     && !value.includes("\\")
     && !value.split("/").some((part) => part === "" || part === "." || part === "..");
+}
+
+function validSourceLocator(value) {
+  if (!validText(value)) return false;
+  const slash = value.indexOf("/");
+  if (slash < 1) return false;
+  return canonicalSourceLocator(value.slice(0, slash), value.slice(slash + 1)) === value;
 }
 
 function lexicalCompare(left, right) {
@@ -261,23 +286,38 @@ export function run(command, args, { cwd, environment = process.env, capture = f
 
 function validatePatchIdentities(value, label) {
   if (!Array.isArray(value)) fail(`Malformed ${label}`);
-  let previousKey;
-  const keys = new Set();
+  let previousSeriesKey;
+  const identities = new Set();
+  const memberOwners = new Set();
+  const seriesIdPresence = new Map();
+  const sourceCommits = new Map();
   for (const patch of value) {
     if (
       (!exactObject(patch, patchIdentityFields) && !exactObject(patch, legacyPatchIdentityFields))
-      || !validText(patch.locator)
-      || (Object.hasOwn(patch, "seriesId") && (!validText(patch.seriesId) || patch.seriesId !== patch.path))
+      || !validSourceLocator(patch.locator)
+      || (Object.hasOwn(patch, "seriesId") && !validText(patch.seriesId))
       || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(patch.commit || "")
       || !validRelativePath(patch.path)
       || !patch.path.startsWith("patches/")
       || !patch.path.endsWith(".patch")
       || !/^[a-f0-9]{64}$/.test(patch.sha256 || "")
     ) fail(`Malformed ${label}`);
-    const key = `${patch.locator}\0${patch.seriesId ?? patch.path}\0${patch.path}`;
-    if (keys.has(key) || (previousKey !== undefined && lexicalCompare(previousKey, key) >= 0)) fail(`Malformed ${label}`);
-    keys.add(key);
-    previousKey = key;
+    const hasSeriesId = Object.hasOwn(patch, "seriesId");
+    const seriesKey = patchSeriesIdentityKey(patch.locator, patch.seriesId ?? patch.path);
+    const identity = `${seriesKey}\0${patch.path}`;
+    const memberOwner = `${patch.locator}\0${patch.path}`;
+    if (
+      identities.has(identity)
+      || memberOwners.has(memberOwner)
+      || (seriesIdPresence.has(seriesKey) && seriesIdPresence.get(seriesKey) !== hasSeriesId)
+      || (sourceCommits.has(patch.locator) && sourceCommits.get(patch.locator) !== patch.commit)
+      || (previousSeriesKey !== undefined && lexicalCompare(previousSeriesKey, seriesKey) > 0)
+    ) fail(`Malformed ${label}`);
+    identities.add(identity);
+    memberOwners.add(memberOwner);
+    seriesIdPresence.set(seriesKey, hasSeriesId);
+    sourceCommits.set(patch.locator, patch.commit);
+    previousSeriesKey = seriesKey;
   }
   return value;
 }

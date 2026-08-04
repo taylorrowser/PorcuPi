@@ -912,6 +912,7 @@ function patchReview(patches) {
 
 function confirmUpgrade({ active, installedVersion, lock, ownPi, selections, input, output }) {
   const artifacts = selectedArtifactReview(selections.sources);
+  const selectedResources = selections.sources.flatMap((source) => source.artifacts).filter((artifact) => !isPatchSeries(artifact));
   const selectedPatches = patchSelectionSnapshot(selections.sources);
   const activePatches = active.activation.active.patches;
   const pending = patchIntentPending(selections.sources, activePatches);
@@ -933,7 +934,7 @@ function confirmUpgrade({ active, installedVersion, lock, ownPi, selections, inp
         } else if (page === 1) {
           output.write("Upgrade Readiness Check: ready\n\n");
           output.write(`The exact target with ${selectedPatches.length} selected Patch${selectedPatches.length === 1 ? "" : "es"} passed Patch preflight, fixed build, conformance, version, and smoke checks.\n`);
-          output.write(`${artifacts.length - selectedPatches.length} selected Pi resource${artifacts.length - selectedPatches.length === 1 ? "" : "s"} remained discoverable at the exact retained source snapshot.\n`);
+          output.write(`${selectedResources.length} selected Pi resource${selectedResources.length === 1 ? "" : "s"} remained discoverable at the exact retained source snapshot.\n`);
           output.write("The check did not change Activation, Compositions, launchers, Selection Intent, Pi settings/checkouts, or shared Pi state.\n\n");
           output.write("[Enter/→] Continue  [←] back  [Esc] cancel\n");
         } else {

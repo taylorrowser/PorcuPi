@@ -16,7 +16,7 @@ import {
   verifyHostNode,
   verifyPublishedComposition,
 } from "./composition.mjs";
-import { runGuidedTerminal, truncateForTerminal, windowAround } from "./guided-terminal.mjs";
+import { runGuidedTerminal, windowAround } from "./guided-terminal.mjs";
 import { cleanupRetainedCompositions, withLifecycleLock } from "./lifecycle.mjs";
 import {
   expandedPatchSnapshot,
@@ -80,7 +80,7 @@ function confirmApply(patches, input, output) {
         const visible = windowAround(output, cursor, patches.length, 13);
         for (let index = visible.start; index < visible.end; index += 1) {
           const patch = patches[index];
-          output.write(`${truncateForTerminal(output, `${index === cursor ? "›" : " "} ${patch.locator} · ${patch.seriesId} · ${patch.path} · sha256:${patch.sha256.slice(0, 12)}`)}\n`);
+          output.write(`${index === cursor ? "›" : " "} ${patch.locator}@${patch.commit} · ${patch.seriesId} · ${patch.path} · sha256:${patch.sha256}\n`);
         }
         if (patches.length > 0) output.write(`  ${visible.start} above · ${patches.length - visible.end} below\n`);
         output.write("\nThe fixed build commands and Patch-modified source run with your user authority.\n");

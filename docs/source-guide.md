@@ -241,7 +241,7 @@ Use the root `pi.themes` manifest array for nonconventional locations or an expl
 
 ## Patch Series and Patch Files
 
-A Patch File is a declarative Git-compatible file that changes PorcuPi's exact Pi Base. It is not an Extension, a script, or a package lifecycle hook. Every unclaimed convention-discovered Patch File is represented as one implicit one-file Patch Series. The series' stable source identity is the Patch File's full structural path; PorcuPi does not infer grouping from filenames or adjacent files.
+A Patch File is a declarative Git-compatible file that changes PorcuPi's exact Pi Base. It is not an Extension, a script, or a package lifecycle hook. A source can declare stable Patch Series Artifacts, each containing an ordered list of Patch Files. Every unclaimed convention-discovered Patch File is represented as one implicit one-file Patch Series. An implicit series' stable source identity is the Patch File's full structural path; PorcuPi never infers grouping from filenames or adjacent files.
 
 ### Target the exact Pi Base
 
@@ -280,7 +280,7 @@ git -C "$SOURCE" add patches/0001-add-example-capability.patch
 
 PorcuPi recursively discovers only tracked files whose paths begin with `patches/` and end with `.patch`. Candidates must be regular Git mode `100644` or `100755` files in the checkout. Symbolic links, submodules, special modes, unsafe/control paths, non-regular files, and repository-boundary escapes are rejected.
 
-For implicit series, structural paths determine both series identity and flattening order. PorcuPi orders them by canonical Source Repository locator and then full source-relative Patch path, preserving the accepted standalone-Patch behavior. Within one source, use zero-padded names such as `0001-...patch`, `0002-...patch`, and put prerequisite changes first. There is no inferred grouping, dependency metadata, or order override.
+Apply orders selected series lexically by canonical Source Repository locator and stable series identity, then preserves each series' declared member order. For implicit series, structural paths are the series identities and sole member paths, preserving the accepted standalone-Patch behavior. Within an implicit-only source, use zero-padded names such as `0001-...patch`, `0002-...patch`, and put prerequisite changes first. There is no inferred grouping, dependency metadata, or cross-series order override.
 
 ### Preflight the intended series
 
@@ -292,27 +292,39 @@ PI_BASE=20be4b18d4c57487f8993d2762bace129f0cf7c6
 git clone https://github.com/earendil-works/pi.git /tmp/pi-patch-check
 git -C /tmp/pi-patch-check checkout --detach "$PI_BASE"
 
-git -C "$SOURCE" ls-files ':(glob)patches/**/*.patch' | LC_ALL=C sort |
-while IFS= read -r patch; do
+for patch in \
+  patches/0001-add-example-core.patch \
+  patches/0002-integrate-example.patch
+do
   git -C /tmp/pi-patch-check apply --check --whitespace=error-all "$SOURCE/$patch"
   git -C /tmp/pi-patch-check apply --whitespace=error-all "$SOURCE/$patch"
 done
 ```
 
-This is a fast source check, not a substitute for `porcupi apply`. The authoritative apply re-resolves exact source commits, verifies digests, stages owner-controlled bytes, preflights the complete cross-source selection, runs the fixed build, and smoke-tests the candidate.
+List declared members in their exact metadata order. For implicit-only sources, use the lexical structural-path order described above. This is a fast source check, not a substitute for `porcupi apply`. The authoritative apply re-resolves exact source commits, verifies digests, stages owner-controlled bytes, preflights the complete cross-source selection, runs the fixed build, and smoke-tests the candidate.
 
-### Add optional Patch metadata
+### Declare Patch Series and optional metadata
 
-Standalone Patch Files need no manifest to become implicit Patch Series. An optional regular root `porcupi.json` may add only display text and exact Pi Base compatibility to those one-file series:
+Standalone Patch Files need no manifest to become implicit Patch Series. Use an optional regular root `porcupi.json` when several Patch Files form one coordinated Artifact or when its stable identity must survive member path changes:
 
 ```json
 {
   "schemaVersion": 1,
+  "patchSeries": [
+    {
+      "id": "example-capability",
+      "displayName": "Example capability",
+      "description": "Adds the capability in two reviewable changes.",
+      "members": [
+        "patches/0001-add-example-core.patch",
+        "patches/0002-integrate-example.patch"
+      ]
+    }
+  ],
   "patches": [
     {
-      "path": "patches/0001-add-example-capability.patch",
-      "displayName": "Example capability",
-      "description": "Adds the core capability used by the example Extension.",
+      "path": "patches/standalone-fix.patch",
+      "displayName": "Standalone fix",
       "supportedPiBaseVersions": ["v0.81.1"],
       "supportedPiBaseCommits": [
         "20be4b18d4c57487f8993d2762bace129f0cf7c6"
@@ -322,18 +334,15 @@ Standalone Patch Files need no manifest to become implicit Patch Series. An opti
 }
 ```
 
-The schema is deliberately closed:
+`patchSeries` entries declare Artifacts. `id` is the nonempty, control-free, source-local stable identity; changing it creates a different Artifact. `displayName` and `description` are optional mutable presentation and are not retained in Selection Intent. `members` is a nonempty ordered list of unique safe `patches/**/*.patch` paths. A declared single-file series is valid too.
 
-- the root permits only `schemaVersion` and `patches`;
-- an entry permits only `path`, `displayName`, `description`, `supportedPiBaseVersions`, and `supportedPiBaseCommits`;
-- paths must identify convention-discovered regular Patch files;
-- display text must be nonempty and contain no control characters;
-- compatibility arrays must be nonempty sets of unique exact release versions or full Git object IDs; and
-- when both compatibility dimensions are present, both must match PorcuPi's Pi Base.
+Every member must be a tracked `100644` or `100755` repository-bounded regular file at the exact source commit. Unsafe, duplicate, missing, symbolic, submodule, special-mode, boundary-escaping, and non-regular members visibly invalidate that declaration. A Patch File claimed by more than one declaration invalidates every conflicting declaration. A valid declaration claims each member, so none also appears as an implicit series; an invalid declaration suppresses nothing.
 
-A declared mismatch disables that implicit Patch Series in selection. Omitted compatibility leaves PorcuPi's fixed preflight/build pipeline authoritative. Metadata never creates a Patch Artifact and cannot declare dependencies, hooks, scripts, grouping, ordering, ranges, recipes, verifiers, or force behavior.
+The optional `patches` array overlays only implicit one-file series with display text and exact Pi Base compatibility. Its entries permit only `path`, `displayName`, `description`, `supportedPiBaseVersions`, and `supportedPiBaseCommits`. Paths must identify convention-discovered regular Patch files; compatibility arrays must be nonempty sets of unique exact release versions or full Git object IDs, and both dimensions must match when both are present. An overlay entry for a declared member is visibly ignored rather than creating another Artifact.
 
-Malformed JSON, unknown fields, duplicate entries, unsafe values, or invalid compatibility invalidate and visibly ignore the whole metadata overlay while leaving convention-discovered Patches available. A valid entry naming a file that was not discovered is diagnosed and ignored individually.
+The schema is deliberately closed. The root permits only `schemaVersion`, `patchSeries`, and `patches`; each entry permits only the fields documented above; all display text must be nonempty and control-free. Malformed JSON, unknown fields, duplicate stable identifiers or overlay entries, invalid text, and invalid compatibility visibly invalidate the whole metadata overlay while leaving convention-discovered Patches available. A semantically invalid series declaration or an overlay naming an unavailable implicit file is diagnosed individually.
+
+Metadata cannot declare dependencies, hooks, scripts, cross-series ordering, ranges, build recipes, verifiers, force behavior, or activation policy. A compatibility match never bypasses PorcuPi's fixed preflight/build pipeline.
 
 ## Validate the source
 
@@ -348,7 +357,7 @@ Before publishing a commit, check all of the following.
 - Resource paths, globs, exclusions, runtime dependencies, and peer dependencies follow Pi v0.81.1's package contract.
 - Skills include a loadable `description`; prompts have closed frontmatter; Themes satisfy the complete supported format; Extensions export valid Pi factories.
 - Each Patch applies sequentially with `git apply --check --whitespace=error-all` to the exact Pi Base.
-- `porcupi.json`, if present, uses only schema version 1 and narrow Patch presentation/compatibility fields.
+- `porcupi.json`, if present, uses only schema version 1, declared Patch Series identity/member fields, and narrow implicit-series presentation/compatibility fields.
 
 ### End-to-end check
 
@@ -394,7 +403,7 @@ For an update:
 4. publish a new immutable commit; and
 5. tell users to run `porcupi add <source>@<new-commit>` and review the complete replacement.
 
-Changing Patch bytes changes the exact member digest. Moving a standalone Patch File changes its implicit Patch Series identity because that identity is the structural path; moving a resource likewise changes its structural identity. PorcuPi surfaces those changes rather than silently migrating saved intent. Do not rewrite a published commit or tell users that a moving branch is equivalent to an exact release.
+Changing Patch bytes changes the exact member digest. Moving a standalone Patch File changes its implicit Patch Series identity because that identity is the structural path. A declared series keeps its identity when display text, member paths, order, or bytes change, and re-adding it reviews the complete old and new ordered inventories as one change; changing its stable `id` creates a different Artifact. Moving a resource likewise changes its structural identity. PorcuPi surfaces these changes rather than silently migrating saved intent. Do not rewrite a published commit or tell users that a moving branch is equivalent to an exact release.
 
 ## Trust and project scope
 

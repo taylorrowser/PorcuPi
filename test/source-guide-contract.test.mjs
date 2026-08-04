@@ -38,6 +38,11 @@ test("the source guide covers consuming and authoring every PorcuPi artifact kin
   assert.match(guide, /pending Patch intent/i);
   assert.match(guide, /implicit one-file Patch Series/i);
   assert.match(guide, /stable source identity is the Patch File's full structural path/i);
+  assert.match(guide, /"patchSeries"/);
+  assert.match(guide, /"id": "example-capability"/);
+  assert.match(guide, /"members"/);
+  assert.match(guide, /preserves each series' declared member order/i);
+  assert.match(guide, /changing its stable `id` creates a different Artifact/i);
 });
 
 test("the primary user documentation links the source guide", () => {

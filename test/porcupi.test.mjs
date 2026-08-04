@@ -2489,6 +2489,28 @@ test("strict Composition receipts reject validly rebound platform, executable-pa
       },
       expected: /Malformed Managed Pi Composition receipt/,
     },
+    {
+      name: "mixed-source-commits",
+      mutate: (receipt) => {
+        receipt.patches = [
+          {
+            locator: "example.test/source",
+            seriesId: "coordinated-change",
+            commit: "a".repeat(40),
+            path: "patches/one.patch",
+            sha256: "b".repeat(64),
+          },
+          {
+            locator: "example.test/source",
+            seriesId: "coordinated-change",
+            commit: "c".repeat(40),
+            path: "patches/two.patch",
+            sha256: "d".repeat(64),
+          },
+        ];
+      },
+      expected: /Malformed Managed Pi Composition receipt/,
+    },
   ];
   for (const scenario of scenarios) {
     const scenarioRoot = join(temporaryRoot(), scenario.name);

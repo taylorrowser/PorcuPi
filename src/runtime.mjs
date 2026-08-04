@@ -264,6 +264,7 @@ function validatePatchIdentities(value, label) {
   let previousSeriesKey;
   const identities = new Set();
   const memberOwners = new Set();
+  const sourceCommits = new Map();
   for (const patch of value) {
     if (
       (!exactObject(patch, patchIdentityFields) && !exactObject(patch, legacyPatchIdentityFields))
@@ -281,10 +282,12 @@ function validatePatchIdentities(value, label) {
     if (
       identities.has(identity)
       || memberOwners.has(memberOwner)
+      || (sourceCommits.has(patch.locator) && sourceCommits.get(patch.locator) !== patch.commit)
       || (previousSeriesKey !== undefined && lexicalCompare(previousSeriesKey, seriesKey) > 0)
     ) fail(`Malformed ${label}`);
     identities.add(identity);
     memberOwners.add(memberOwner);
+    sourceCommits.set(patch.locator, patch.commit);
     previousSeriesKey = seriesKey;
   }
   return value;

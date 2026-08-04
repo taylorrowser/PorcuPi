@@ -4,8 +4,10 @@ import {
   failureBaseState,
   findFrontier,
   panesAreRunning,
+  isTransientInfrastructureFailure,
   parsePullRequestNumber,
   shouldDiagnoseResume,
+  validatedHeadMatches,
   validationFailureAction,
   validationPassed,
 } from "../scripts/frontier-loop.mjs";
@@ -69,4 +71,16 @@ test("a preserved validation failure resumes with diagnosis instead of another i
   assert.equal(shouldDiagnoseResume({ phase: "failed", lastError: "Validation failed 3 times for #45" }), true);
   assert.equal(shouldDiagnoseResume({ phase: "failed", lastError: "Remote checks failed for PR #45" }), false);
   assert.equal(shouldDiagnoseResume({ phase: "validating", lastError: null }), false);
+});
+
+test("transient GitHub infrastructure errors are retryable but authorization errors are not", () => {
+  assert.equal(isTransientInfrastructureFailure(new Error("gh repo view failed: HTTP 502: Please try resubmitting your request")), true);
+  assert.equal(isTransientInfrastructureFailure(new Error("GraphQL: Something went wrong while executing your query")), true);
+  assert.equal(isTransientInfrastructureFailure(new Error("gh auth status failed: authentication required")), false);
+});
+
+test("a validated branch can resume publication only at the identical commit", () => {
+  assert.equal(validatedHeadMatches({ validatedHead: "abc123" }, "abc123"), true);
+  assert.equal(validatedHeadMatches({ validatedHead: "abc123" }, "def456"), false);
+  assert.equal(validatedHeadMatches({}, "abc123"), false);
 });

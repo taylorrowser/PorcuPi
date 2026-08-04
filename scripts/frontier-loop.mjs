@@ -30,14 +30,23 @@ function shellQuote(value) {
 }
 
 function commandResult(command, args, options = {}) {
-  const result = spawnSync(command, args, {
-    cwd: options.cwd ?? repositoryRoot,
-    encoding: "utf8",
-    env: { ...process.env, ...options.environment },
-    maxBuffer: 50 * 1024 * 1024,
-  });
-  if (result.error) fail(`${command}: ${result.error.message}`);
-  return result;
+  const maximumAttempts = command === "gh" ? 5 : 1;
+  for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+    const result = spawnSync(command, args, {
+      cwd: options.cwd ?? repositoryRoot,
+      encoding: "utf8",
+      env: { ...process.env, ...options.environment },
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    if (result.error) fail(`${command}: ${result.error.message}`);
+    const detail = [result.stdout, result.stderr].filter(Boolean).join("\n");
+    if (result.status === 0 || !isTransientInfrastructureFailure(new Error(detail)) || attempt === maximumAttempts) {
+      return result;
+    }
+    process.stdout.write(`[${isoNow()}] Transient GitHub failure; retrying ${command} ${args.join(" ")} (${attempt}/${maximumAttempts})\n`);
+    sleep(attempt * 2_000);
+  }
+  fail(`${command} retry loop ended unexpectedly`);
 }
 
 function commandOutput(command, args, options = {}) {
@@ -140,6 +149,15 @@ export function shouldDiagnoseResume(state) {
   return state?.phase === "failed" && /^Validation failed/.test(state.lastError ?? "");
 }
 
+export function isTransientInfrastructureFailure(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(HTTP (?:408|409|425|429|5\d\d)|bad gateway|gateway timeout|connection (?:reset|refused)|network is unreachable|temporary failure|timed out|something went wrong while executing your query|please try resubmitting)/i.test(message);
+}
+
+export function validatedHeadMatches(state, head) {
+  return typeof state?.validatedHead === "string" && state.validatedHead === head;
+}
+
 function parentIssues(parent) {
   const parentData = ghJson(["issue", "view", String(parent)], { fields: "number,title,state,subIssues" });
   const children = parentData.subIssues?.nodes ?? [];
@@ -162,6 +180,8 @@ function viewerLogin() {
 }
 
 function defaultBranch() {
+  const local = commandResult("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+  if (local.status === 0) return local.stdout.trim().replace(/^origin\//, "");
   return commandOutput("gh", ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]);
 }
 
@@ -342,14 +362,41 @@ function publishAndMerge(issue, worktree, branch, logPath) {
   return prNumber;
 }
 
+function mergeValidatedIssue(issue, paths, state, prepared, issueLog) {
+  const head = commandOutput("git", ["rev-parse", "HEAD"], { cwd: prepared.worktree });
+  if (!validatedHeadMatches(state, head)) fail(`Validated branch changed before publication for #${issue.number}`);
+  state = writeState(paths, state, { phase: "merging", message: `Publishing and merging #${issue.number}` });
+  log(state.message);
+  const prNumber = publishAndMerge(issue, prepared.worktree, prepared.branch, issueLog);
+  state = writeState(paths, state, { pullRequest: prNumber, message: `Merged #${issue.number} in PR #${prNumber}` });
+  log(state.message);
+  removeWorktree(prepared.worktree, prepared.branch);
+  return writeState(paths, state, {
+    phase: "between-tickets",
+    currentIssue: null,
+    currentIssueTitle: null,
+    branch: null,
+    worktree: null,
+    issueLog: null,
+    pullRequest: null,
+    diagnosticEscalations: 0,
+    validatedHead: null,
+    lastError: null,
+  });
+}
+
 function processIssue(issue, paths, state) {
   const diagnoseOnResume = shouldDiagnoseResume(state);
   const prepared = prepareWorktree(issue, paths, state);
   const issueLog = join(paths.root, `issue-${issue.number}.log`);
+  const currentHead = commandOutput("git", ["rev-parse", "HEAD"], { cwd: prepared.worktree });
+  const resumeValidated = validatedHeadMatches(state, currentHead);
   let diagnosticEscalations = 0;
   state = writeState(paths, state, {
-    phase: prepared.resumed ? "resuming" : "implementing",
-    message: `${prepared.resumed ? "Resuming" : "Implementing"} #${issue.number}: ${issue.title}`,
+    phase: resumeValidated ? "merging" : prepared.resumed ? "resuming" : "implementing",
+    message: resumeValidated
+      ? `Retrying publication for validated #${issue.number}`
+      : `${prepared.resumed ? "Resuming" : "Implementing"} #${issue.number}: ${issue.title}`,
     currentIssue: issue.number,
     currentIssueTitle: issue.title,
     branch: prepared.branch,
@@ -357,6 +404,7 @@ function processIssue(issue, paths, state) {
     issueLog,
     pullRequest: null,
     diagnosticEscalations,
+    validatedHead: resumeValidated ? currentHead : null,
     lastError: null,
   });
   const login = viewerLogin();
@@ -364,12 +412,14 @@ function processIssue(issue, paths, state) {
     commandOutput("gh", ["issue", "edit", String(issue.number), "--add-assignee", "@me"]);
   }
   log(state.message);
+  if (resumeValidated) return mergeValidatedIssue(issue, paths, state, prepared, issueLog);
   if (diagnoseOnResume) {
     diagnosticEscalations += 1;
     state = writeState(paths, state, {
       phase: "diagnosing",
       diagnosticEscalations,
       message: `Independent diagnostic instance ${diagnosticEscalations}/${maximumDiagnosticEscalations} for #${issue.number}`,
+      validatedHead: null,
     });
     log(state.message);
     runAgent(prepared.worktree, diagnosisPrompt(issue, issueLog), issueLog, `independent diagnostic instance ${diagnosticEscalations}`);
@@ -389,22 +439,9 @@ function processIssue(issue, paths, state) {
     const commandsPass = commitCount > 0 && clean && validateWorktree(prepared.worktree, issueLog);
     const reviewPass = commandsPass && reviewWorktree(issue, prepared.worktree, issueLog);
     if (commandsPass && reviewPass) {
-      state = writeState(paths, state, { phase: "merging", message: `Publishing and merging #${issue.number}` });
-      log(state.message);
-      const prNumber = publishAndMerge(issue, prepared.worktree, prepared.branch, issueLog);
-      state = writeState(paths, state, { pullRequest: prNumber, message: `Merged #${issue.number} in PR #${prNumber}` });
-      log(state.message);
-      removeWorktree(prepared.worktree, prepared.branch);
-      return writeState(paths, state, {
-        phase: "between-tickets",
-        currentIssue: null,
-        currentIssueTitle: null,
-        branch: null,
-        worktree: null,
-        issueLog: null,
-        pullRequest: null,
-        diagnosticEscalations: 0,
-      });
+      const validatedHead = commandOutput("git", ["rev-parse", "HEAD"], { cwd: prepared.worktree });
+      state = writeState(paths, state, { validatedHead });
+      return mergeValidatedIssue(issue, paths, state, prepared, issueLog);
     }
 
     const action = validationFailureAction({
@@ -417,7 +454,11 @@ function processIssue(issue, paths, state) {
       fail(`Validation failed after ${diagnosticEscalations} independent diagnostic escalations for #${issue.number}; inspect ${issueLog}`);
     }
     if (action === "remediate") {
-      state = writeState(paths, state, { phase: "remediating", message: `Remediating validation findings for #${issue.number}` });
+      state = writeState(paths, state, {
+        phase: "remediating",
+        message: `Remediating validation findings for #${issue.number}`,
+        validatedHead: null,
+      });
       log(state.message);
       runAgent(prepared.worktree, remediationPrompt(issue, issueLog), issueLog, `remediation ${attempt} after diagnostic ${diagnosticEscalations}`);
       attempt += 1;
@@ -429,6 +470,7 @@ function processIssue(issue, paths, state) {
       phase: "diagnosing",
       diagnosticEscalations,
       message: `Independent diagnostic instance ${diagnosticEscalations}/${maximumDiagnosticEscalations} for #${issue.number}`,
+      validatedHead: null,
     });
     log(state.message);
     runAgent(prepared.worktree, diagnosisPrompt(issue, issueLog), issueLog, `independent diagnostic instance ${diagnosticEscalations}`);
@@ -454,25 +496,38 @@ function runLoop(parent) {
   });
   try {
     while (!stopped(paths)) {
-      let issues = parentIssues(parent);
-      const open = issues.filter((issue) => issue.state === "OPEN");
-      if (open.length === 0) {
-        state = writeState(paths, state, { phase: "complete", message: `All ${issues.length} child tickets are closed`, completedAt: isoNow(), lastError: null });
-        log(state.message);
-        return;
+      try {
+        const issues = parentIssues(parent);
+        const open = issues.filter((issue) => issue.state === "OPEN");
+        if (open.length === 0) {
+          state = writeState(paths, state, { phase: "complete", message: `All ${issues.length} child tickets are closed`, completedAt: isoNow(), lastError: null });
+          log(state.message);
+          return;
+        }
+        let issue;
+        if (state.currentIssue && state.worktree && existsSync(state.worktree)) {
+          issue = issues.find((candidate) => candidate.number === state.currentIssue && candidate.state === "OPEN");
+        }
+        issue ??= findFrontier(issues);
+        if (!issue) {
+          state = writeState(paths, state, { phase: "waiting", message: `${open.length} tickets remain, but no unassigned frontier ticket is available` });
+          log(`${state.message}; polling again in ${defaultPollSeconds}s`);
+          sleep(defaultPollSeconds * 1_000);
+          continue;
+        }
+        state = processIssue(issue, paths, state);
+      } catch (error) {
+        if (!isTransientInfrastructureFailure(error) || stopped(paths)) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        state = failureBaseState(state, readState(paths));
+        state = writeState(paths, state, {
+          phase: "retrying-infrastructure",
+          message: "Transient infrastructure failure; retrying automatically in 30 seconds",
+          lastError: message,
+        });
+        log(`${state.message}: ${message}`);
+        sleep(30_000);
       }
-      let issue;
-      if (state.currentIssue && state.worktree && existsSync(state.worktree)) {
-        issue = issues.find((candidate) => candidate.number === state.currentIssue && candidate.state === "OPEN");
-      }
-      issue ??= findFrontier(issues);
-      if (!issue) {
-        state = writeState(paths, state, { phase: "waiting", message: `${open.length} tickets remain, but no unassigned frontier ticket is available` });
-        log(`${state.message}; polling again in ${defaultPollSeconds}s`);
-        sleep(defaultPollSeconds * 1_000);
-        continue;
-      }
-      state = processIssue(issue, paths, state);
     }
     state = writeState(paths, state, { phase: "stopped", message: "Stopped by request" });
     log(state.message);

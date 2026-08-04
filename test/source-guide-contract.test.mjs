@@ -17,7 +17,7 @@ test("the source guide covers consuming and authoring every PorcuPi artifact kin
     "Skills",
     "Prompt templates",
     "Themes",
-    "Patches",
+    "Patch Series and Patch Files",
     "Validate the source",
     "Publish and update",
     "Trust and project scope",
@@ -36,6 +36,8 @@ test("the source guide covers consuming and authoring every PorcuPi artifact kin
   assert.match(guide, /porcupi apply/);
   assert.match(guide, /exact commit/i);
   assert.match(guide, /pending Patch intent/i);
+  assert.match(guide, /implicit one-file Patch Series/i);
+  assert.match(guide, /stable source identity is the Patch File's full structural path/i);
 });
 
 test("the primary user documentation links the source guide", () => {

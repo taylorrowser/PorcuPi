@@ -1041,6 +1041,7 @@ test("public launch, verify, and installer retry converge across upgrade publica
     "upgrade-source-runtime-retired",
     "upgrade-target-runtime-published",
     "upgrade-target-runtime-receipt-written",
+    "upgrade-selection-intent-written",
     "upgrade-activation-written",
     "upgrade-stable-launcher-published",
     "upgrade-stable-launcher-receipt-written",
@@ -1289,7 +1290,19 @@ test("the packed release preserves active Patches and scoped Pi resources throug
   assert.match(upgraded.stdout, new RegExp(`Extension .*:extensions/upgrade\\.ts \\[project: ${canonicalProject.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]`));
   assert.match(upgraded.stdout, /Skill .*:skills\/upgrade-skill\/SKILL\.md \[global\]/);
   assert.match(upgraded.stdout, /Pi package lifecycle: retained under Pi ownership/);
-  assert.deepEqual(readFileSync(join(managedRoot, "state", "selections.json")), selectionsBefore);
+  const migratedSelections = JSON.parse(readFileSync(join(managedRoot, "state", "selections.json"), "utf8"));
+  assert.equal(JSON.parse(selectionsBefore).schemaVersion, 1);
+  assert.equal(migratedSelections.schemaVersion, 2);
+  const migratedSeries = migratedSelections.sources[0].artifacts.find((artifact) => artifact.kind === "PatchSeries");
+  assert.deepEqual(migratedSeries, {
+    kind: "PatchSeries",
+    id: "patches/selected.patch",
+    members: [{
+      commit: repository.commit,
+      path: "patches/selected.patch",
+      sha256: migratedSeries.members[0].sha256,
+    }],
+  });
   assert.deepEqual(readFileSync(join(home, ".pi", "agent", "settings.json")), globalSettingsBefore);
   assert.deepEqual(readFileSync(join(project, ".pi", "settings.json")), projectSettingsBefore);
   assert.deepEqual(readFileSync(packageLog), packageLogBefore);
@@ -1299,7 +1312,10 @@ test("the packed release preserves active Patches and scoped Pi resources throug
 
   const targetActivation = JSON.parse(readFileSync(activationPath, "utf8"));
   assert.deepEqual(targetActivation.previous, historicalActivation.active);
-  assert.deepEqual(targetActivation.active.patches, historicalActivation.active.patches);
+  assert.deepEqual(targetActivation.active.patches, historicalActivation.active.patches.map((patch) => ({
+    ...patch,
+    seriesId: patch.path,
+  })));
   const targetReceipt = JSON.parse(readFileSync(
     join(managedRoot, "receipts", `${targetActivation.active.compositionId}.json`),
     "utf8",
@@ -1346,10 +1362,30 @@ test("the packed release activates preserved pending Patch Selection Intent", as
   assert.match(cancelled.stdout, /Selected Patches \(1\):/);
   assert.equal(treeDigest(managedRoot), beforeCancellation);
 
-  const upgraded = runPackedInstaller(artifact, home, "0d0d0d", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
+  const interrupted = runPackedInstaller(artifact, home, "0d0d0d", {
+    PTY_WAIT_FOR: "1 of 3 — Upgrade",
+    PORCUPI_TEST_FAULT: "upgrade-selection-intent-written",
+  });
+  assert.equal(interrupted.signal, "SIGKILL");
+  assert.deepEqual(JSON.parse(readFileSync(activationPath, "utf8")), historicalActivation);
+  const migratedDuringInterruption = JSON.parse(readFileSync(join(managedRoot, "state", "selections.json"), "utf8"));
+  assert.equal(migratedDuringInterruption.schemaVersion, 2);
+
+  const upgraded = runPackedInstaller(artifact, home, "", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
   assert.equal(upgraded.status, 0, upgraded.stderr || upgraded.stdout);
-  assert.match(upgraded.stdout, /Patch Selection Intent: pending — differs from the active Patch selection/);
-  assert.deepEqual(readFileSync(join(managedRoot, "state", "selections.json")), selectionsBefore);
+  assert.match(upgraded.stdout, /Recovered interrupted PorcuPi upgrade/);
+  const migratedSelections = JSON.parse(readFileSync(join(managedRoot, "state", "selections.json"), "utf8"));
+  assert.equal(JSON.parse(selectionsBefore).schemaVersion, 1);
+  assert.equal(migratedSelections.schemaVersion, 2);
+  assert.deepEqual(migratedSelections.sources[0].artifacts[0], {
+    kind: "PatchSeries",
+    id: "patches/pending.patch",
+    members: [{
+      commit: repository.commit,
+      path: "patches/pending.patch",
+      sha256: migratedSelections.sources[0].artifacts[0].members[0].sha256,
+    }],
+  });
   const targetActivation = JSON.parse(readFileSync(activationPath, "utf8"));
   assert.deepEqual(targetActivation.previous, historicalActivation.active);
   assert.equal(targetActivation.active.patches.length, 1);
@@ -1459,7 +1495,10 @@ test("a selected Patch readiness blocker names the exact Patch and leaves the in
   const managedRoot = dataRoot(home);
   const before = treeDigest(managedRoot);
   const selections = JSON.parse(readFileSync(join(managedRoot, "state", "selections.json"), "utf8"));
-  const selectedPatch = selections.sources[0].artifacts.find((candidate) => candidate.kind === "Patch");
+  const selectedArtifact = selections.sources[0].artifacts.find((candidate) => (
+    candidate.kind === "Patch" || candidate.kind === "PatchSeries"
+  ));
+  const selectedPatch = selectedArtifact.kind === "Patch" ? selectedArtifact : selectedArtifact.members[0];
 
   const failed = runPackedInstaller(artifact, home, "", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
 
@@ -1968,7 +2007,7 @@ test("porcupi uninstall removes only receipt-proven state and retains Pi resourc
   assert.equal(runInstaller(release, home, "0d790d0d", environment).status, 0);
   const project = join(root, "project");
   mkdirSync(project);
-  const repository = createResourceRepository(root);
+  const repository = createMixedArtifactRepository(root);
   const locator = await serveGitRepository(root, repository);
   const add = runPorcuPi(home, ["add", `${locator}@main`], "616e206a206a206a206e0d", environment, project);
   assert.equal(add.status, 0, add.stderr || add.stdout);
@@ -1991,6 +2030,7 @@ test("porcupi uninstall removes only receipt-proven state and retains Pi resourc
   assert.match(uninstall.stdout, /1 of 3 — Owned state/);
   assert.match(uninstall.stdout, /2 of 3 — Pi resources/);
   assert.match(uninstall.stdout, /3 of 3 — Review/);
+  assert.match(uninstall.stdout, /Patch Selection Intent entries: 1/);
   assert.match(uninstall.stdout, /Pi-owned resource groups that will remain: 1/);
   assert.match(uninstall.stdout, /Uninstalled receipt-proven PorcuPi state/);
   assert.equal(existsSync(dataRoot(home)), false);
@@ -2385,6 +2425,19 @@ test("strict Composition receipts reject validly rebound platform, executable-pa
       mutate: (receipt) => { receipt.payload[0] = { ...receipt.payload[0], path: "../outside" }; },
       expected: /Malformed Managed Pi Composition receipt/,
     },
+    {
+      name: "unsafe-patch-series-identity",
+      mutate: (receipt) => {
+        receipt.patches = [{
+          locator: "example.test/source",
+          seriesId: "patches/unsafe\n.patch",
+          commit: "a".repeat(40),
+          path: "patches/member.patch",
+          sha256: "b".repeat(64),
+        }];
+      },
+      expected: /Malformed Managed Pi Composition receipt/,
+    },
   ];
   for (const scenario of scenarios) {
     const scenarioRoot = join(temporaryRoot(), scenario.name);
@@ -2441,7 +2494,7 @@ test("porcupi add pins and filters all four Pi resource kinds through Pi", async
     themes: ["themes/fixture.json"],
   }]);
   const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
-  assert.equal(selections.schemaVersion, 1);
+  assert.equal(selections.schemaVersion, 2);
   assert.deepEqual(selections.sources, [{
     locator: canonicalLocator,
     commit: repository.commit,
@@ -2471,7 +2524,7 @@ test("porcupi add saves Patches and Pi resources together while delegating only 
   const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
 
   assert.equal(add.status, 0, add.stderr || add.stdout);
-  assert.match(add.stdout, /4 Pi resource\(s\), 1 Patch\(es\) selected/);
+  assert.match(add.stdout, /4 Pi resource\(s\), 1 Patch Series selected/);
   const settings = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8"));
   assert.deepEqual(settings.packages[0].extensions, ["extensions/fixture.ts"]);
   assert.deepEqual(settings.packages[0].skills, ["skills/fixture-skill/SKILL.md"]);
@@ -2479,8 +2532,16 @@ test("porcupi add saves Patches and Pi resources together while delegating only 
   assert.deepEqual(settings.packages[0].themes, ["themes/fixture.json"]);
   const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
   assert.equal(selections.sources[0].artifacts.length, 5);
-  const patch = selections.sources[0].artifacts.find((artifact) => artifact.kind === "Patch");
-  assert.deepEqual(Object.keys(patch).sort(), ["kind", "path", "sha256"]);
+  const patch = selections.sources[0].artifacts.find((artifact) => artifact.kind === "PatchSeries");
+  assert.deepEqual(patch, {
+    kind: "PatchSeries",
+    id: "patches/nested/mixed.patch",
+    members: [{
+      commit: repository.commit,
+      path: "patches/nested/mixed.patch",
+      sha256: patch.members[0].sha256,
+    }],
+  });
   assert.deepEqual(readFileSync(activationPath), activationBefore);
 });
 
@@ -2499,25 +2560,42 @@ test("porcupi add discovers only exact regular nested Patches and leaves them pe
   const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
 
   assert.equal(add.status, 0, add.stderr || add.stdout);
-  assert.match(add.stdout, /Patch\s+patches\/alpha\.patch/);
-  assert.match(add.stdout, /Patch\s+patches\/nested\/beta\.patch/);
+  assert.match(add.stdout, /Patch Series\s+patches\/alpha\.patch/);
+  assert.match(add.stdout, /Patch Series\s+patches\/nested\/beta\.patch/);
   assert.match(add.stdout, /Rejected patches\/symbolic\.patch: Patch candidate is symbolic/);
   assert.match(add.stdout, /Rejected patches\/submodule: Patch candidate is a Git submodule/);
   assert.doesNotMatch(add.stdout, /not-a-patch\.txt/);
-  assert.match(add.stdout, /2 Patch\(es\).*no Installation Scope|Patches do not have an Installation Scope/);
+  assert.match(add.stdout, /2 Patch Series selected.*no Installation Scope|Patch Series do not have an Installation Scope/);
   assert.match(add.stdout, /Patch Selection Intent is pending `porcupi apply`/);
   assert.deepEqual(readFileSync(activationPath), activationBefore);
   assert.equal(existsSync(join(home, ".pi", "agent", "settings.json")), false);
 
   const canonicalLocator = `127.0.0.1:${new URL(locator).port}/owner/resources`;
   const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
+  assert.equal(selections.schemaVersion, 2);
   assert.deepEqual(selections.sources, [{
     locator: canonicalLocator,
     commit: repository.commit,
     packageSource: `git:${locator}@${repository.commit}`,
     artifacts: [
-      { kind: "Patch", path: "patches/alpha.patch", sha256: "15adc195c931723b85b314beb297d55a1cab3becf2ed2f2e8cca653297c45d8f" },
-      { kind: "Patch", path: "patches/nested/beta.patch", sha256: "fa01de4182e25ce6287e9f1bfda7196c0f36438b19b244c3938497a8f970bf03" },
+      {
+        kind: "PatchSeries",
+        id: "patches/alpha.patch",
+        members: [{
+          commit: repository.commit,
+          path: "patches/alpha.patch",
+          sha256: "15adc195c931723b85b314beb297d55a1cab3becf2ed2f2e8cca653297c45d8f",
+        }],
+      },
+      {
+        kind: "PatchSeries",
+        id: "patches/nested/beta.patch",
+        members: [{
+          commit: repository.commit,
+          path: "patches/nested/beta.patch",
+          sha256: "fa01de4182e25ce6287e9f1bfda7196c0f36438b19b244c3938497a8f970bf03",
+        }],
+      },
     ],
   }]);
 });
@@ -2540,7 +2618,8 @@ test("porcupi apply builds and atomically activates the exact ordered Patch seri
   const secondServer = join(root, "second-server");
   mkdirSync(secondServer);
   const secondLocator = await serveGitRepository(secondServer, secondRepository);
-  assert.equal(runPorcuPi(home, ["add", `${secondLocator}@main`], "616e6e0d").status, 0);
+  const secondAdd = runPorcuPi(home, ["add", `${secondLocator}@main`], "616e6e0d");
+  assert.equal(secondAdd.status, 0, secondAdd.stderr || secondAdd.stdout);
   const rootPath = dataRoot(home);
   const activationPath = join(rootPath, "state", "activation.json");
   const activationBefore = JSON.parse(readFileSync(activationPath, "utf8"));
@@ -2891,6 +2970,9 @@ test("porcupi apply rejects digest drift and sequential preflight failure withou
   const missingCommit = "f".repeat(40);
   selections.sources[0].commit = missingCommit;
   selections.sources[0].packageSource = originalPackageSource.replace(`@${originalCommit}`, `@${missingCommit}`);
+  for (const series of selections.sources[0].artifacts.filter((artifact) => artifact.kind === "PatchSeries")) {
+    for (const member of series.members) member.commit = missingCommit;
+  }
   writeFileSync(selectionsPath, `${JSON.stringify(selections, null, 2)}\n`);
   const missingSource = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
   assert.notEqual(missingSource.status, 0);
@@ -2900,8 +2982,11 @@ test("porcupi apply rejects digest drift and sequential preflight failure withou
 
   selections.sources[0].commit = originalCommit;
   selections.sources[0].packageSource = originalPackageSource;
-  const originalDigest = selections.sources[0].artifacts[0].sha256;
-  selections.sources[0].artifacts[0].sha256 = "0".repeat(64);
+  for (const series of selections.sources[0].artifacts.filter((artifact) => artifact.kind === "PatchSeries")) {
+    for (const member of series.members) member.commit = originalCommit;
+  }
+  const originalDigest = selections.sources[0].artifacts[0].members[0].sha256;
+  selections.sources[0].artifacts[0].members[0].sha256 = "0".repeat(64);
   writeFileSync(selectionsPath, `${JSON.stringify(selections, null, 2)}\n`);
 
   const mismatch = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
@@ -2910,7 +2995,7 @@ test("porcupi apply rejects digest drift and sequential preflight failure withou
   assert.doesNotMatch(mismatch.stdout, /git apply --check|npm ci/);
   assert.deepEqual(readFileSync(activationPath), activationBefore);
 
-  selections.sources[0].artifacts[0].sha256 = originalDigest;
+  selections.sources[0].artifacts[0].members[0].sha256 = originalDigest;
   writeFileSync(selectionsPath, `${JSON.stringify(selections, null, 2)}\n`);
   const preflight = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
   assert.notEqual(preflight.status, 0);
@@ -3068,16 +3153,20 @@ test("porcupi manage removes Patch intent without giving Patches an Installation
   const manage = runPorcuPi(home, ["manage"], "6a206e6e0d", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
 
   assert.equal(manage.status, 0, manage.stderr || manage.stdout);
-  assert.match(manage.stdout, /Patches do not have an Installation Scope and are not listed on this page/);
-  assert.match(manage.stdout, /Remove Patch.*patches\/nested\/beta\.patch/);
+  assert.match(manage.stdout, /Patch Series do not have an Installation Scope and are not listed on this page/);
+  assert.match(manage.stdout, /Remove Patch Series.*patches\/nested\/beta\.patch/);
   assert.match(manage.stdout, /Patch Selection Intent is pending `porcupi apply`/);
   assert.deepEqual(readFileSync(activationPath), activationBefore);
   assert.equal(existsSync(join(home, ".pi", "agent", "settings.json")), false);
   let selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
   assert.deepEqual(selections.sources[0].artifacts, [{
-    kind: "Patch",
-    path: "patches/alpha.patch",
-    sha256: "15adc195c931723b85b314beb297d55a1cab3becf2ed2f2e8cca653297c45d8f",
+    kind: "PatchSeries",
+    id: "patches/alpha.patch",
+    members: [{
+      commit: repository.commit,
+      path: "patches/alpha.patch",
+      sha256: "15adc195c931723b85b314beb297d55a1cab3becf2ed2f2e8cca653297c45d8f",
+    }],
   }]);
 
   const selectionsBeforeCancellation = readFileSync(selectionsPath);
@@ -3125,19 +3214,19 @@ test("re-adding a Patch source reviews exact commit and digest replacement witho
   assert.match(replacement.stdout, /Patch bytes changed: patches\/alpha\.patch .*15adc195c931.*a56651b16b4c/);
   let selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
   assert.equal(selections.sources[0].commit, repository.commit);
-  assert.equal(selections.sources[0].artifacts.find((artifact) => artifact.path === "patches/alpha.patch").sha256, "a56651b16b4c629952286285ac23b9a490bd10e88bcf2430b079bbc917b3b449");
+  assert.equal(selections.sources[0].artifacts.find((artifact) => artifact.id === "patches/alpha.patch").members[0].sha256, "a56651b16b4c629952286285ac23b9a490bd10e88bcf2430b079bbc917b3b449");
   const settings = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8"));
   assert.match(settings.packages[0].source, new RegExp(`@${repository.commit}$`));
   assert.deepEqual(settings.packages[0].extensions, ["extensions/alongside.ts"]);
   assert.deepEqual(readFileSync(activationPath), activationBefore);
 
-  const patchIndex = selections.sources[0].artifacts.findIndex((artifact) => artifact.path === "patches/alpha.patch");
-  selections.sources[0].artifacts[patchIndex].sha256 = "0".repeat(64);
+  const patchIndex = selections.sources[0].artifacts.findIndex((artifact) => artifact.id === "patches/alpha.patch");
+  selections.sources[0].artifacts[patchIndex].members[0].sha256 = "0".repeat(64);
   writeFileSync(selectionsPath, `${JSON.stringify(selections, null, 2)}\n`);
   const mismatch = runPorcuPi(home, ["add", `${locator}@main`], "");
   assert.notEqual(mismatch.status, 0);
   assert.match(mismatch.stdout, /saved Patch digest does not match its exact Source Repository commit/i);
-  assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].artifacts[patchIndex].sha256, "0".repeat(64));
+  assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].artifacts[patchIndex].members[0].sha256, "0".repeat(64));
   assert.deepEqual(readFileSync(activationPath), activationBefore);
 });
 
@@ -3184,7 +3273,7 @@ test("invalid Patch metadata is prominently ignored as a whole without suppressi
   assert.match(contradictory.stdout, /duplicate Patch entry patches\/alpha\.patch/);
   assert.doesNotMatch(contradictory.stdout, /First claim|Contradictory claim/);
   const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
-  assert.deepEqual(selections.sources[0].artifacts.map((artifact) => artifact.path), [
+  assert.deepEqual(selections.sources[0].artifacts.map((artifact) => artifact.id), [
     "patches/alpha.patch",
     "patches/nested/beta.patch",
   ]);
@@ -3233,9 +3322,13 @@ test("valid Patch metadata overlays display and blocks declared Pi Base incompat
   assert.match(add.stdout, /Patch metadata entry patches\/missing\.patch does not address a discovered regular Patch/);
   const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
   assert.deepEqual(selections.sources[0].artifacts, [{
-    kind: "Patch",
-    path: "patches/alpha.patch",
-    sha256: "15adc195c931723b85b314beb297d55a1cab3becf2ed2f2e8cca653297c45d8f",
+    kind: "PatchSeries",
+    id: "patches/alpha.patch",
+    members: [{
+      commit: repository.commit,
+      path: "patches/alpha.patch",
+      sha256: "15adc195c931723b85b314beb297d55a1cab3becf2ed2f2e8cca653297c45d8f",
+    }],
   }]);
 });
 

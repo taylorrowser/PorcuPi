@@ -5,7 +5,7 @@ This guide explains how to consume a Source Repository with PorcuPi v0.1.0 and h
 PorcuPi has two intentionally different integration paths:
 
 - **Pi resources**—Extensions, Skills, prompt templates, and Themes—remain ordinary Pi package resources. PorcuPi presents individual choices and scopes, then delegates checkout, dependencies, configuration, loading, and project trust to Pi's public package lifecycle.
-- **Patches** are declarative Git patch files selected as pending PorcuPi intent. Only `porcupi apply` composes selected Patches into a new immutable Managed Pi Composition.
+- **Patch Series** are selectable Patch Artifacts. Each convention-discovered standalone Patch File is implicitly a one-file Patch Series. Only `porcupi apply` composes selected series into a new immutable Managed Pi Composition.
 
 A repository may contain either kind or both. There is no PorcuPi package registry, dependency graph, source-defined build hook, or automatic relationship between a resource and a Patch.
 
@@ -39,14 +39,14 @@ The guided add flow shows every supported Artifact PorcuPi discovers at that exa
 - Skill
 - Prompt
 - Theme
-- Patch
+- Patch Series
 
-Select only the Artifacts you reviewed. Resources receive an Installation Scope on the next page. Patches do not have scope because they are not Pi packages.
+Select only the Artifacts you reviewed. Resources receive an Installation Scope on the next page. Patch Series do not have scope because they are not Pi packages.
 
 On confirmation:
 
 - selected resources are written as exact-path filters in Pi's package settings and realized through Pi's public `install` command; and
-- selected Patches are saved as exact repository, commit, path, and SHA-256 Selection Intent.
+- each selected implicit Patch Series is saved with its structural-path series identity and its exact member commit, path, and SHA-256.
 
 Cancellation or a failed Pi package operation saves no replacement intent. Re-adding the same canonical repository reviews and replaces that repository's complete previous selection rather than silently merging it.
 
@@ -62,13 +62,13 @@ PorcuPi does not grant or remember project trust and never answers Pi's trust pr
 
 ### 4. Apply pending Patches
 
-Adding or managing Patches never rebuilds Managed Pi. If selection differs from the active Composition, PorcuPi reports **pending Patch intent**. Review and compose it explicitly:
+Adding or managing Patch Series never rebuilds Managed Pi. If selection differs from the active Composition, PorcuPi reports **pending Patch intent**. Review and compose it explicitly:
 
 ```sh
 porcupi apply
 ```
 
-Apply shows the complete cross-repository order and exact identities, revalidates the source commit and Patch digests, sequentially preflights the same bytes, builds through PorcuPi's fixed recipe, verifies the candidate, and only then activates it. A failure leaves the active and previous Compositions unchanged.
+Apply deterministically flattens the selected implicit series by canonical Source Repository locator and structural-path series identity. It revalidates each exact member commit, path, and digest, sequentially preflights the same bytes, builds through PorcuPi's fixed recipe, verifies the candidate, and only then activates it. A failure leaves the active and previous Compositions unchanged.
 
 Resource-only changes do not require `porcupi apply` because Pi owns their package lifecycle.
 
@@ -239,9 +239,9 @@ Without a root manifest, PorcuPi recursively discovers `.json` files beneath `th
 
 Use the root `pi.themes` manifest array for nonconventional locations or an explicit subset. Start from Pi v0.81.1's [Theme guide and examples](https://github.com/earendil-works/pi/blob/v0.81.1/packages/coding-agent/docs/themes.md) rather than inventing a partial color object.
 
-## Patches
+## Patch Series and Patch Files
 
-A Patch is a declarative Git-compatible file that changes PorcuPi's exact Pi Base. It is not an Extension, a script, or a package lifecycle hook.
+A Patch File is a declarative Git-compatible file that changes PorcuPi's exact Pi Base. It is not an Extension, a script, or a package lifecycle hook. Every unclaimed convention-discovered Patch File is represented as one implicit one-file Patch Series. The series' stable source identity is the Patch File's full structural path; PorcuPi does not infer grouping from filenames or adjacent files.
 
 ### Target the exact Pi Base
 
@@ -264,7 +264,7 @@ git add --all
 git commit -m "feat: add example capability"
 ```
 
-Keep each selectable Patch coherent. If a change adds or alters npm dependencies, include the corresponding lockfile changes so PorcuPi's fixed `npm ci` build remains valid. A Patch cannot replace PorcuPi's dependency, build, hydration, conformance, or smoke commands.
+Keep each standalone Patch File coherent because it is one selectable Patch Series. If a change adds or alters npm dependencies, include the corresponding lockfile changes so PorcuPi's fixed `npm ci` build remains valid. A Patch File cannot replace PorcuPi's dependency, build, hydration, conformance, or smoke commands.
 
 ### Generate Patch files
 
@@ -280,7 +280,7 @@ git -C "$SOURCE" add patches/0001-add-example-capability.patch
 
 PorcuPi recursively discovers only tracked files whose paths begin with `patches/` and end with `.patch`. Candidates must be regular Git mode `100644` or `100755` files in the checkout. Symbolic links, submodules, special modes, unsafe/control paths, non-regular files, and repository-boundary escapes are rejected.
 
-Names determine order. PorcuPi orders the complete selected series by canonical Source Repository locator and then full source-relative Patch path. Within one source, use zero-padded names such as `0001-...patch`, `0002-...patch`, and put prerequisite changes first. There is no dependency metadata or order override.
+For implicit series, structural paths determine both series identity and flattening order. PorcuPi orders them by canonical Source Repository locator and then full source-relative Patch path, preserving the accepted standalone-Patch behavior. Within one source, use zero-padded names such as `0001-...patch`, `0002-...patch`, and put prerequisite changes first. There is no inferred grouping, dependency metadata, or order override.
 
 ### Preflight the intended series
 
@@ -303,7 +303,7 @@ This is a fast source check, not a substitute for `porcupi apply`. The authorita
 
 ### Add optional Patch metadata
 
-Patches need no manifest to be discovered. An optional regular root `porcupi.json` may add only display text and exact Pi Base compatibility:
+Standalone Patch Files need no manifest to become implicit Patch Series. An optional regular root `porcupi.json` may add only display text and exact Pi Base compatibility to those one-file series:
 
 ```json
 {
@@ -331,7 +331,7 @@ The schema is deliberately closed:
 - compatibility arrays must be nonempty sets of unique exact release versions or full Git object IDs; and
 - when both compatibility dimensions are present, both must match PorcuPi's Pi Base.
 
-A declared mismatch disables that Patch in selection. Omitted compatibility leaves PorcuPi's fixed preflight/build pipeline authoritative. Metadata never creates a Patch Artifact and cannot declare dependencies, hooks, scripts, ordering, ranges, recipes, verifiers, or force behavior.
+A declared mismatch disables that implicit Patch Series in selection. Omitted compatibility leaves PorcuPi's fixed preflight/build pipeline authoritative. Metadata never creates a Patch Artifact and cannot declare dependencies, hooks, scripts, grouping, ordering, ranges, recipes, verifiers, or force behavior.
 
 Malformed JSON, unknown fields, duplicate entries, unsafe values, or invalid compatibility invalidate and visibly ignore the whole metadata overlay while leaving convention-discovered Patches available. A valid entry naming a file that was not discovered is diagnosed and ignored individually.
 
@@ -394,7 +394,7 @@ For an update:
 4. publish a new immutable commit; and
 5. tell users to run `porcupi add <source>@<new-commit>` and review the complete replacement.
 
-Changing Patch bytes changes their SHA-256 identity. Moving a resource changes its structural identity. PorcuPi surfaces those changes rather than silently migrating saved intent. Do not rewrite a published commit or tell users that a moving branch is equivalent to an exact release.
+Changing Patch bytes changes the exact member digest. Moving a standalone Patch File changes its implicit Patch Series identity because that identity is the structural path; moving a resource likewise changes its structural identity. PorcuPi surfaces those changes rather than silently migrating saved intent. Do not rewrite a published commit or tell users that a moving branch is equivalent to an exact release.
 
 ## Trust and project scope
 

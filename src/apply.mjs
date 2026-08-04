@@ -19,6 +19,7 @@ import {
 import { runGuidedTerminal, truncateForTerminal, windowAround } from "./guided-terminal.mjs";
 import { cleanupRetainedCompositions, withLifecycleLock } from "./lifecycle.mjs";
 import {
+  expandedPatchSnapshot,
   patchPendingMessage,
   patchSelectionSnapshot,
   readSelections,
@@ -74,12 +75,12 @@ function confirmApply(patches, input, output) {
       const render = () => {
         output.write("\x1b[2J\x1b[H");
         output.write("Apply selected Patches\n\n");
-        output.write(`Deterministic series: ${patches.length} Patch${patches.length === 1 ? "" : "es"}\n`);
+        output.write(`Deterministic flattening: ${patches.length} Patch File${patches.length === 1 ? "" : "s"}\n`);
         if (patches.length === 0) output.write("  (zero Patches — compose the exact Pi Base alone)\n");
         const visible = windowAround(output, cursor, patches.length, 13);
         for (let index = visible.start; index < visible.end; index += 1) {
           const patch = patches[index];
-          output.write(`${truncateForTerminal(output, `${index === cursor ? "›" : " "} ${patch.locator} · ${patch.path} · sha256:${patch.sha256.slice(0, 12)}`)}\n`);
+          output.write(`${truncateForTerminal(output, `${index === cursor ? "›" : " "} ${patch.locator} · ${patch.seriesId} · ${patch.path} · sha256:${patch.sha256.slice(0, 12)}`)}\n`);
         }
         if (patches.length > 0) output.write(`  ${visible.start} above · ${patches.length - visible.end} below\n`);
         output.write("\nThe fixed build commands and Patch-modified source run with your user authority.\n");
@@ -103,7 +104,7 @@ function receiptMatchesApply(receipt, lock, patches) {
     && canonicalJson(receipt.piBase) === canonicalJson(lock)
     && canonicalJson(receipt.recipe) === canonicalJson(compositionRecipe)
     && receipt.platform === platformIdentity()
-    && canonicalJson(receipt.patches) === canonicalJson(patches);
+    && canonicalJson(expandedPatchSnapshot(receipt.patches)) === canonicalJson(patches);
 }
 
 async function applyPatchesLocked({
@@ -127,7 +128,7 @@ async function applyPatchesLocked({
     return { applied: false, cancelled: true };
   }
 
-  if (canonicalJson(active.activation.active.patches) === canonicalJson(patches)) {
+  if (canonicalJson(expandedPatchSnapshot(active.activation.active.patches)) === canonicalJson(patches)) {
     const receipt = verifyPublishedComposition(paths, active.activation.active.compositionId);
     if (!receiptMatchesApply(receipt, lock, patches)) fail("Active Managed Pi Composition does not match the current fixed apply identity");
     output.write(`\nVerified active Managed Pi Composition ${receipt.compositionId}; no rebuild was needed.\n`);

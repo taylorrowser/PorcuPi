@@ -13,7 +13,9 @@ import {
 const installationScopes = new Set(["global", "project"]);
 const selectionRootFields = new Set(["schemaVersion", "sources"]);
 const selectionSourceFields = new Set(["locator", "commit", "packageSource", "artifacts"]);
-const patchFields = new Set(["kind", "path", "sha256"]);
+const legacyPatchFields = new Set(["kind", "path", "sha256"]);
+const patchSeriesFields = new Set(["kind", "id", "members"]);
+const patchMemberFields = new Set(["commit", "path", "sha256"]);
 const globalResourceFields = new Set(["kind", "path", "scope"]);
 const projectResourceFields = new Set(["kind", "path", "scope", "projectRoot"]);
 const resourceKeys = {
@@ -27,19 +29,44 @@ function lexicalCompare(left, right) {
   return left === right ? 0 : left < right ? -1 : 1;
 }
 
+export function isPatchSeries(artifact) {
+  return artifact?.kind === "PatchSeries";
+}
+
 export function artifactKey(artifact) {
-  return `${artifact.kind}\0${artifact.path}`;
+  return `${artifact.kind}\0${isPatchSeries(artifact) ? artifact.id : artifact.path}`;
+}
+
+export function artifactStructuralIdentity(artifact) {
+  return isPatchSeries(artifact) ? artifact.id : artifact.path;
+}
+
+function expandedPatchIdentity(patch) {
+  return Object.hasOwn(patch, "seriesId") ? patch : { ...patch, seriesId: patch.path };
+}
+
+export function expandedPatchSnapshot(patches) {
+  return (patches ?? []).map(expandedPatchIdentity);
 }
 
 export function patchSelectionSnapshot(sources) {
   return sources.flatMap((source) => source.artifacts
-    .filter((artifact) => artifact.kind === "Patch")
-    .map((artifact) => ({ locator: source.locator, commit: source.commit, path: artifact.path, sha256: artifact.sha256 })))
-    .sort((left, right) => lexicalCompare(`${left.locator}\0${left.path}`, `${right.locator}\0${right.path}`));
+    .filter(isPatchSeries)
+    .flatMap((series) => series.members.map((member) => ({
+      locator: source.locator,
+      seriesId: series.id,
+      commit: member.commit,
+      path: member.path,
+      sha256: member.sha256,
+    }))))
+    .sort((left, right) => lexicalCompare(
+      `${left.locator}\0${left.seriesId}\0${left.path}`,
+      `${right.locator}\0${right.seriesId}\0${right.path}`,
+    ));
 }
 
 export function patchIntentPending(sources, activePatches) {
-  return canonicalJson(patchSelectionSnapshot(sources)) !== canonicalJson(activePatches ?? []);
+  return canonicalJson(patchSelectionSnapshot(sources)) !== canonicalJson(expandedPatchSnapshot(activePatches));
 }
 
 export function patchPendingMessage(pending) {
@@ -55,7 +82,7 @@ function selectionStagingFailure(prefix, message) {
 }
 
 function patchIdentityKey(patch) {
-  return `${patch.locator}\0${patch.path}`;
+  return `${patch.locator}\0${patch.seriesId}\0${patch.commit}\0${patch.path}`;
 }
 
 function stageSelectedArtifacts({ stageRoot, sources, piBase, artifactsForSource, failurePrefix }) {
@@ -78,37 +105,53 @@ function stageSelectedArtifacts({ stageRoot, sources, piBase, artifactsForSource
         .map((artifact) => [artifactKey(artifact), artifact]));
       const realCheckout = realpathSync(resolved.checkout);
       for (const artifact of selectedArtifacts) {
-        const identity = `${source.locator}@${source.commit}:${artifact.path}`;
+        const structuralIdentity = artifactStructuralIdentity(artifact);
+        const identity = `${source.locator}@${source.commit}:${structuralIdentity}`;
         const candidate = discovered.get(artifactKey(artifact));
         if (!candidate) {
-          selectionStagingFailure(failurePrefix, `selected ${artifact.kind} ${identity} is no longer discoverable at its exact source commit`);
+          selectionStagingFailure(failurePrefix, `selected ${isPatchSeries(artifact) ? "Patch Series" : artifact.kind} ${identity} is no longer discoverable at its exact source commit`);
         }
-        if (artifact.kind !== "Patch") continue;
-        if (candidate.sha256 !== artifact.sha256) {
-          selectionStagingFailure(failurePrefix, `Selected Patch digest mismatch: ${source.locator} · ${artifact.path}; expected sha256 ${artifact.sha256}, found ${candidate.sha256}`);
-        }
+        if (!isPatchSeries(artifact)) continue;
         if (candidate.compatible === false) {
-          selectionStagingFailure(failurePrefix, `selected Patch ${identity} does not support target Pi Base ${piBase.tag} (${piBase.commit})`);
+          selectionStagingFailure(failurePrefix, `selected Patch Series ${identity} does not support target Pi Base ${piBase.tag} (${piBase.commit})`);
         }
-        const sourcePath = join(resolved.checkout, artifact.path);
-        const realPatch = realpathSync(sourcePath);
-        if (!realPatch.startsWith(`${realCheckout}${sep}`)) {
-          selectionStagingFailure(failurePrefix, `selected Patch ${identity} escapes its exact Source Repository`);
+        if (candidate.members.length !== artifact.members.length) {
+          selectionStagingFailure(failurePrefix, `selected Patch Series ${identity} membership changed at its exact source commit`);
         }
-        const index = patchIndexes.get(patchIdentityKey({ locator: source.locator, path: artifact.path }));
-        if (index === undefined) selectionStagingFailure(failurePrefix, `selected Patch ${identity} is absent from the canonical Patch selection`);
-        const stagedPath = join(patchesRoot, `${String(index).padStart(6, "0")}.patch`);
-        cpSync(sourcePath, stagedPath, { errorOnExist: true });
-        if (sha256File(stagedPath) !== artifact.sha256) {
-          selectionStagingFailure(failurePrefix, `staged bytes for selected Patch ${identity} do not match sha256 ${artifact.sha256}`);
+        for (let memberIndex = 0; memberIndex < artifact.members.length; memberIndex += 1) {
+          const member = artifact.members[memberIndex];
+          const candidateMember = candidate.members[memberIndex];
+          const memberIdentity = `${source.locator}@${member.commit}:${member.path}`;
+          if (member.commit !== source.commit || candidateMember?.path !== member.path) {
+            selectionStagingFailure(failurePrefix, `selected Patch Series member ${memberIdentity} is no longer discoverable in its retained order`);
+          }
+          if (candidateMember.sha256 !== member.sha256) {
+            selectionStagingFailure(failurePrefix, `Selected Patch digest mismatch: ${source.locator} · ${member.path}; expected sha256 ${member.sha256}, found ${candidateMember.sha256}`);
+          }
+          const sourcePath = join(resolved.checkout, member.path);
+          const realPatch = realpathSync(sourcePath);
+          if (!realPatch.startsWith(`${realCheckout}${sep}`)) {
+            selectionStagingFailure(failurePrefix, `selected Patch ${memberIdentity} escapes its exact Source Repository`);
+          }
+          const patchIdentity = {
+            locator: source.locator,
+            seriesId: artifact.id,
+            commit: member.commit,
+            path: member.path,
+          };
+          const index = patchIndexes.get(patchIdentityKey(patchIdentity));
+          if (index === undefined) selectionStagingFailure(failurePrefix, `selected Patch ${memberIdentity} is absent from the canonical Patch selection`);
+          const stagedPath = join(patchesRoot, `${String(index).padStart(6, "0")}.patch`);
+          cpSync(sourcePath, stagedPath, { errorOnExist: true });
+          if (sha256File(stagedPath) !== member.sha256) {
+            selectionStagingFailure(failurePrefix, `staged bytes for selected Patch ${memberIdentity} do not match sha256 ${member.sha256}`);
+          }
+          stagedPatches.set(patchIdentityKey(patchIdentity), {
+            ...patchIdentity,
+            sha256: member.sha256,
+            stagedPath,
+          });
         }
-        stagedPatches.set(patchIdentityKey({ locator: source.locator, path: artifact.path }), {
-          locator: source.locator,
-          commit: source.commit,
-          path: artifact.path,
-          sha256: artifact.sha256,
-          stagedPath,
-        });
       }
     } catch (error) {
       if (error instanceof SelectionStagingError) throw error;
@@ -127,7 +170,7 @@ export function stagePatchSelection({ stageRoot, sources, piBase }) {
     stageRoot,
     sources,
     piBase,
-    artifactsForSource: (source) => source.artifacts.filter((artifact) => artifact.kind === "Patch"),
+    artifactsForSource: (source) => source.artifacts.filter(isPatchSeries),
     failurePrefix: "",
   });
 }
@@ -147,7 +190,7 @@ function selectionStatePath(dataRoot) {
 }
 
 function emptySelections() {
-  return { schemaVersion: 1, sources: [] };
+  return { schemaVersion: 2, sources: [] };
 }
 
 function hasOnlyKeys(value, keys) {
@@ -174,9 +217,10 @@ export function readSelections(dataRoot) {
     if (error instanceof Error && error.message === "Malformed PorcuPi Selection Intent") throw error;
     fail("Malformed PorcuPi Selection Intent");
   }
+  const legacy = value?.schemaVersion === 1;
   if (
     !hasOnlyKeys(value, selectionRootFields)
-    || value.schemaVersion !== 1
+    || (!legacy && value.schemaVersion !== 2)
     || !Array.isArray(value.sources)
     || value.sources.some((source) => (
       !hasOnlyKeys(source, selectionSourceFields)
@@ -186,19 +230,41 @@ export function readSelections(dataRoot) {
       || !Array.isArray(source.artifacts)
       || source.artifacts.length === 0
       || source.artifacts.some((artifact) => {
-        const invalidPath = typeof artifact?.path !== "string"
+        const invalidPath = !isPatchSeries(artifact) && (
+          typeof artifact?.path !== "string"
           || artifact.path.startsWith("/")
           || artifact.path.includes("\\")
           || /[\x00-\x1f\x7f]/.test(artifact.path)
-          || artifact.path.split("/").some((part) => part === "" || part === "." || part === "..");
+          || artifact.path.split("/").some((part) => part === "" || part === "." || part === "..")
+        );
         if (invalidPath) return true;
-        if (artifact.kind === "Patch") {
-          return !hasOnlyKeys(artifact, patchFields)
+        if (legacy && artifact.kind === "Patch") {
+          return !hasOnlyKeys(artifact, legacyPatchFields)
             || !artifact.path.startsWith("patches/")
             || !artifact.path.endsWith(".patch")
             || !/^[a-f0-9]{64}$/.test(artifact.sha256 || "")
             || artifact.scope !== undefined
             || artifact.projectRoot !== undefined;
+        }
+        if (!legacy && isPatchSeries(artifact)) {
+          return !hasOnlyKeys(artifact, patchSeriesFields)
+            || typeof artifact.id !== "string"
+            || !artifact.id.startsWith("patches/")
+            || !artifact.id.endsWith(".patch")
+            || artifact.id.includes("\\")
+            || /[\x00-\x1f\x7f]/.test(artifact.id)
+            || artifact.id.split("/").some((part) => part === "" || part === "." || part === "..")
+            || !Array.isArray(artifact.members)
+            || artifact.members.length !== 1
+            || artifact.members.some((member) => (
+              !hasOnlyKeys(member, patchMemberFields)
+              || member.commit !== source.commit
+              || typeof member.path !== "string"
+              || member.path !== artifact.id
+              || !member.path.startsWith("patches/")
+              || !member.path.endsWith(".patch")
+              || !/^[a-f0-9]{64}$/.test(member.sha256 || "")
+            ));
         }
         const resourceFields = artifact.scope === "project" ? projectResourceFields : globalResourceFields;
         return !hasOnlyKeys(artifact, resourceFields)
@@ -224,7 +290,7 @@ export function readSelections(dataRoot) {
     } catch {
       fail("Malformed PorcuPi Selection Intent");
     }
-    const artifactKeys = source.artifacts.map((artifact) => `${artifact.kind}\0${artifact.path}`);
+    const artifactKeys = source.artifacts.map(artifactKey);
     if (
       locators.has(source.locator)
       || packageSource.locator !== source.locator
@@ -235,7 +301,18 @@ export function readSelections(dataRoot) {
     }
     locators.add(source.locator);
   }
-  return value;
+  if (!legacy) return value;
+  return {
+    schemaVersion: 2,
+    sources: value.sources.map((source) => ({
+      ...source,
+      artifacts: source.artifacts.map((artifact) => artifact.kind === "Patch" ? {
+        kind: "PatchSeries",
+        id: artifact.path,
+        members: [{ commit: source.commit, path: artifact.path, sha256: artifact.sha256 }],
+      } : artifact),
+    })),
+  };
 }
 
 function packageEntry(packageSource, artifacts, scope, projectDelta = false) {
@@ -496,7 +573,7 @@ export function summarizeRetainedPiResources(dataRoot, environment = process.env
   const selections = readSelections(dataRoot);
   const summaries = [];
   for (const source of selections.sources) {
-    const resources = source.artifacts.filter((artifact) => artifact.kind !== "Patch");
+    const resources = source.artifacts.filter((artifact) => !isPatchSeries(artifact));
     const groups = groupByContext(resources);
     const hasGlobal = groups.has("global");
     for (const { context, artifacts } of groups.values()) {
@@ -519,7 +596,7 @@ export function summarizeRetainedPiResources(dataRoot, environment = process.env
       `${right.locator}\0${right.scope}\0${right.projectRoot || ""}`,
     )),
     patchCount: selections.sources.reduce(
-      (count, source) => count + source.artifacts.filter((artifact) => artifact.kind === "Patch").length,
+      (count, source) => count + source.artifacts.filter(isPatchSeries).length,
       0,
     ),
   };
@@ -527,7 +604,7 @@ export function summarizeRetainedPiResources(dataRoot, environment = process.env
 
 export function saveSelectionSources(dataRoot, sources) {
   const ordered = [...sources].sort((left, right) => lexicalCompare(left.locator, right.locator));
-  atomicWrite(selectionStatePath(dataRoot), { schemaVersion: 1, sources: ordered });
+  atomicWrite(selectionStatePath(dataRoot), { schemaVersion: 2, sources: ordered });
 }
 
 export function resolveProjectContext(cwd) {

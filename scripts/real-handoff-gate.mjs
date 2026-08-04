@@ -243,15 +243,22 @@ function verifyPinnedReference(reference) {
 
 function verifyRealSelections() {
   const selections = readSelections();
+  assert.equal(selections.schemaVersion, 2);
   const source = selections.sources.find((entry) => entry.commit === fixture.source.commit);
   assert.ok(source, "exact pi-wait-for-user source was not retained");
   assert.equal(source.locator, "github.com/taylorrowser/pi-wait-for-user");
-  const patches = source.artifacts.filter((artifact) => artifact.kind === "Patch");
+  const series = source.artifacts.filter((artifact) => artifact.kind === "PatchSeries");
   assert.deepEqual(
-    patches.map(({ path, sha256: digest }) => ({ path, sha256: digest })),
-    fixture.source.patches,
+    series.map((series) => ({
+      id: series.id,
+      members: series.members.map(({ commit, path, sha256: digest }) => ({ commit, path, sha256: digest })),
+    })),
+    fixture.source.patches.map(({ path, sha256: digest }) => ({
+      id: path,
+      members: [{ commit: fixture.source.commit, path, sha256: digest }],
+    })),
   );
-  assert.deepEqual(source.artifacts.filter((artifact) => artifact.kind !== "Patch"), []);
+  assert.deepEqual(source.artifacts.filter((artifact) => artifact.kind !== "PatchSeries"), []);
 }
 
 function verifyQuestionToolPiPackage(reference) {
@@ -353,7 +360,7 @@ async function main() {
     waitFor: "1 of 3 — Select Artifacts",
   });
   assert.match(add.output, new RegExp(`Exact commit: ${fixture.source.commit}`));
-  assert.match(add.output, /0 global Pi resource selections and 20 Patch selections/);
+  assert.match(add.output, /0 global Pi resource selections and 20 Patch Series selections/);
   assert.match(add.output, /pending `porcupi apply`/);
   verifyRealSelections();
   const questionToolRoot = join(reference, "packages", "question-tool");
@@ -403,7 +410,7 @@ async function main() {
     inputHex: deselectLastPatch,
     waitFor: "1 of 3 — Select Artifacts",
   });
-  assert.equal(readSelections().sources.find((source) => source.commit === fixture.source.commit).artifacts.filter((artifact) => artifact.kind === "Patch").length, 19);
+  assert.equal(readSelections().sources.find((source) => source.commit === fixture.source.commit).artifacts.filter((artifact) => artifact.kind === "PatchSeries").length, 19);
   const applyNineteen = external("compose-19-patches-with-live-old-lease", join(commandBin, "porcupi"), ["apply"], {
     inputHex: "0d",
     waitFor: "Apply selected Patches",
@@ -461,5 +468,9 @@ try {
   process.exitCode = 1;
 } finally {
   if (failureServer && failureServer.exitCode === null) failureServer.kill("SIGTERM");
-  if (!process.env.PORCUPI_KEEP_ACCEPTANCE_ROOT) rmSync(runRoot, { recursive: true, force: true });
+  if (!process.env.PORCUPI_KEEP_ACCEPTANCE_ROOT) {
+    try { rmSync(runRoot, { recursive: true, force: true }); } catch {
+      // The durable report records the failure; a read-only Composition can be cleaned manually.
+    }
+  }
 }

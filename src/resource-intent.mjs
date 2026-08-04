@@ -119,10 +119,10 @@ function stageSelectedArtifacts({ stageRoot, sources, piBase, artifactsForSource
         if (!candidate) {
           selectionStagingFailure(failurePrefix, `selected ${isPatchSeries(artifact) ? "Patch Series" : artifact.kind} ${identity} is no longer discoverable at its exact source commit`);
         }
-        if (!isPatchSeries(artifact)) continue;
         if (candidate.compatible === false) {
-          selectionStagingFailure(failurePrefix, `selected Patch Series ${identity} does not support target Pi Base ${piBase.tag} (${piBase.commit})`);
+          selectionStagingFailure(failurePrefix, `selected ${isPatchSeries(artifact) ? "Patch Series" : artifact.kind} ${identity} does not support target Pi Base ${piBase.tag} (${piBase.commit})`);
         }
+        if (!isPatchSeries(artifact)) continue;
         if (candidate.members.length !== artifact.members.length) {
           selectionStagingFailure(failurePrefix, `selected Patch Series ${identity} membership changed at its exact source commit`);
         }

@@ -43,6 +43,11 @@ test("the source guide covers consuming and authoring every PorcuPi artifact kin
   assert.match(guide, /"members"/);
   assert.match(guide, /preserves each series' declared member order/i);
   assert.match(guide, /changing its stable `id` creates a different Artifact/i);
+  assert.match(guide, /"resources"/);
+  assert.match(guide, /source-wide compatibility default/i);
+  assert.match(guide, /per-Artifact.*override/i);
+  assert.match(guide, /omitting.*compatibility.*does not restrict/i);
+  assert.match(guide, /cannot declare commands, hooks, dependencies, recipes, force options, custom verifiers, or activation policy/i);
 });
 
 test("the primary user documentation links the source guide", () => {

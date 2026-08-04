@@ -1560,6 +1560,42 @@ test("a selected Patch readiness blocker names the exact Patch and leaves the in
   assert.equal(runPorcuPiProcess(home, ["--version"]).stdout.trim(), "0.81.1");
 });
 
+test("a selected resource compatibility mismatch blocks release advancement before mutation", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const historicalInstall = runInstaller(historicalRelease, home);
+  assert.equal(historicalInstall.status, 0, historicalInstall.stderr || historicalInstall.stdout);
+
+  const repository = createResourceRepository(join(root, "blocked-resource"));
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    supportedPiBaseCommits: ["f".repeat(40)],
+  }, null, 2)}\n`);
+  git(repository.source, "add", "porcupi.json");
+  git(repository.source, "commit", "-m", "Declare incompatible resources");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+
+  const targetRoot = join(root, "target");
+  mkdirSync(targetRoot);
+  const targetRelease = createReleaseFixture(targetRoot, base);
+  const artifact = packRelease(targetRelease, targetRoot);
+  const managedRoot = dataRoot(home);
+  const before = treeDigest(managedRoot);
+
+  const failed = runPackedInstaller(artifact, home, "", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
+
+  assert.notEqual(failed.status, 0);
+  assert.match(failed.stdout, /selected Extension .*:extensions\/fixture\.ts does not support target Pi Base v0\.81\.1/);
+  assert.equal(treeDigest(managedRoot), before);
+  assert.equal(runPorcuPiProcess(home, ["--version"]).stdout.trim(), "0.81.1");
+});
+
 test("guided installation can be cancelled without creating PorcuPi state", () => {
   const root = temporaryRoot();
   const home = join(root, "home");
@@ -3547,20 +3583,42 @@ test("invalid Patch metadata is prominently ignored as a whole without suppressi
   })}\n`);
   git(repository.source, "add", "porcupi.json");
   git(repository.source, "commit", "-m", "Contradictory metadata");
+  git(repository.source, "tag", "contradictory-metadata");
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    supportedPiBaseVersions: [">=0.81.1"],
+  })}\n`);
+  git(repository.source, "add", "porcupi.json");
+  git(repository.source, "commit", "-m", "Malformed compatibility");
+  git(repository.source, "tag", "malformed-compatibility");
+  const mustNotRun = join(root, "source-metadata-must-not-run");
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    hooks: [{ command: ["touch", mustNotRun] }],
+  })}\n`);
+  git(repository.source, "add", "porcupi.json");
+  git(repository.source, "commit", "-m", "Attempt source behavior");
   repository.commit = git(repository.source, "rev-parse", "HEAD");
   const locator = await serveGitRepository(root, repository);
 
   const malformed = runPorcuPi(home, ["add", `${locator}@malformed-metadata`], "1b");
   const unsupported = runPorcuPi(home, ["add", `${locator}@unsupported-metadata`], "1b");
-  const contradictory = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+  const contradictory = runPorcuPi(home, ["add", `${locator}@contradictory-metadata`], "1b");
+  const malformedCompatibility = runPorcuPi(home, ["add", `${locator}@malformed-compatibility`], "1b");
+  const sourceBehavior = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
 
   assert.equal(malformed.status, 0, malformed.stderr || malformed.stdout);
-  assert.match(malformed.stdout, /Patch metadata is invalid and ignored as a whole: malformed JSON/);
+  assert.match(malformed.stdout, /Source metadata is invalid and ignored as a whole: malformed JSON/);
   assert.equal(unsupported.status, 0, unsupported.stderr || unsupported.stdout);
   assert.match(unsupported.stdout, /unsupported field or unsafe Patch path/);
   assert.equal(contradictory.status, 0, contradictory.stderr || contradictory.stdout);
   assert.match(contradictory.stdout, /duplicate Patch entry patches\/alpha\.patch/);
   assert.doesNotMatch(contradictory.stdout, /First claim|Contradictory claim/);
+  assert.equal(malformedCompatibility.status, 0, malformedCompatibility.stderr || malformedCompatibility.stdout);
+  assert.match(malformedCompatibility.stdout, /supportedPiBaseVersions for Source Repository default must contain unique exact values/);
+  assert.equal(sourceBehavior.status, 0, sourceBehavior.stderr || sourceBehavior.stdout);
+  assert.match(sourceBehavior.stdout, /Source metadata is invalid and ignored as a whole/);
+  assert.equal(existsSync(mustNotRun), false);
   const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
   assert.deepEqual(selections.sources[0].artifacts.map((artifact) => artifact.id), [
     "patches/alpha.patch",
@@ -3688,6 +3746,135 @@ test("valid Patch metadata overlays display and blocks declared Pi Base incompat
       sha256: "15adc195c931723b85b314beb297d55a1cab3becf2ed2f2e8cca653297c45d8f",
     }],
   }]);
+});
+
+test("source compatibility defaults and per-Artifact overrides filter mixed resources and preserve fixed Patch verification", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  mkdirSync(join(repository.source, "patches"));
+  writeFileSync(join(repository.source, "patches", "selected.patch"), newFilePatch("compatible-selection.txt", "selected"));
+  writeFileSync(join(repository.source, "patches", "default-blocked.patch"), newFilePatch("must-not-exist.txt", "blocked"));
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    supportedPiBaseVersions: ["v9.9.9"],
+    supportedPiBaseCommits: ["f".repeat(40)],
+    resources: [
+      {
+        kind: "Extension",
+        path: "extensions/fixture.ts",
+        supportedPiBaseVersions: ["v0.81.1"],
+        supportedPiBaseCommits: [base.commit],
+      },
+      {
+        kind: "Skill",
+        path: "skills/fixture-skill/SKILL.md",
+        supportedPiBaseVersions: ["v0.81.1"],
+      },
+      {
+        kind: "Prompt",
+        path: "prompts/fixture.md",
+        supportedPiBaseVersions: ["v0.81.1"],
+        supportedPiBaseCommits: ["e".repeat(40)],
+      },
+      {
+        kind: "Theme",
+        path: "themes/fixture.json",
+        supportedPiBaseCommits: [base.commit],
+      },
+    ],
+    patchSeries: [{
+      id: "compatible-series",
+      members: ["patches/selected.patch"],
+      supportedPiBaseVersions: ["v0.81.1"],
+      supportedPiBaseCommits: [base.commit],
+    }],
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Declare Artifact compatibility");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  assert.match(add.stdout, /Extension\s+extensions\/fixture\.ts/);
+  assert.match(add.stdout, /Skill\s+skills\/fixture-skill\/SKILL\.md/);
+  assert.match(add.stdout, /Theme\s+themes\/fixture\.json/);
+  assert.match(add.stdout, /Prompt\s+prompts\/fixture\.md \[not supported by this Pi Base\]/);
+  assert.match(add.stdout, /Patch Series\s+patches\/default-blocked\.patch \[not supported by this Pi Base\]/);
+  assert.match(add.stdout, /Patch Series\s+compatible-series/);
+  const settings = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8"));
+  assert.deepEqual(settings.packages[0].extensions, ["extensions/fixture.ts"]);
+  assert.deepEqual(settings.packages[0].skills, ["skills/fixture-skill/SKILL.md"]);
+  assert.deepEqual(settings.packages[0].prompts, []);
+  assert.deepEqual(settings.packages[0].themes, ["themes/fixture.json"]);
+  const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
+  assert.deepEqual(selections.sources[0].artifacts.map((artifact) => artifact.kind === "PatchSeries" ? artifact.id : `${artifact.kind}:${artifact.path}`), [
+    "Extension:extensions/fixture.ts",
+    "compatible-series",
+    "Skill:skills/fixture-skill/SKILL.md",
+    "Theme:themes/fixture.json",
+  ]);
+
+  const apply = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(apply.status, 0, apply.stderr || apply.stdout);
+  assert.match(apply.stdout, /git apply --check --whitespace=error-all/);
+  assert.match(apply.stdout, /npm ci --ignore-scripts/);
+  assert.match(apply.stdout, /check:model-data/);
+  assert.match(apply.stdout, /build:offline/);
+  assert.match(apply.stdout, /cli\.js --help/);
+  assert.match(apply.stdout, /cli\.js --version/);
+  assert.match(apply.stdout, /cli\.js --list-models/);
+  const activation = JSON.parse(readFileSync(join(dataRoot(home), "state", "activation.json"), "utf8"));
+  const payload = join(dataRoot(home), "compositions", activation.active.compositionId, "payload");
+  assert.equal(readFileSync(join(payload, "compatible-selection.txt"), "utf8"), "selected\n");
+  assert.equal(existsSync(join(payload, "must-not-exist.txt")), false);
+});
+
+test("re-adding a source cannot advance selected Artifacts into a declared Pi Base mismatch", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  const metadataPath = join(repository.source, "porcupi.json");
+  writeFileSync(metadataPath, `${JSON.stringify({
+    schemaVersion: 1,
+    supportedPiBaseVersions: ["v0.81.1"],
+    supportedPiBaseCommits: [base.commit],
+  }, null, 2)}\n`);
+  git(repository.source, "add", "porcupi.json");
+  git(repository.source, "commit", "-m", "Support current Pi Base");
+  git(repository.source, "tag", "compatible");
+  const compatibleCommit = git(repository.source, "rev-parse", "HEAD");
+  writeFileSync(metadataPath, `${JSON.stringify({
+    schemaVersion: 1,
+    supportedPiBaseVersions: ["v9.9.9"],
+  }, null, 2)}\n`);
+  git(repository.source, "add", "porcupi.json");
+  git(repository.source, "commit", "-m", "Drop current Pi Base support");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+  const initial = runPorcuPi(home, ["add", `${locator}@compatible`], "616e6e0d");
+  assert.equal(initial.status, 0, initial.stderr || initial.stdout);
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].commit, compatibleCommit);
+
+  const incompatible = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+
+  assert.equal(incompatible.status, 0, incompatible.stderr || incompatible.stdout);
+  assert.match(incompatible.stdout, new RegExp(`Source-wide change: ${compatibleCommit} → ${repository.commit}`));
+  assert.match(incompatible.stdout, /Extension\s+extensions\/fixture\.ts \[not supported by this Pi Base\]/);
+  assert.match(incompatible.stdout, /0 Pi resource\(s\), 0 Patch Series selected/);
+  assert.deepEqual(JSON.parse(readFileSync(selectionsPath, "utf8")).sources, []);
+  assert.deepEqual(JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf8")).packages, []);
 });
 
 test("porcupi add installs every resource kind in project scope without granting Pi project trust", async () => {

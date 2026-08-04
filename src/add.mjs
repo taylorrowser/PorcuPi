@@ -87,11 +87,11 @@ function runAddWizard({ source, artifacts, diagnostics, currentArtifacts, previo
             if (focused.description) output.write(`${truncateForTerminal(output, `  Details: ${focused.description}`)}\n`);
             if (isPatchSeries(focused)) {
               output.write(`${truncateForTerminal(output, `  Members: ${focused.members.length} Patch File${focused.members.length === 1 ? "" : "s"} in declared order`)}\n`);
-              const compatibility = focused.compatibilityDeclared
-                ? focused.compatible ? "supports this exact Pi Base" : "does not support this exact Pi Base"
-                : "has no compatibility declaration; the fixed pipeline remains authoritative";
-              output.write(`${truncateForTerminal(output, `  Compatibility: ${compatibility}`)}\n`);
             }
+            const compatibility = focused.compatibilityDeclared
+              ? focused.compatible ? "supports this exact Pi Base" : "does not support this exact Pi Base"
+              : "has no compatibility declaration; fixed PorcuPi verification remains authoritative";
+            output.write(`${truncateForTerminal(output, `  Compatibility: ${compatibility}`)}\n`);
           }
           const metadataDiagnostics = diagnostics.filter((diagnostic) => diagnostic.path === "porcupi.json");
           const candidateDiagnostics = diagnostics.filter((diagnostic) => diagnostic.path !== "porcupi.json");

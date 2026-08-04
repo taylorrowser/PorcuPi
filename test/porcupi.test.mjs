@@ -2385,7 +2385,7 @@ test("Managed Pi launch strictly rejects malformed control state, receipt disagr
     previous: {
       compositionId: "f".repeat(64),
       patches: [
-        { locator: "example.test/source", commit: "a".repeat(40), path: "patches/../escape.patch", sha256: "b".repeat(64) },
+        { locator: "example.test/owner/source", commit: "a".repeat(40), path: "patches/../escape.patch", sha256: "b".repeat(64) },
       ],
     },
   }, null, 2)}\n`);
@@ -2396,7 +2396,7 @@ test("Managed Pi launch strictly rejects malformed control state, receipt disagr
     active: {
       ...activation.active,
       patches: [
-        { locator: "example.test/source", commit: "a".repeat(40), path: "patches/one.patch", sha256: "b".repeat(64) },
+        { locator: "example.test/owner/source", commit: "a".repeat(40), path: "patches/one.patch", sha256: "b".repeat(64) },
       ],
     },
   }, null, 2)}\n`);
@@ -2480,7 +2480,7 @@ test("strict Composition receipts reject validly rebound identity, source-snapsh
       name: "unsafe-patch-series-identity",
       mutate: (receipt) => {
         receipt.patches = [{
-          locator: "example.test/source",
+          locator: "example.test/owner/source",
           seriesId: "patches/unsafe\n.patch",
           commit: "a".repeat(40),
           path: "patches/member.patch",
@@ -2490,10 +2490,23 @@ test("strict Composition receipts reject validly rebound identity, source-snapsh
       expected: /Malformed Managed Pi Composition receipt/,
     },
     {
-      name: "noncanonical-source-locator",
+      name: "uppercase-source-host",
       mutate: (receipt) => {
         receipt.patches = [{
-          locator: "EXAMPLE.test/source",
+          locator: "EXAMPLE.test/owner/source",
+          seriesId: "coordinated-change",
+          commit: "a".repeat(40),
+          path: "patches/member.patch",
+          sha256: "b".repeat(64),
+        }];
+      },
+      expected: /Malformed Managed Pi Composition receipt/,
+    },
+    {
+      name: "noncanonical-source-path",
+      mutate: (receipt) => {
+        receipt.patches = [{
+          locator: "example.test/source",
           seriesId: "coordinated-change",
           commit: "a".repeat(40),
           path: "patches/member.patch",
@@ -2507,14 +2520,14 @@ test("strict Composition receipts reject validly rebound identity, source-snapsh
       mutate: (receipt) => {
         receipt.patches = [
           {
-            locator: "example.test/source",
+            locator: "example.test/owner/source",
             seriesId: "coordinated-change",
             commit: "a".repeat(40),
             path: "patches/one.patch",
             sha256: "b".repeat(64),
           },
           {
-            locator: "example.test/source",
+            locator: "example.test/owner/source",
             seriesId: "coordinated-change",
             commit: "c".repeat(40),
             path: "patches/two.patch",
@@ -2529,14 +2542,14 @@ test("strict Composition receipts reject validly rebound identity, source-snapsh
       mutate: (receipt) => {
         receipt.patches = [
           {
-            locator: "example.test/source",
+            locator: "example.test/owner/source",
             seriesId: "patches/implicit.patch",
             commit: "a".repeat(40),
             path: "patches/declared-member.patch",
             sha256: "b".repeat(64),
           },
           {
-            locator: "example.test/source",
+            locator: "example.test/owner/source",
             commit: "a".repeat(40),
             path: "patches/implicit.patch",
             sha256: "c".repeat(64),

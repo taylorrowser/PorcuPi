@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { globSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
-import { fail, sha256File } from "./runtime.mjs";
+import { canonicalSourceLocator, fail, sha256File } from "./runtime.mjs";
 
 const artifactKinds = ["Extension", "Prompt", "Skill", "Theme"];
 const regularGitModes = new Set(["100644", "100755"]);
@@ -45,6 +45,10 @@ function splitPathRef(value) {
   return { path, ref };
 }
 
+function sourceLocator(host, path) {
+  return canonicalSourceLocator(host, path) ?? fail("Git source has a noncanonical Source Repository locator");
+}
+
 export function parseRequestedGitSource(requested) {
   const trimmed = requested.trim();
   if (!trimmed || /[\0\r\n]/.test(trimmed) || trimmed.startsWith("-")) fail("A valid Git source is required");
@@ -60,7 +64,7 @@ export function parseRequestedGitSource(requested) {
     return {
       cloneRepository: `${scp[1]}@${host}:${rawPath.replace(/\/+$/, "")}`,
       packageRepository: `${scp[1]}@${host}:${rawPath.replace(/\/+$/, "")}`,
-      locator: `${host.toLowerCase()}/${path}`,
+      locator: sourceLocator(host, path),
       ref,
     };
   }
@@ -84,7 +88,7 @@ export function parseRequestedGitSource(requested) {
     parsed.password = "";
     parsed.pathname = `/${rawPath.replace(/^\/+/, "").replace(/\/+$/, "")}`;
     const packageRepository = parsed.toString().replace(/\/$/, "");
-    return { cloneRepository, packageRepository, locator: `${host}/${path}`, ref };
+    return { cloneRepository, packageRepository, locator: sourceLocator(host, path), ref };
   }
 
   if (!hasGitPrefix) fail("Git sources without a git: prefix must use an explicit Git protocol URL");
@@ -97,7 +101,7 @@ export function parseRequestedGitSource(requested) {
   return {
     cloneRepository: `https://${host}/${rawPath.replace(/\/+$/, "")}`,
     packageRepository: `https://${host}/${rawPath.replace(/\/+$/, "")}`,
-    locator: `${host.toLowerCase()}/${path}`,
+    locator: sourceLocator(host, path),
     ref,
   };
 }

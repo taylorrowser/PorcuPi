@@ -1393,6 +1393,57 @@ test("the packed release activates preserved pending Patch Selection Intent", as
   assert.equal(readFileSync(join(managedRoot, "compositions", targetActivation.active.compositionId, "payload", "series.txt"), "utf8"), "pending\n");
 });
 
+test("upgrade readiness counts Pi resources independently of Patch Series members", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const historicalRelease = createReleaseFixture(root, base, "0.81.1", { historicalRef: "v0.1.0" });
+  const targetRoot = join(root, "target-release");
+  mkdirSync(targetRoot);
+  const targetRelease = createReleaseFixture(targetRoot, base);
+  const artifact = packRelease(targetRelease, targetRoot);
+  const repository = createApplicablePatchRepository(join(root, "selected-source"), [
+    ["patches/one.patch", textPatch("series.txt", "base", "first")],
+    ["patches/two.patch", textPatch("series.txt", "first", "second")],
+  ]);
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    patchSeries: [{ id: "coordinated-change", members: ["patches/one.patch", "patches/two.patch"] }],
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Declare coordinated Patch Series");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+
+  assert.equal(runInstaller(historicalRelease, home).status, 0);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const legacySelections = JSON.parse(readFileSync(selectionsPath, "utf8"));
+  const source = legacySelections.sources[0];
+  const members = ["patches/one.patch", "patches/two.patch"].map((path) => {
+    const patch = source.artifacts.find((candidate) => candidate.path === path);
+    return { commit: source.commit, path, sha256: patch.sha256 };
+  });
+  writeFileSync(selectionsPath, `${JSON.stringify({
+    schemaVersion: 2,
+    sources: [{
+      locator: source.locator,
+      commit: source.commit,
+      packageSource: source.packageSource,
+      artifacts: [{ kind: "PatchSeries", id: "coordinated-change", members }],
+    }],
+  }, null, 2)}\n`);
+
+  const cancelled = runPackedInstaller(artifact, home, "0d0d1b", { PTY_WAIT_FOR: "1 of 3 — Upgrade" });
+
+  assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+  assert.match(cancelled.stdout, /2 selected Patches passed Patch preflight/);
+  assert.match(cancelled.stdout, /0 selected Pi resources remained discoverable/);
+  assert.doesNotMatch(cancelled.stdout, /-1 selected Pi resources/);
+});
+
 test("a version-aware exact target refuses a newer installation as an unsupported downgrade", () => {
   const root = temporaryRoot();
   const home = join(root, "home");
@@ -2614,6 +2665,7 @@ test("declared single- and multi-file Patch Series complete add, manage, apply, 
   ]);
   writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
     schemaVersion: 1,
+    patches: [{ path: "patches/020-first.patch" }],
     patchSeries: [
       {
         id: "coordinated-change",
@@ -2638,6 +2690,7 @@ test("declared single- and multi-file Patch Series complete add, manage, apply, 
   assert.equal(add.status, 0, add.stderr || add.stdout);
   assert.match(add.stdout, /Patch Series\s+Coordinated change — coordinated-change/);
   assert.match(add.stdout, /Two dependent reviewable Patch Files/);
+  assert.match(add.stdout, /Patch metadata entry patches\/020-first\.patch is ignored because the Patch File belongs to a declared Patch Series/);
   assert.match(add.stdout, /2 Patch Series selected/);
   const managedRoot = dataRoot(home);
   const selections = JSON.parse(readFileSync(join(managedRoot, "state", "selections.json"), "utf8"));
@@ -3448,6 +3501,9 @@ test("invalid declared Patch Series members are diagnosed without ambiguous or s
   const release = createReleaseFixture(root, base);
   assert.equal(runInstaller(release, home).status, 0);
   const repository = createPatchRepository(root);
+  for (const path of ["patches/cascade-alpha.patch", "patches/cascade-beta.patch", "patches/cascade-gamma.patch"]) {
+    writeFileSync(join(repository.source, path), `${path}\n`);
+  }
   const gitlinkCommit = git(repository.source, "rev-parse", "HEAD");
   git(repository.source, "update-index", "--add", "--cacheinfo", `160000,${gitlinkCommit},patches/submodule.patch`);
   writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
@@ -3460,9 +3516,19 @@ test("invalid declared Patch Series members are diagnosed without ambiguous or s
       { id: "missing-member", members: ["patches/missing.patch"] },
       { id: "symbolic-member", members: ["patches/symbolic.patch"] },
       { id: "submodule-member", members: ["patches/submodule.patch"] },
+      { id: "control-member", members: ["patches/control\n.patch"] },
+      { id: "patches/cascade-beta.patch", members: ["patches/cascade-alpha.patch"] },
+      { id: "patches/cascade-gamma.patch", members: ["patches/cascade-beta.patch"] },
     ],
   }, null, 2)}\n`);
-  git(repository.source, "add", "porcupi.json");
+  git(
+    repository.source,
+    "add",
+    "porcupi.json",
+    "patches/cascade-alpha.patch",
+    "patches/cascade-beta.patch",
+    "patches/cascade-gamma.patch",
+  );
   git(repository.source, "commit", "-m", "Declare invalid Patch Series fixtures");
   repository.commit = git(repository.source, "rev-parse", "HEAD");
   const locator = await serveGitRepository(root, repository);
@@ -3477,9 +3543,16 @@ test("invalid declared Patch Series members are diagnosed without ambiguous or s
   assert.match(add.stdout, /Declared Patch Series missing-member is invalid.*missing member/);
   assert.match(add.stdout, /Declared Patch Series symbolic-member is invalid.*symbolic/);
   assert.match(add.stdout, /Declared Patch Series submodule-member is invalid.*Git submodule/);
+  assert.match(add.stdout, /Declared Patch Series control-member is invalid.*unsafe member path/);
+  assert.match(add.stdout, /Declared Patch Series patches\/cascade-gamma\.patch is invalid.*conflicts with an implicit Patch Series/);
+  assert.match(add.stdout, /Declared Patch Series patches\/cascade-beta\.patch is invalid.*conflicts with an implicit Patch Series/);
+  assert.doesNotMatch(add.stdout, /Patch metadata is invalid and ignored as a whole/);
   const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
   assert.deepEqual(selections.sources[0].artifacts.map((artifact) => artifact.id), [
     "patches/alpha.patch",
+    "patches/cascade-alpha.patch",
+    "patches/cascade-beta.patch",
+    "patches/cascade-gamma.patch",
     "patches/nested/beta.patch",
   ]);
 });

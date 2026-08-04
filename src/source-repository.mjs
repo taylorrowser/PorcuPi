@@ -482,10 +482,10 @@ function readPatchMetadata(checkout, patches, piBase, diagnostics) {
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("must be a regular file");
     value = JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
-    if (error?.code === "ENOENT") return { patches, patchSeries: [] };
+    if (error?.code === "ENOENT") return { patches, patchSeries: [], patchEntries: [] };
     const reason = error instanceof SyntaxError ? "malformed JSON" : "metadata root is not a readable regular file";
     diagnostics.push({ path: "porcupi.json", reason: `Patch metadata is invalid and ignored as a whole: ${reason}` });
-    return { patches, patchSeries: [] };
+    return { patches, patchSeries: [], patchEntries: [] };
   }
 
   const rootKeys = new Set(["schemaVersion", "patches", "patchSeries"]);
@@ -499,7 +499,7 @@ function readPatchMetadata(checkout, patches, piBase, diagnostics) {
   const seriesKeys = new Set(["id", "displayName", "description", "members"]);
   const invalid = (reason) => {
     diagnostics.push({ path: "porcupi.json", reason: `Patch metadata is invalid and ignored as a whole: ${reason}` });
-    return { patches, patchSeries: [] };
+    return { patches, patchSeries: [], patchEntries: [] };
   };
   if (
     !exactObjectKeys(value, rootKeys)
@@ -544,7 +544,6 @@ function readPatchMetadata(checkout, patches, piBase, diagnostics) {
       || (series.description !== undefined && !metadataText(series.description))
       || !Array.isArray(series.members)
       || series.members.length === 0
-      || series.members.some((member) => !metadataText(member))
     ) return invalid("declared Patch Series require only a stable id, optional display text, and one or more member paths");
     if (seriesIds.has(series.id)) return invalid(`duplicate Patch Series id ${series.id}`);
     seriesIds.add(series.id);
@@ -575,6 +574,7 @@ function readPatchMetadata(checkout, patches, piBase, diagnostics) {
       };
     }),
     patchSeries: declaredSeries,
+    patchEntries,
   };
 }
 
@@ -629,14 +629,14 @@ function declaredPatchArtifacts(metadata, inventory, diagnostics) {
     }
   }
 
-  let validSeries = metadata.patchSeries.filter((series) => !invalidReasons.has(series.id));
-  const claimed = new Set(validSeries.flatMap((series) => series.members));
-  for (const series of validSeries) {
-    if (inventory.get(series.id)?.sha256 && !claimed.has(series.id)) {
-      invalidate(series, `identity ${series.id} conflicts with an implicit Patch Series`);
-    }
+  let validSeries;
+  while (true) {
+    validSeries = metadata.patchSeries.filter((series) => !invalidReasons.has(series.id));
+    const claimed = new Set(validSeries.flatMap((series) => series.members));
+    const collisions = validSeries.filter((series) => inventory.get(series.id)?.sha256 && !claimed.has(series.id));
+    if (collisions.length === 0) break;
+    for (const series of collisions) invalidate(series, `identity ${series.id} conflicts with an implicit Patch Series`);
   }
-  validSeries = metadata.patchSeries.filter((series) => !invalidReasons.has(series.id));
   for (const series of metadata.patchSeries) {
     const reasons = invalidReasons.get(series.id);
     if (reasons) diagnostics.push({
@@ -702,9 +702,9 @@ function discoverPatchArtifacts(checkout, diagnostics, piBase) {
   const metadata = readPatchMetadata(checkout, regularPatches, piBase, diagnostics);
   const declared = declaredPatchArtifacts(metadata, inventory, diagnostics);
   const claimed = new Set(declared.flatMap((series) => series.members.map((member) => member.path)));
-  for (const patch of metadata.patches) {
-    if (claimed.has(patch.path) && (patch.displayName !== undefined || patch.description !== undefined || patch.compatibilityDeclared)) {
-      diagnostics.push({ path: "porcupi.json", reason: `Patch metadata entry ${patch.path} is ignored because the Patch File belongs to a declared Patch Series` });
+  for (const entry of metadata.patchEntries) {
+    if (claimed.has(entry.path)) {
+      diagnostics.push({ path: "porcupi.json", reason: `Patch metadata entry ${entry.path} is ignored because the Patch File belongs to a declared Patch Series` });
     }
   }
   return [

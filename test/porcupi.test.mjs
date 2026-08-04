@@ -263,6 +263,12 @@ function createReleaseFixture(root, base, expectedVersion = "0.81.1", { historic
       packageInputHash.update("\0");
     }
     releaseRecord.packageInputsSha256 = packageInputHash.digest("hex");
+    releaseRecord.npmArtifact = {
+      name: packageManifest.name,
+      version: packageManifest.version,
+      executable: "porcupi",
+      packageInputsSha256: releaseRecord.packageInputsSha256,
+    };
     writeFileSync(releaseRecordPath, `${JSON.stringify(releaseRecord, null, 2)}\n`);
   }
   return release;
@@ -287,6 +293,7 @@ function setReleaseFixtureVersion(release, version) {
   renameSync(join(release, previousReleaseRecord), join(release, releaseRecordPath));
   releaseRecord.porcupiVersion = version;
   releaseRecord.tag = `v${version}`;
+  releaseRecord.source.tag = `v${version}`;
   const packageInputHash = createHash("sha256");
   const packageInputPaths = ["package.json", ...manifest.files.filter((path) => !path.startsWith("release/"))].sort();
   for (const path of packageInputPaths) {
@@ -295,6 +302,12 @@ function setReleaseFixtureVersion(release, version) {
     packageInputHash.update("\0");
   }
   releaseRecord.packageInputsSha256 = packageInputHash.digest("hex");
+  releaseRecord.npmArtifact = {
+    name: manifest.name,
+    version,
+    executable: "porcupi",
+    packageInputsSha256: releaseRecord.packageInputsSha256,
+  };
   writeFileSync(join(release, releaseRecordPath), `${JSON.stringify(releaseRecord, null, 2)}\n`);
 }
 

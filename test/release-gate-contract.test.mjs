@@ -34,27 +34,77 @@ test("real handoff fixture pins only the exact source identities and canonical 2
   assert.equal(existsSync(join(root, "patches")), false, "PorcuPi must not contain copied source Patches");
 });
 
-test("release gate remains a separate external-process matrix on both supported platforms", () => {
-  const script = readFileSync(join(root, "scripts", "real-handoff-gate.mjs"), "utf8");
-  assert.doesNotMatch(script, /from ["']\.\.\/src\//);
-  assert.match(script, /install\.sh/);
-  assert.match(script, /join\(commandBin, "porcupi"\)/);
-  assert.match(script, /join\(commandBin, "pi"\)/);
-  assert.match(script, /inputHex/);
-  const workflow = readFileSync(join(root, ".github", "workflows", "real-handoff-release-gate.yml"), "utf8");
-  assert.match(workflow, /os: \[macos-14, ubuntu-24\.04\]/);
-  assert.match(workflow, /stock_pi: \[absent, present\]/);
-  assert.match(workflow, /npm run test:real-handoff/);
-  assert.match(workflow, /actions\/upload-artifact@v4/);
-  const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  assert.equal(manifest.scripts["test:real-handoff"], "node scripts/real-handoff-gate.mjs");
-});
-
-test("real handoff runner rejects unsupported Stock Pi scenarios before running the gate", () => {
-  const result = spawnSync(process.execPath, [join(root, "scripts", "real-handoff-gate.mjs"), "--stock-pi=unknown"], {
+test("release gates expose the public packed-artifact and exact-source parity journeys", () => {
+  const result = spawnSync(process.execPath, [join(root, "scripts", "release-installation-gate.mjs"), "--describe"], {
     cwd: root,
     encoding: "utf8",
   });
-  assert.notEqual(result.status, 0);
-  assert.match(`${result.stdout}${result.stderr}`, /--stock-pi=absent\|present/);
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  const contract = JSON.parse(result.stdout);
+  assert.deepEqual(contract.supportedPlatforms, ["darwin", "linux"]);
+  assert.deepEqual(contract.journeys["packed-release"].stockPi, ["absent", "present"]);
+  assert.deepEqual(contract.journeys["packed-release"].publicProcesses, [
+    "pack", "collision-refusal", "fresh-install", "launch", "verify", "rollback", "uninstall",
+    "v0.1.0-install", "v0.1.0-upgrade", "launch", "verify", "rollback", "uninstall",
+  ]);
+  assert.deepEqual(contract.journeys["source-parity"].publicProcesses, [
+    "exact-source-install", "packed-install", "compare-installed-state", "launch", "verify", "uninstall",
+  ]);
+  assert.deepEqual(contract.reportIdentities, [
+    "package", "packedIntegrity", "repository", "piBase", "fixture", "platform", "command", "outcome", "duration",
+  ]);
+
+  const workflow = readFileSync(join(root, ".github", "workflows", "release-installation-gate.yml"), "utf8");
+  assert.match(workflow, /os: \[macos-14, ubuntu-24\.04\]/);
+  assert.match(workflow, /stock_pi: \[absent, present\]/);
+  assert.match(workflow, /--journey=packed-release/);
+  assert.match(workflow, /--journey=source-parity/);
+  assert.match(workflow, /actions\/upload-artifact@v4/);
+  const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  assert.equal(manifest.scripts["test:release-installation"], "node scripts/release-installation-gate.mjs");
+});
+
+test("release gate runners reject unsupported journey and Stock Pi inputs before running", () => {
+  for (const argument of ["--journey=unknown", "--stock-pi=unknown"]) {
+    const result = spawnSync(process.execPath, [join(root, "scripts", "release-installation-gate.mjs"), argument], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stdout}${result.stderr}`, /--journey=packed-release\|source-parity|--stock-pi=absent\|present/);
+  }
+});
+
+test("Release Installation documentation leads with one exact npm version and preserves historical boundaries", () => {
+  const readme = readFileSync(join(root, "README.md"), "utf8");
+  const install = readFileSync(join(root, "docs", "release-installation.md"), "utf8");
+  const checklist = readFileSync(join(root, "docs", "releases", "release-checklist.md"), "utf8");
+  const historicalInstall = readFileSync(join(root, "docs", "install.md"), "utf8");
+  const release = JSON.parse(readFileSync(join(root, "release", "v0.2.0.json"), "utf8"));
+
+  for (const document of [readme, install]) {
+    assert.match(document, /npx --yes porcupi@0\.2\.0/);
+    assert.match(document, /exact version/i);
+    assert.match(document, /networked/i);
+    assert.match(document, /interactive/i);
+    assert.match(document, /macOS.*Linux/is);
+    assert.match(document, /Git.*npm.*Node\.js/is);
+    assert.match(document, /pi-wait-for-user/);
+    assert.match(document, /git clone --branch v0\.2\.0/);
+    assert.match(document, /audit.*fallback|fallback.*audit/is);
+  }
+  assert.match(historicalInstall, /^# Install PorcuPi v0\.1\.0/m);
+  assert.match(checklist, /claim.*`porcupi`.*npm/i);
+  assert.match(checklist, /do not publish.*test|tests.*do not publish/is);
+  assert.match(checklist, /packed integrity/i);
+  assert.deepEqual(release.npmArtifact, {
+    name: "porcupi",
+    version: "0.2.0",
+    executable: "porcupi",
+    packageInputsSha256: release.packageInputsSha256,
+  });
+  assert.equal(release.source.repository, "https://github.com/taylorrowser/PorcuPi.git");
+  assert.equal(release.source.tag, "v0.2.0");
+  assert.equal(release.acceptanceEvidence.workflow, ".github/workflows/release-installation-gate.yml");
+  assert.equal(release.acceptanceEvidence.reportSchemaVersion, 1);
 });

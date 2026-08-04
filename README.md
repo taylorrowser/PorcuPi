@@ -2,23 +2,32 @@
 
 PorcuPi adds individual resource selection to Pi's Git package lifecycle and builds an isolated Managed Pi from explicitly selected source patches, without modifying Stock Pi.
 
-PorcuPi v1 targets macOS and Linux. The current release is [PorcuPi v0.1.0](docs/releases/v0.1.0.md). It installs and launches a release-pinned Managed Pi, manages individually selected Pi resources and Patches from exact Git commits, atomically applies pending Patch intent as immutable compositions, and retains one verified local Composition for rollback.
+PorcuPi v1 targets macOS and Linux. The current npm-enabled release is v0.2.0. It installs and launches a release-pinned Managed Pi, manages individually selected Pi resources and Patches from exact Git commits, atomically applies pending Patch intent as immutable compositions, and retains one verified local Composition for rollback.
 
-## Install the zero-Patch Managed Pi
+## Install or upgrade with Release Installation
 
-Prerequisites: Git, npm, and Node.js 22.19 or newer. Existing `pi-wait-for-user` Managed Installation users must first follow the [old-manager uninstall and manual migration procedure](docs/migration-from-pi-wait-for-user.md); PorcuPi does not adopt legacy state or payloads.
-
-Bootstrap from the exact versioned source rather than a moving branch:
+Run the official npm artifact at one exact version:
 
 ```sh
-git clone --branch v0.1.0 --depth 1 https://github.com/taylorrowser/PorcuPi.git
+npx --yes porcupi@0.2.0
+```
+
+The exact version is deliberate: it cannot silently resolve to a later PorcuPi release. Release Installation remains **networked** and **interactive**, supports **macOS and Linux** only, and requires **Git, npm, and Node.js 22.19 or newer**. npm delivers and starts the one-shot installer but does not own the installed PorcuPi lifecycle; GitHub remains the canonical source and release record.
+
+Existing `pi-wait-for-user` Managed Installation users must first follow the [old-manager uninstall and manual migration procedure](docs/migration-from-pi-wait-for-user.md); PorcuPi does not adopt legacy state or payloads. An intact PorcuPi v0.1.0 installation can instead run the same exact v0.2.0 command for a guided, readiness-checked upgrade. Historical [v0.1.0 installation documentation](docs/install.md), release records, and artifacts remain immutable, and v0.1.0 was not retroactively published to npm.
+
+See the complete [Release Installation guide](docs/release-installation.md) for fresh installation, v0.1.0 upgrade, Stock Pi and collision behavior, interruption recovery, trust limits, and release evidence.
+
+The exact-tag source path remains the advanced audit and fallback entrance rather than the primary journey:
+
+```sh
+git clone --branch v0.2.0 --depth 1 https://github.com/taylorrowser/PorcuPi.git
 cd PorcuPi
+git rev-parse HEAD
 ./install.sh
 ```
 
-See the complete [v0.1.0 installation guide](docs/install.md) for release-commit confirmation, clean-machine and Stock Pi scenarios, foreign-collision behavior, trust limits, and external-isolation guidance.
-
-The three-page guided installer shows the exact Pi Base commit, asks whether PorcuPi should own the `pi` command, and reviews the result. The choice defaults to No; use arrows or `y`/`n`, press Enter to continue/install, or Escape to cancel. It:
+Both entrances invoke the same guided Release Installation. The three-page flow shows the exact Pi Base commit, asks whether PorcuPi should own the `pi` command, and reviews the result. The choice defaults to No; use arrows or `y`/`n`, press Enter to continue/install, or Escape to cancel. It:
 
 1. preserves Stock Pi and, by default, does not create or replace a `pi` command;
 2. verifies official Pi v0.81.1 at commit `20be4b18d4c57487f8993d2762bace129f0cf7c6`;
@@ -154,7 +163,16 @@ npm test
 
 The tests drive the guided installer and public `porcupi add`, `porcupi manage`, `porcupi apply`, `porcupi rollback`, `porcupi pi enable|disable`, `porcupi uninstall`, launch, and `porcupi verify` commands as external processes through pseudo-terminals and isolated homes/projects, using deterministic local Git Pi Base, mixed resource/Patch Source Repository, metadata, project-trust, integrity-corruption, composition, lifecycle-lock, process-lease, cleanup, interruption, and Pi package-lifecycle fixtures.
 
-The separate networked release gate composes the exact 20-Patch `pi-wait-for-user` handoff and installs its Question Tool through Pi on macOS and Linux, with and without Stock Pi:
+The Release Installation gate executes the exact `npm pack` tarball through npm's package-execution path on macOS and Linux with Stock Pi absent and present. It covers collision refusal, fresh install, v0.1.0 upgrade, launch, full verify, rollback, and uninstall, while a separate journey compares the exact-source and packed entrances:
+
+```sh
+npm run test:release-installation -- --journey=packed-release --stock-pi=absent
+npm run test:release-installation -- --journey=source-parity
+```
+
+Durable reports bind exact package and packed integrity, repository revision/tag, Pi Base, fixture, platform, command, outcome, and duration identities. Candidate tests use the local packed artifact and do not publish mutable versions. See the [Release Installation guide](docs/release-installation.md) and [maintainer checklist](docs/releases/release-checklist.md).
+
+The separate networked source-handoff gate composes the exact 20-Patch `pi-wait-for-user` handoff and installs its Question Tool through Pi on macOS and Linux, with and without Stock Pi:
 
 ```sh
 npm run test:real-handoff -- --stock-pi=absent

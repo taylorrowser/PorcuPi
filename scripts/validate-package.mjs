@@ -83,7 +83,29 @@ const packageLock = readJson("package-lock.json");
 if (release.schemaVersion !== 1 || release.porcupiVersion !== manifest.version || release.tag !== `v${manifest.version}`) {
   fail("package version does not match its exact release record");
 }
-if (release.packageInputsSha256 !== packageInputHash.digest("hex")) fail("release record does not match the exact package input bytes");
+const computedPackageInputsSha256 = packageInputHash.digest("hex");
+if (release.packageInputsSha256 !== computedPackageInputsSha256) fail("release record does not match the exact package input bytes");
+if (JSON.stringify(release.npmArtifact) !== JSON.stringify({
+  name: manifest.name,
+  version: manifest.version,
+  executable: "porcupi",
+  packageInputsSha256: computedPackageInputsSha256,
+})) fail("release npm artifact identity does not match the package");
+if (JSON.stringify(release.source) !== JSON.stringify({
+  repository: "https://github.com/taylorrowser/PorcuPi.git",
+  tag: `v${manifest.version}`,
+})) fail("release source identity does not match the canonical GitHub release");
+if (JSON.stringify(release.supportedOperatingSystems) !== JSON.stringify(["macOS", "Linux"])) {
+  fail("release supported platforms must be macOS and Linux");
+}
+if (
+  release.acceptanceEvidence?.workflow !== ".github/workflows/release-installation-gate.yml"
+  || release.acceptanceEvidence?.reportSchemaVersion !== 1
+  || release.acceptanceEvidence?.packedIntegrityField !== "report.json#/packedIntegrity/integrity"
+  || release.acceptanceEvidence?.sourceRevisionField !== "report.json#/repository/revision"
+  || typeof release.acceptanceEvidence?.packedReportArtifact !== "string"
+  || typeof release.acceptanceEvidence?.sourceParityReportArtifact !== "string"
+) fail("release acceptance evidence contract does not match the Release Installation gate");
 if (release.recipeId !== compositionRecipe.id) fail("release record does not match the fixed recipe");
 if (JSON.stringify(release.piBase) !== JSON.stringify({ repository: lock.repository, tag: lock.tag, commit: lock.commit })) {
   fail("release record does not match the Pi Base lock");

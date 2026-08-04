@@ -97,7 +97,7 @@ To advance the same Tracked Branch to a fast-forward commit, run `porcupi add` a
 porcupi add https://github.com/example/pi-resources@main
 ```
 
-To change channels or replace a pinned source, remove that Source Repository's selections before selecting a different branch, tag, or full commit. Ordinary Pi package updates do not advance PorcuPi's exact Git ref. PorcuPi never silently retargets saved Artifacts whose paths, source identity, or Patch digests changed.
+To change an existing Tracked Branch to a different channel, remove that Source Repository's selections before selecting a different branch, tag, or full commit. A pinned source may instead be explicitly re-added with a branch to opt into tracking. Ordinary Pi package updates do not advance PorcuPi's exact Git ref. PorcuPi never silently retargets saved Artifacts whose paths, source identity, or Patch digests changed.
 
 ## Prepare a Source Repository
 

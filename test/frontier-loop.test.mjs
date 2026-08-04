@@ -4,6 +4,7 @@ import {
   failureBaseState,
   findFrontier,
   panesAreRunning,
+  isRemoteValidationFailure,
   isTransientInfrastructureFailure,
   parsePullRequestNumber,
   shouldDiagnoseResume,
@@ -67,10 +68,15 @@ test("validation exhaustion escalates to an independent diagnostic instance", ()
   assert.equal(validationFailureAction({ attempt: 3, maximumAttempts: 3, diagnosticEscalations: 2, maximumDiagnosticEscalations: 2 }), "fail");
 });
 
-test("a preserved validation failure resumes with diagnosis instead of another implementation pass", () => {
+test("a preserved local or remote validation failure resumes with diagnosis", () => {
   assert.equal(shouldDiagnoseResume({ phase: "failed", lastError: "Validation failed 3 times for #45" }), true);
-  assert.equal(shouldDiagnoseResume({ phase: "failed", lastError: "Remote checks failed for PR #45" }), false);
+  assert.equal(shouldDiagnoseResume({ phase: "failed", lastError: "Remote checks failed for PR #63" }), true);
   assert.equal(shouldDiagnoseResume({ phase: "validating", lastError: null }), false);
+});
+
+test("remote check failures are classified as validation failures", () => {
+  assert.equal(isRemoteValidationFailure(new Error("Remote checks failed for PR #63; inspect the issue log")), true);
+  assert.equal(isRemoteValidationFailure(new Error("HTTP 502 from GitHub")), false);
 });
 
 test("transient GitHub infrastructure errors are retryable but authorization errors are not", () => {

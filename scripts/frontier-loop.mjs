@@ -146,7 +146,12 @@ export function validationFailureAction({ attempt, maximumAttempts, diagnosticEs
 }
 
 export function shouldDiagnoseResume(state) {
-  return state?.phase === "failed" && /^Validation failed/.test(state.lastError ?? "");
+  return state?.phase === "failed" && /^(?:Validation failed|Remote checks failed)/.test(state.lastError ?? "");
+}
+
+export function isRemoteValidationFailure(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /^Remote checks failed for PR #\d+/.test(message);
 }
 
 export function isTransientInfrastructureFailure(error) {
@@ -311,7 +316,7 @@ function implementationPrompt(issue, resumed) {
 }
 
 function diagnosisPrompt(issue, reasonLog) {
-  return `/skill:diagnosing-bugs Independently diagnose and fix the repeatedly failing implementation of GitHub issue #${issue.number} (${issue.title}) on the current branch. The latest explicit VALIDATION: FAIL in ${reasonLog} is the red-capable feedback signal; reproduce each finding at the correct seam before changing code. Read the issue, parent spec, repository instructions, glossary, relevant ADRs, all existing branch commits, and prior validation history. Generate ranked falsifiable hypotheses, then proceed autonomously through diagnosis, regression tests, root-cause fixes, cleanup, focused checks, the full suite, and code review. Be willing to revert or redesign earlier implementation rather than layering patches. Treat this child issue's acceptance criteria as the scope boundary and leave open sibling tickets deferred. Commit every completed fix with issue #${issue.number} in the commit message. Do not push, create or merge a PR, or close issues; the tmux orchestrator owns those steps.`;
+  return `/skill:diagnosing-bugs Independently diagnose and fix the repeatedly failing implementation of GitHub issue #${issue.number} (${issue.title}) on the current branch. The latest failed command validation, explicit VALIDATION: FAIL, or remote PR check in ${reasonLog} is the red-capable feedback signal; inspect the open PR and its failed GitHub Actions logs when remote checks failed, then reproduce each finding at the correct seam before changing code. Read the issue, parent spec, repository instructions, glossary, relevant ADRs, all existing branch commits, and prior validation history. Generate ranked falsifiable hypotheses, then proceed autonomously through diagnosis, regression tests, root-cause fixes, cleanup, focused checks, the full suite, and code review. Be willing to revert or redesign earlier implementation rather than layering patches. Treat this child issue's acceptance criteria as the scope boundary and leave open sibling tickets deferred. Commit every completed fix with issue #${issue.number} in the commit message. Do not push, create or merge a PR, or close issues; the tmux orchestrator owns those steps.`;
 }
 
 function waitForPullRequestChecks(prNumber, worktree, logPath) {
@@ -390,7 +395,7 @@ function processIssue(issue, paths, state) {
   const prepared = prepareWorktree(issue, paths, state);
   const issueLog = join(paths.root, `issue-${issue.number}.log`);
   const currentHead = commandOutput("git", ["rev-parse", "HEAD"], { cwd: prepared.worktree });
-  const resumeValidated = validatedHeadMatches(state, currentHead);
+  const resumeValidated = !diagnoseOnResume && validatedHeadMatches(state, currentHead);
   let diagnosticEscalations = 0;
   state = writeState(paths, state, {
     phase: resumeValidated ? "merging" : prepared.resumed ? "resuming" : "implementing",
@@ -517,8 +522,19 @@ function runLoop(parent) {
         }
         state = processIssue(issue, paths, state);
       } catch (error) {
-        if (!isTransientInfrastructureFailure(error) || stopped(paths)) throw error;
         const message = error instanceof Error ? error.message : String(error);
+        if (isRemoteValidationFailure(error) && !stopped(paths)) {
+          state = failureBaseState(state, readState(paths));
+          state = writeState(paths, state, {
+            phase: "failed",
+            message: "Remote validation failed; launching an independent diagnostic instance",
+            validatedHead: null,
+            lastError: message,
+          });
+          log(`${state.message}: ${message}`);
+          continue;
+        }
+        if (!isTransientInfrastructureFailure(error) || stopped(paths)) throw error;
         state = failureBaseState(state, readState(paths));
         state = writeState(paths, state, {
           phase: "retrying-infrastructure",

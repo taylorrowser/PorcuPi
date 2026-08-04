@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for Patch Selection Intent in issue #16. Qualified for explicitly confirmed cross-release upgrades by ADR 0011 in issue #43.
+Accepted for Patch Selection Intent in issue #16. Qualified for explicitly confirmed cross-release upgrades by ADR 0011 in issue #43 and for implicit one-file Patch Series representation by ADR 0012 in issue #46.
 
 ## Context
 
@@ -12,7 +12,7 @@ Git trees can also contain symbolic links and gitlinks. Following either during 
 
 ## Decision
 
-PorcuPi obtains the tracked Git index for the resolved exact Source Repository commit and recursively discovers only `100644` or `100755` files whose full source-relative paths are beneath root `patches/` and end in `.patch`. It rejects symbolic links, Git submodules, unsupported modes, unsafe paths, non-regular working-tree entries, and real paths outside the checkout. Each discovered Patch receives a SHA-256 over its exact bytes. Patch Artifact identity remains canonical source locator, kind `Patch`, and full structural path; retained intent additionally binds the exact source commit and SHA-256.
+PorcuPi obtains the tracked Git index for the resolved exact Source Repository commit and recursively discovers only `100644` or `100755` files whose full source-relative paths are beneath root `patches/` and end in `.patch`. It rejects symbolic links, Git submodules, unsupported modes, unsafe paths, non-regular working-tree entries, and real paths outside the checkout. Each discovered Patch receives a SHA-256 over its exact bytes. ADR 0012 evolves its Artifact representation into an implicit one-file Patch Series: the full structural path is the series identity, while retained intent additionally binds the exact member source commit, path, and SHA-256.
 
 A Source Repository may optionally contain this versioned root `porcupi.json` shape:
 

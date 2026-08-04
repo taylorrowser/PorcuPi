@@ -321,7 +321,7 @@ function createReceipt(payloadRoot, lock, patches) {
     schemaVersion: 1,
     porcupiVersion,
     piBase: lock,
-    patches: patches.map(({ locator, commit, path, sha256 }) => ({ locator, commit, path, sha256 })),
+    patches: patches.map(({ locator, seriesId, commit, path, sha256 }) => ({ locator, seriesId, commit, path, sha256 })),
     recipe: compositionRecipe,
     platform: platformIdentity(),
     requiredExecutable: executable,

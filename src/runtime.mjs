@@ -23,7 +23,8 @@ export const managedRootOwner = Object.freeze({ schemaVersion: 1, type: "porcupi
 
 const activationFields = new Set(["schemaVersion", "active", "previous"]);
 const activationEntryFields = new Set(["compositionId", "patches"]);
-const patchIdentityFields = new Set(["locator", "commit", "path", "sha256"]);
+const legacyPatchIdentityFields = new Set(["locator", "commit", "path", "sha256"]);
+const patchIdentityFields = new Set(["locator", "seriesId", "commit", "path", "sha256"]);
 const receiptFields = new Set([
   "schemaVersion", "porcupiVersion", "piBase", "patches", "recipe", "platform",
   "requiredExecutable", "payload", "compositionId",
@@ -264,15 +265,16 @@ function validatePatchIdentities(value, label) {
   const keys = new Set();
   for (const patch of value) {
     if (
-      !exactObject(patch, patchIdentityFields)
+      (!exactObject(patch, patchIdentityFields) && !exactObject(patch, legacyPatchIdentityFields))
       || !validText(patch.locator)
+      || (Object.hasOwn(patch, "seriesId") && (!validText(patch.seriesId) || patch.seriesId !== patch.path))
       || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(patch.commit || "")
       || !validRelativePath(patch.path)
       || !patch.path.startsWith("patches/")
       || !patch.path.endsWith(".patch")
       || !/^[a-f0-9]{64}$/.test(patch.sha256 || "")
     ) fail(`Malformed ${label}`);
-    const key = `${patch.locator}\0${patch.path}`;
+    const key = `${patch.locator}\0${patch.seriesId ?? patch.path}\0${patch.path}`;
     if (keys.has(key) || (previousKey !== undefined && lexicalCompare(previousKey, key) >= 0)) fail(`Malformed ${label}`);
     keys.add(key);
     previousKey = key;

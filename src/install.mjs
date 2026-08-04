@@ -63,6 +63,8 @@ import { runGuidedTerminal } from "./guided-terminal.mjs";
 import { cleanupRetainedCompositions, durableUnlink, withLifecycleLock } from "./lifecycle.mjs";
 import { reconcilePiOwnershipLocked } from "./pi-ownership.mjs";
 import {
+  artifactStructuralIdentity,
+  isPatchSeries,
   patchIntentPending,
   patchSelectionSnapshot,
   readSelections,
@@ -163,7 +165,7 @@ const upgradeTransactionFields = new Set([
   "schemaVersion", "type", "dataRoot", "stage", "installedVersion", "targetVersion",
   "sourceRuntimeReceipt", "targetRuntimeReceipt", "sourceActivation", "targetActivation",
   "compositionReceipt", "sourceLauncherReceipt", "transitionLauncherReceipt", "piLauncherReceipt",
-  "selectionIntentSha256", "stageInventory",
+  "sourceSelectionIntentSha256", "targetSelectionIntentSha256", "stageInventory",
 ]);
 const upgradeCleanupFields = new Set([
   "schemaVersion", "type", "dataRoot", "sourceStage", "retiredStage", "targetVersion", "nonce", "inventory",
@@ -422,7 +424,18 @@ function readUpgradeTransaction({ paths, stage, owner, launcher }) {
   ))) fail(`Foreign PorcuPi upgrade transaction requires manual inspection: ${stage}`);
   if (
     (transaction.piLauncherReceipt !== null && transaction.piLauncherReceipt?.type !== "porcupi-pi-launcher")
-    || (transaction.selectionIntentSha256 !== null && !/^[a-f0-9]{64}$/.test(transaction.selectionIntentSha256 || ""))
+    || (transaction.sourceSelectionIntentSha256 !== null && !/^[a-f0-9]{64}$/.test(transaction.sourceSelectionIntentSha256 || ""))
+    || (transaction.targetSelectionIntentSha256 !== null && !/^[a-f0-9]{64}$/.test(transaction.targetSelectionIntentSha256 || ""))
+    || (transaction.sourceSelectionIntentSha256 === null) !== (transaction.targetSelectionIntentSha256 === null)
+  ) fail(`Foreign PorcuPi upgrade transaction requires manual inspection: ${stage}`);
+  const targetSelectionsPath = join(stage, "target-selections.json");
+  if (transaction.targetSelectionIntentSha256 === null) {
+    if (pathExists(targetSelectionsPath)) fail(`Foreign PorcuPi upgrade transaction requires manual inspection: ${stage}`);
+  } else if (
+    !pathExists(targetSelectionsPath)
+    || !lstatSync(targetSelectionsPath).isFile()
+    || lstatSync(targetSelectionsPath).isSymbolicLink()
+    || sha256Bytes(readFileSync(targetSelectionsPath)) !== transaction.targetSelectionIntentSha256
   ) fail(`Foreign PorcuPi upgrade transaction requires manual inspection: ${stage}`);
   const migrated = validateActivation(readJson(join(stage, "target-activation.json"), "migrated PorcuPi activation"));
   if (canonicalJson(migrated) !== canonicalJson(targetActivation)) {
@@ -519,9 +532,10 @@ function validateUpgradePublicationState({ paths, launcher, stage, transaction, 
   }
   const selectionsPath = join(paths.state, "selections.json");
   const selectionIntentSha256 = pathExists(selectionsPath) ? sha256Bytes(readFileSync(selectionsPath)) : null;
-  if (selectionIntentSha256 !== transaction.selectionIntentSha256) {
-    fail("PorcuPi Selection Intent changed during upgrade recovery");
-  }
+  if (
+    selectionIntentSha256 !== transaction.sourceSelectionIntentSha256
+    && selectionIntentSha256 !== transaction.targetSelectionIntentSha256
+  ) fail("PorcuPi Selection Intent changed during upgrade recovery");
   const runtimeReceipt = validateRuntimeReceipt(readJson(paths.runtimeReceipt, "PorcuPi runtime receipt"));
   if (
     canonicalJson(runtimeReceipt) !== canonicalJson(transaction.sourceRuntimeReceipt)
@@ -530,7 +544,8 @@ function validateUpgradePublicationState({ paths, launcher, stage, transaction, 
   const kind = runtimeKind(paths.root, paths.runtime, transaction);
   const targetIsAuthoritative = kind === "target"
     && canonicalJson(activation) === canonicalJson(transaction.targetActivation)
-    && canonicalJson(runtimeReceipt) === canonicalJson(transaction.targetRuntimeReceipt);
+    && canonicalJson(runtimeReceipt) === canonicalJson(transaction.targetRuntimeReceipt)
+    && selectionIntentSha256 === transaction.targetSelectionIntentSha256;
   const previousRuntime = join(stage, "previous-runtime");
   if (pathExists(previousRuntime)) {
     validateRuntimeDirectory(stage, previousRuntime, transaction.sourceRuntimeReceipt, "Previous PorcuPi runtime");
@@ -633,6 +648,13 @@ function completeUpgradeTransaction(context) {
 
   atomicWrite(paths.runtimeReceipt, transaction.targetRuntimeReceipt);
   checkpoint("upgrade-target-runtime-receipt-written");
+  const selectionsPath = join(paths.state, "selections.json");
+  const currentSelectionIntentSha256 = pathExists(selectionsPath) ? sha256Bytes(readFileSync(selectionsPath)) : null;
+  if (currentSelectionIntentSha256 === transaction.sourceSelectionIntentSha256
+    && currentSelectionIntentSha256 !== transaction.targetSelectionIntentSha256) {
+    atomicWrite(selectionsPath, readFileSync(join(stage, "target-selections.json"), "utf8"));
+  }
+  checkpoint("upgrade-selection-intent-written");
   atomicWrite(paths.activation, transaction.targetActivation);
   checkpoint("upgrade-activation-written");
 
@@ -879,12 +901,13 @@ function confirmInstallation(lock, input, output) {
 function selectedArtifactReview(sources) {
   return sources.flatMap((source) => source.artifacts.map((artifact) => {
     const scope = artifact.scope ? ` [${artifact.scope}${artifact.projectRoot ? `: ${artifact.projectRoot}` : ""}]` : "";
-    return `${artifact.kind} ${source.locator}@${source.commit}:${artifact.path}${scope}`;
+    const kind = isPatchSeries(artifact) ? "Patch Series" : artifact.kind;
+    return `${kind} ${source.locator}@${source.commit}:${artifactStructuralIdentity(artifact)}${scope}`;
   }));
 }
 
 function patchReview(patches) {
-  return patches.map((patch) => `${patch.locator}@${patch.commit}:${patch.path} (sha256 ${patch.sha256})`);
+  return patches.map((patch) => `${patch.locator}@${patch.commit}:${patch.seriesId ?? patch.path} · ${patch.path} (sha256 ${patch.sha256})`);
 }
 
 function confirmUpgrade({ active, installedVersion, lock, ownPi, selections, input, output }) {
@@ -1031,6 +1054,14 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
       previous: existing.active.activation.active,
     };
     atomicWrite(join(stageRoot, "target-activation.json"), targetActivation);
+    const selectionsPath = join(paths.state, "selections.json");
+    const sourceSelectionIntentSha256 = pathExists(selectionsPath) ? sha256Bytes(readFileSync(selectionsPath)) : null;
+    let targetSelectionIntentSha256 = null;
+    if (sourceSelectionIntentSha256 !== null) {
+      const targetSelectionsPath = join(stageRoot, "target-selections.json");
+      atomicWrite(targetSelectionsPath, { schemaVersion: 2, sources: selections.sources });
+      targetSelectionIntentSha256 = sha256Bytes(readFileSync(targetSelectionsPath));
+    }
     writeUpgradeScratchReceipt(stageRoot, stageOwner);
     const confirmed = await confirmUpgrade({
       active: existing.active,
@@ -1062,9 +1093,8 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
       sourceLauncherReceipt,
       transitionLauncherReceipt: expectedTransitionLauncherReceipt(sourceLauncherReceipt, stageRoot),
       piLauncherReceipt,
-      selectionIntentSha256: pathExists(join(paths.state, "selections.json"))
-        ? sha256Bytes(readFileSync(join(paths.state, "selections.json")))
-        : null,
+      sourceSelectionIntentSha256,
+      targetSelectionIntentSha256,
       stageInventory: scratchInventory(stageRoot),
     };
     atomicWrite(join(stageRoot, "transaction.json"), transaction);

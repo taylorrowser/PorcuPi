@@ -592,12 +592,20 @@ function discoverPatchArtifacts(checkout, diagnostics, piBase) {
       ) {
         throw new Error("not a repository-bounded regular file");
       }
-      artifacts.push({ kind: "Patch", path, sha256: sha256File(absolute) });
+      artifacts.push({ path, sha256: sha256File(absolute) });
     } catch {
       diagnostics.push({ path, reason: "Patch candidate is not a repository-bounded regular file" });
     }
   }
-  return readPatchMetadata(checkout, artifacts, piBase, diagnostics);
+  return readPatchMetadata(checkout, artifacts, piBase, diagnostics).map((patch) => ({
+    kind: "PatchSeries",
+    id: patch.path,
+    members: [{ path: patch.path, sha256: patch.sha256 }],
+    ...(patch.displayName === undefined ? {} : { displayName: patch.displayName }),
+    ...(patch.description === undefined ? {} : { description: patch.description }),
+    ...(patch.compatible === undefined ? {} : { compatible: patch.compatible }),
+    ...(patch.compatibilityDeclared === undefined ? {} : { compatibilityDeclared: patch.compatibilityDeclared }),
+  }));
 }
 
 export function discoverPiArtifacts(root, { piBase } = {}) {
@@ -628,7 +636,8 @@ export function discoverPiArtifacts(root, { piBase } = {}) {
       .map((path) => ({ kind, path: relativePath(checkout, path) })));
   }
   artifacts.push(...discoverPatchArtifacts(checkout, diagnostics, piBase));
-  artifacts.sort((left, right) => `${left.kind}\0${left.path}`.localeCompare(`${right.kind}\0${right.path}`));
+  artifacts.sort((left, right) => `${left.kind}\0${left.kind === "PatchSeries" ? left.id : left.path}`
+    .localeCompare(`${right.kind}\0${right.kind === "PatchSeries" ? right.id : right.path}`));
   diagnostics.sort((left, right) => left.path.localeCompare(right.path));
   return { artifacts, diagnostics };
 }

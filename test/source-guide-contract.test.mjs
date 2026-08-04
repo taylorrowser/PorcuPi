@@ -50,6 +50,22 @@ test("the source guide covers consuming and authoring every PorcuPi artifact kin
   assert.match(guide, /cannot declare commands, hooks, dependencies, recipes, force options, custom verifiers, or activation policy/i);
 });
 
+test("the source guide defines Tracked Branch publication and exact-snapshot semantics", () => {
+  const guide = readText("docs/source-guide.md");
+
+  assert.match(guide, /^### Publish a Tracked Branch$/m);
+  assert.match(guide, /named branch.*Tracked Branch/i);
+  assert.match(guide, /omitted ref.*default branch.*Tracked Branch/i);
+  assert.match(guide, /Selection Intent.*exact accepted commit/i);
+  assert.match(guide, /tags and full commits remain pinned/i);
+  assert.match(guide, /merging selected-content changes.*update candidate/i);
+  assert.match(guide, /Selected content comprises selected resource bytes.*Patch Series membership, order, bytes, and compatibility/i);
+  assert.match(guide, /Documentation, tests, unrelated files, and new independent unselected Artifacts do not/i);
+  assert.match(guide, /Adoption requires review of one resolved exact candidate/i);
+  assert.match(guide, /branch movement alone never mutates/i);
+  assert.match(guide, /Post-release Compatibility Update.*exact compatibility metadata.*fast-forward/is);
+});
+
 test("the primary user documentation links the source guide", () => {
   const readme = readText("README.md");
   const operations = readText("docs/operations.md");

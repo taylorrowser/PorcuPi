@@ -13,7 +13,7 @@ A repository may contain either kind or both. There is no PorcuPi package regist
 
 ### 1. Inspect and identify the source
 
-Review the source before selecting it. Pi Extensions and Patch-modified Pi code run with your user authority. Record the full commit you intend to use rather than relying on a moving branch:
+Review the source before selecting it. Pi Extensions and Patch-modified Pi code run with your user authority. Inspect the exact commit before deciding whether to pin that snapshot or retain a branch as an update channel:
 
 ```sh
 git clone https://github.com/example/pi-resources.git
@@ -22,14 +22,23 @@ git status --short
 git rev-parse HEAD
 ```
 
-PorcuPi accepts credential-free HTTPS, SSH, Git protocol, and `git:` shorthand locators. A ref may be a branch, tag, or full commit, but PorcuPi always resolves it to one full commit before review. A full commit is the clearest reproducible input:
+PorcuPi accepts credential-free HTTPS, SSH, Git protocol, and `git:` shorthand locators. A ref may be a branch, tag, or full commit, but PorcuPi always resolves it to one full commit before review. A named branch becomes a **Tracked Branch** with a canonical `refs/heads/<name>` identity. An omitted ref resolves the remote's canonical default branch and also becomes a Tracked Branch:
+
+```sh
+porcupi add "https://github.com/example/pi-resources@main"
+porcupi add "https://github.com/example/pi-resources"
+```
+
+Tracking retains an update channel, not a mutable checkout. Selection Intent, every selected Patch Series member, and Pi package settings remain bound to the same credential-free source at the exact accepted commit. The add review shows that commit before confirmation, and `porcupi manage` labels the source as tracked and shows its accepted commit.
+
+Tags and full commits remain pinned and never acquire Tracked Branch behavior. Use a full commit when you deliberately want an immutable channel:
 
 ```sh
 source_commit=$(git rev-parse HEAD)
 porcupi add "https://github.com/example/pi-resources@$source_commit"
 ```
 
-Do not put credentials in the locator. Use normal Git credential or SSH configuration when authentication is required.
+An unqualified name that resolves as both a branch and tag is rejected; qualify it as `refs/heads/<name>` or `refs/tags/<name>` to state the intended channel. Do not put credentials in the locator. Use normal Git credential or SSH configuration when authentication is required.
 
 ### 2. Select Artifacts
 
@@ -410,6 +419,8 @@ If a package only works with a Patch, test both the expected failure/disable beh
 
 ## Publish and update
 
+### Publish a pinned snapshot
+
 Publish the Git commit without rewriting it. Give consumers the credential-free repository locator and full commit:
 
 ```text
@@ -427,6 +438,16 @@ For an update:
 5. tell users to run `porcupi add <source>@<new-commit>` and review the complete replacement.
 
 Changing Patch bytes changes the exact member digest. Moving a standalone Patch File changes its implicit Patch Series identity because that identity is the structural path. A declared series keeps its identity when display text, member paths, order, or bytes change, and re-adding it reviews the complete old and new ordered inventories as one change; changing its stable `id` creates a different Artifact. Moving a resource likewise changes its structural identity. PorcuPi surfaces these changes rather than silently migrating saved intent. Do not rewrite a published commit or tell users that a moving branch is equivalent to an exact release.
+
+### Publish a Tracked Branch
+
+Give followers a credential-free locator naming the branch, such as `https://github.com/example/pi-resources@main`, or omit the ref only when the repository's default branch is the intended long-lived channel. PorcuPi canonicalizes that choice while preserving the exact accepted commit. Changing the remote default later does not retarget an already accepted channel.
+
+For a Tracked Branch, merging selected-content changes into the published branch creates an update candidate for followers. Selected content comprises selected resource bytes; selected Patch Series membership, order, bytes, and compatibility; and shared package metadata or dependencies that affect selected resources. Documentation, tests, unrelated files, and new independent unselected Artifacts do not by themselves define an update for an existing selection.
+
+Publish each candidate as an immutable commit, advance the branch by fast-forward, and keep every selected Artifact from the Source Repository coherent at that one commit. Branch movement alone never mutates Selection Intent, Pi settings, pending Patch intent, or Managed Pi Activation. Adoption requires review of one resolved exact candidate: re-running `porcupi add` for the same Tracked Branch reviews the complete replacement and writes its exact snapshot only after confirmation. A deleted branch, changed channel, ambiguous ref, or non-fast-forward rewrite is refused while the accepted snapshot remains authoritative.
+
+A Post-release Compatibility Update follows the same rule: commit the selected content or exact compatibility metadata that supports the new Pi Base, test that exact commit, and fast-forward the retained branch. This publishes a candidate for explicit compatibility assessment and review; it does not make a compatibility declaration proof, mutate followers, or activate an update automatically. Candidate notices and guided source-update adoption are separate from Tracked Branch retention.
 
 ## Trust and project scope
 

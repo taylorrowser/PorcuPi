@@ -83,6 +83,17 @@ test("real handoff fixture pins only the exact source identities and canonical 2
   assert.equal(existsSync(join(root, "patches")), false, "PorcuPi must not contain copied source Patches");
 });
 
+test("the real handoff gate validates implicit Patch Series identities", () => {
+  const gate = readFileSync(join(root, "scripts", "real-handoff-gate.mjs"), "utf8");
+
+  assert.match(gate, /assert\.equal\(selections\.schemaVersion, 2\)/);
+  assert.match(gate, /artifact\.kind === "PatchSeries"/);
+  assert.match(gate, /series\.id/);
+  assert.match(gate, /series\.members/);
+  assert.match(gate, /20 Patch Series selections/);
+  assert.doesNotMatch(gate, /artifact\.kind === "Patch"/);
+});
+
 test("release gates expose the public packed-artifact and exact-source parity journeys", () => {
   const result = spawnSync(process.execPath, [join(root, "scripts", "release-installation-gate.mjs"), "--describe"], {
     cwd: root,

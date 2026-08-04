@@ -4,16 +4,20 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  accessSync,
   chmodSync,
+  constants,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -68,6 +72,7 @@ const steps = [];
 let logIndex = 0;
 let packageEvidence;
 let stockEvidence;
+let filteredAmbientPath;
 
 function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -91,18 +96,75 @@ function dataRoot(home) {
     : join(home, ".local", "share", "porcupi");
 }
 
+function shellQuote(value) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function acceptanceToolPath() {
+  if (filteredAmbientPath !== undefined) return filteredAmbientPath;
+  const directories = [];
+  for (const [index, entry] of (process.env.PATH || "").split(delimiter).entries()) {
+    if (!entry) continue;
+    const source = resolve(entry);
+    if (resolvePathCommand("pi", source) === null) {
+      directories.push(source);
+      continue;
+    }
+    const mirror = join(runRoot, "ambient-path", String(index));
+    mkdirSync(mirror, { recursive: true });
+    let names;
+    try { names = readdirSync(source); } catch { continue; }
+    for (const name of names) {
+      if (name === "pi") continue;
+      const executable = join(source, name);
+      try {
+        accessSync(executable, constants.X_OK);
+        if (statSync(executable).isDirectory()) continue;
+        writeFileSync(join(mirror, name), `#!/bin/sh\nexec ${shellQuote(executable)} "$@"\n`, { mode: 0o755 });
+      } catch {
+        // A malformed ambient PATH entry is unavailable to the isolated fixture.
+      }
+    }
+    directories.push(mirror);
+  }
+  filteredAmbientPath = directories.join(delimiter);
+  return filteredAmbientPath;
+}
+
+function resolvePathCommand(name, pathValue) {
+  for (const directory of pathValue.split(delimiter)) {
+    if (!directory) continue;
+    const candidate = join(directory, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Keep searching the isolated PATH.
+    }
+  }
+  return null;
+}
+
 function environment(home, commandBin, stockBin) {
+  const path = [commandBin, ...(stockPi === "present" ? [stockBin] : []), acceptanceToolPath()]
+    .filter(Boolean)
+    .join(delimiter);
   const result = {
     ...process.env,
     HOME: home,
     XDG_DATA_HOME: join(home, ".local", "share"),
-    PATH: `${commandBin}:${stockPi === "present" ? `${stockBin}:` : ""}${process.env.PATH || ""}`,
+    PATH: path,
     CI: "1",
   };
+  for (const name of Object.keys(result)) {
+    if (name.toLowerCase() === "npm_config_offline") delete result[name];
+  }
   delete result.NODE_ENV;
   delete result.PORCUPI_TEST_FAULT;
   delete result.PORCUPI_TEST_FAILURE;
   delete result.PORCUPI_TEST_HOLD_UPGRADE_BOUNDARY;
+  const expectedPi = stockPi === "present" ? join(stockBin, "pi") : null;
+  assert.equal(resolvePathCommand("pi", result.PATH), expectedPi);
   return result;
 }
 
@@ -183,7 +245,7 @@ function packArtifact() {
 }
 
 function installPacked(name, artifact, home, env, { inputHex = "0d0d0d", waitFor = "1 of 3 — Installation" } = {}) {
-  return external(name, "npm", ["exec", "--yes", "--offline", "--package", artifact, "--", "porcupi"], {
+  return external(name, "npm", ["exec", "--yes", "--package", artifact, "--", "porcupi"], {
     cwd: dirname(artifact), env, inputHex, waitFor,
   });
 }
@@ -254,7 +316,7 @@ function packedReleaseJourney(artifact) {
   mkdirSync(collision.commandBin, { recursive: true });
   const collisionPath = join(collision.commandBin, "porcupi");
   writeFileSync(collisionPath, "foreign-release-gate-command\n");
-  const refused = external("fresh-foreign-collision-refusal", "npm", ["exec", "--yes", "--offline", "--package", artifact, "--", "porcupi"], {
+  const refused = external("fresh-foreign-collision-refusal", "npm", ["exec", "--yes", "--package", artifact, "--", "porcupi"], {
     cwd: dirname(artifact), env: collision.env, inputHex: "0d0d0d", waitFor: "1 of 3 — Installation", expect: "nonzero",
   });
   assert.match(refused.output, /Refusing foreign porcupi command collision/);
@@ -264,7 +326,7 @@ function packedReleaseJourney(artifact) {
   mkdirSync(piCollision.commandBin, { recursive: true });
   const piCollisionPath = join(piCollision.commandBin, "pi");
   writeFileSync(piCollisionPath, "foreign-release-gate-pi-command\n");
-  const piRefused = external("fresh-optional-pi-collision-refusal", "npm", ["exec", "--yes", "--offline", "--package", artifact, "--", "porcupi"], {
+  const piRefused = external("fresh-optional-pi-collision-refusal", "npm", ["exec", "--yes", "--package", artifact, "--", "porcupi"], {
     cwd: dirname(artifact), env: piCollision.env, inputHex: "0d790d0d", waitFor: "1 of 3 — Installation", expect: "nonzero",
   });
   assert.match(piRefused.output, /Refusing foreign pi command collision/);

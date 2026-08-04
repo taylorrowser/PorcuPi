@@ -105,6 +105,12 @@ test("release gates expose the public packed-artifact and exact-source parity jo
   assert.match(workflow, /--journey=packed-release/);
   assert.match(workflow, /--journey=source-parity/);
   assert.match(workflow, /actions\/upload-artifact@v4/);
+
+  const gate = readFileSync(join(root, "scripts", "release-installation-gate.mjs"), "utf8");
+  assert.doesNotMatch(gate, /"--offline"/, "the networked gate must not force nested installs offline");
+  assert.match(gate, /if \(name === "pi"\) continue;/, "the absent fixture must remove ambient pi commands from PATH");
+  assert.match(gate, /assert\.equal\(resolvePathCommand\("pi", result\.PATH\), expectedPi\)/);
+
   const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   assert.equal(manifest.scripts["test:release-installation"], "node scripts/release-installation-gate.mjs");
 });

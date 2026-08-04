@@ -2,7 +2,14 @@ import { spawn } from "node:child_process";
 import { cpSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
-import { atomicWrite, canonicalJson, fail, managedLayout, sha256File } from "./runtime.mjs";
+import {
+  atomicWrite,
+  canonicalJson,
+  fail,
+  managedLayout,
+  patchSeriesIdentityKey,
+  sha256File,
+} from "./runtime.mjs";
 import {
   discoverPiArtifacts,
   isFullGitCommit,
@@ -54,8 +61,8 @@ export function patchSelectionSnapshot(sources) {
     .filter(isPatchSeries)
     .map((series) => ({ source, series })))
     .sort((left, right) => lexicalCompare(
-      `${left.source.locator}\0${left.series.id}`,
-      `${right.source.locator}\0${right.series.id}`,
+      patchSeriesIdentityKey(left.source.locator, left.series.id),
+      patchSeriesIdentityKey(right.source.locator, right.series.id),
     ))
     .flatMap(({ source, series }) => series.members.map((member) => ({
       locator: source.locator,
@@ -83,7 +90,7 @@ function selectionStagingFailure(prefix, message) {
 }
 
 function patchIdentityKey(patch) {
-  return `${patch.locator}\0${patch.seriesId}\0${patch.commit}\0${patch.path}`;
+  return `${patchSeriesIdentityKey(patch.locator, patch.seriesId)}\0${patch.commit}\0${patch.path}`;
 }
 
 function stageSelectedArtifacts({ stageRoot, sources, piBase, artifactsForSource, failurePrefix }) {

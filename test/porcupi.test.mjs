@@ -2454,7 +2454,7 @@ test("Managed Pi launch strictly rejects malformed control state, receipt disagr
   assertRefused(/Malformed Managed Pi Composition root/);
 });
 
-test("strict Composition receipts reject validly rebound platform, executable-path, and payload-path mismatches", () => {
+test("strict Composition receipts reject validly rebound identity, source-snapshot, and payload mismatches", () => {
   const scenarios = [
     {
       name: "platform",
@@ -2506,6 +2506,27 @@ test("strict Composition receipts reject validly rebound platform, executable-pa
             commit: "c".repeat(40),
             path: "patches/two.patch",
             sha256: "d".repeat(64),
+          },
+        ];
+      },
+      expected: /Malformed Managed Pi Composition receipt/,
+    },
+    {
+      name: "mixed-implicit-and-declared-series-identity",
+      mutate: (receipt) => {
+        receipt.patches = [
+          {
+            locator: "example.test/source",
+            seriesId: "patches/implicit.patch",
+            commit: "a".repeat(40),
+            path: "patches/declared-member.patch",
+            sha256: "b".repeat(64),
+          },
+          {
+            locator: "example.test/source",
+            commit: "a".repeat(40),
+            path: "patches/implicit.patch",
+            sha256: "c".repeat(64),
           },
         ];
       },
@@ -2744,11 +2765,6 @@ test("declared single- and multi-file Patch Series complete add, manage, apply, 
     },
   ]);
 
-  const manage = runPorcuPi(home, ["manage"], "1b", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
-  assert.equal(manage.status, 0, manage.stderr || manage.stdout);
-  assert.match(manage.stdout, /Patch Series\s+.*coordinated-change/);
-  assert.match(manage.stdout, /2 Patch Files/);
-
   const apply = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
   assert.equal(apply.status, 0, apply.stderr || apply.stdout);
   assert.ok(apply.stdout.indexOf("patches/020-first.patch") < apply.stdout.indexOf("patches/010-second.patch"));
@@ -2769,6 +2785,17 @@ test("declared single- and multi-file Patch Series complete add, manage, apply, 
   assert.match(rollback.stdout, /Activated retained Managed Pi Composition/);
   const rolledBack = JSON.parse(readFileSync(join(managedRoot, "state", "activation.json"), "utf8"));
   assert.equal(readFileSync(join(managedRoot, "compositions", rolledBack.active.compositionId, "payload", "series.txt"), "utf8"), "base\n");
+
+  const manage = runPorcuPi(home, ["manage"], "6a206e6e0d", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+  assert.equal(manage.status, 0, manage.stderr || manage.stdout);
+  assert.match(manage.stdout, /Patch Series\s+.*coordinated-change/);
+  assert.match(manage.stdout, /Patch Series\s+.*single-change/);
+  assert.match(manage.stdout, /2 Patch Files in retained order/);
+  assert.match(manage.stdout, /1 Patch File in retained order/);
+  assert.match(manage.stdout, /Remove Patch Series: .* :: single-change/);
+  assert.match(manage.stdout, /Saved 0 Pi resource and 1 Patch Series selection/);
+  const managedSelections = JSON.parse(readFileSync(join(managedRoot, "state", "selections.json"), "utf8"));
+  assert.deepEqual(managedSelections.sources[0].artifacts.map((artifact) => artifact.id), ["coordinated-change"]);
 });
 
 test("porcupi apply builds and atomically activates the exact ordered Patch series", async () => {
@@ -3526,6 +3553,8 @@ test("invalid declared Patch Series members are diagnosed without ambiguous or s
   for (const path of ["patches/cascade-alpha.patch", "patches/cascade-beta.patch", "patches/cascade-gamma.patch"]) {
     writeFileSync(join(repository.source, path), `${path}\n`);
   }
+  mkdirSync(join(repository.source, "patches/non-regular.patch"));
+  writeFileSync(join(repository.source, "patches/non-regular.patch/member.txt"), "directory member\n");
   const gitlinkCommit = git(repository.source, "rev-parse", "HEAD");
   git(repository.source, "update-index", "--add", "--cacheinfo", `160000,${gitlinkCommit},patches/submodule.patch`);
   writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
@@ -3534,8 +3563,9 @@ test("invalid declared Patch Series members are diagnosed without ambiguous or s
       { id: "duplicate-members", members: ["patches/alpha.patch", "patches/alpha.patch"] },
       { id: "overlap-one", members: ["patches/alpha.patch"] },
       { id: "overlap-two", members: ["patches/alpha.patch"] },
-      { id: "unsafe-member", members: ["patches/../outside.patch"] },
+      { id: "boundary-escaping-member", members: ["patches/../outside.patch"] },
       { id: "missing-member", members: ["patches/missing.patch"] },
+      { id: "non-regular-member", members: ["patches/non-regular.patch"] },
       { id: "symbolic-member", members: ["patches/symbolic.patch"] },
       { id: "submodule-member", members: ["patches/submodule.patch"] },
       { id: "control-member", members: ["patches/control\n.patch"] },
@@ -3550,6 +3580,7 @@ test("invalid declared Patch Series members are diagnosed without ambiguous or s
     "patches/cascade-alpha.patch",
     "patches/cascade-beta.patch",
     "patches/cascade-gamma.patch",
+    "patches/non-regular.patch/member.txt",
   );
   git(repository.source, "commit", "-m", "Declare invalid Patch Series fixtures");
   repository.commit = git(repository.source, "rev-parse", "HEAD");
@@ -3561,8 +3592,9 @@ test("invalid declared Patch Series members are diagnosed without ambiguous or s
   assert.match(add.stdout, /Declared Patch Series duplicate-members is invalid.*duplicate member patches\/alpha\.patch/);
   assert.match(add.stdout, /Declared Patch Series overlap-one is invalid.*also declared by Patch Series/);
   assert.match(add.stdout, /Declared Patch Series overlap-two is invalid.*also declared by Patch Series/);
-  assert.match(add.stdout, /Declared Patch Series unsafe-member is invalid.*unsafe member path/);
+  assert.match(add.stdout, /Declared Patch Series boundary-escaping-member is invalid.*unsafe member path/);
   assert.match(add.stdout, /Declared Patch Series missing-member is invalid.*missing member/);
+  assert.match(add.stdout, /Declared Patch Series non-regular-member is invalid.*missing member patches\/non-regular\.patch/);
   assert.match(add.stdout, /Declared Patch Series symbolic-member is invalid.*symbolic/);
   assert.match(add.stdout, /Declared Patch Series submodule-member is invalid.*Git submodule/);
   assert.match(add.stdout, /Declared Patch Series control-member is invalid.*unsafe member path/);

@@ -52,6 +52,10 @@ export function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
+export function patchSeriesIdentityKey(locator, seriesId) {
+  return `${locator}\0${seriesId}`;
+}
+
 export function compositionIdentity(value) {
   return {
     schemaVersion: value.schemaVersion,
@@ -264,6 +268,7 @@ function validatePatchIdentities(value, label) {
   let previousSeriesKey;
   const identities = new Set();
   const memberOwners = new Set();
+  const seriesDeclarations = new Map();
   const sourceCommits = new Map();
   for (const patch of value) {
     if (
@@ -276,17 +281,20 @@ function validatePatchIdentities(value, label) {
       || !patch.path.endsWith(".patch")
       || !/^[a-f0-9]{64}$/.test(patch.sha256 || "")
     ) fail(`Malformed ${label}`);
-    const seriesKey = `${patch.locator}\0${patch.seriesId ?? patch.path}`;
+    const declaredSeries = Object.hasOwn(patch, "seriesId");
+    const seriesKey = patchSeriesIdentityKey(patch.locator, patch.seriesId ?? patch.path);
     const identity = `${seriesKey}\0${patch.path}`;
     const memberOwner = `${patch.locator}\0${patch.path}`;
     if (
       identities.has(identity)
       || memberOwners.has(memberOwner)
+      || (seriesDeclarations.has(seriesKey) && seriesDeclarations.get(seriesKey) !== declaredSeries)
       || (sourceCommits.has(patch.locator) && sourceCommits.get(patch.locator) !== patch.commit)
       || (previousSeriesKey !== undefined && lexicalCompare(previousSeriesKey, seriesKey) > 0)
     ) fail(`Malformed ${label}`);
     identities.add(identity);
     memberOwners.add(memberOwner);
+    seriesDeclarations.set(seriesKey, declaredSeries);
     sourceCommits.set(patch.locator, patch.commit);
     previousSeriesKey = seriesKey;
   }

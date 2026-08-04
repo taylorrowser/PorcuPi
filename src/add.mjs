@@ -1,7 +1,11 @@
 import { runGuidedTerminal, truncateForTerminal, windowAround } from "./guided-terminal.mjs";
 import { createInterface } from "node:readline/promises";
 import { defaultDataRoot, fail, readActiveComposition } from "./runtime.mjs";
-import { discoverPiArtifacts, resolveSourceRepository } from "./source-repository.mjs";
+import {
+  branchContainsAcceptedCommit,
+  discoverPiArtifacts,
+  resolveSourceRepository,
+} from "./source-repository.mjs";
 import {
   artifactKey,
   artifactStructuralIdentity,
@@ -14,6 +18,11 @@ import {
   saveSelectionSources,
 } from "./resource-intent.mjs";
 
+function writeResolvedSourceSnapshot(output, source) {
+  output.write(source.trackedBranch ? `Tracked Branch: ${source.trackedBranch}\n` : "Pinned source\n");
+  output.write(`Resolved exact commit: ${source.commit}\n`);
+}
+
 function replacementSources(selections, source, artifacts) {
   const withoutSource = selections.sources.filter((candidate) => candidate.locator !== source.locator);
   return artifacts.length === 0
@@ -22,6 +31,7 @@ function replacementSources(selections, source, artifacts) {
         locator: source.locator,
         commit: source.commit,
         packageSource: source.packageSource,
+        ...(source.trackedBranch ? { trackedBranch: source.trackedBranch } : {}),
         artifacts,
       }];
 }
@@ -68,7 +78,9 @@ function runAddWizard({ source, artifacts, diagnostics, currentArtifacts, previo
         output.write("\x1b[2J\x1b[H");
         if (page === 0) {
           output.write("1 of 3 — Select Artifacts\n");
-          output.write(`Repository: ${source.locator}\nExact commit: ${source.commit}\n\n`);
+          output.write(`Repository: ${source.locator}\n`);
+          writeResolvedSourceSnapshot(output, source);
+          output.write("\n");
           if (artifacts.length === 0) output.write("  No selectable Artifacts were discovered.\n");
           const artifactWindow = windowAround(output, artifactCursor, artifacts.length, 15 + Math.min(5, diagnostics.length));
           for (let index = artifactWindow.start; index < artifactWindow.end; index += 1) {
@@ -123,7 +135,8 @@ function runAddWizard({ source, artifacts, diagnostics, currentArtifacts, previo
           const selectedArtifacts = chosenWithScopes();
           reviewCursor = Math.min(reviewCursor, Math.max(0, selectedArtifacts.length - 1));
           output.write("3 of 3 — Review and save\n");
-          output.write(`Repository: ${source.locator}\nExact commit: ${source.commit}\n`);
+          output.write(`Repository: ${source.locator}\n`);
+          writeResolvedSourceSnapshot(output, source);
           if (previousCommit && previousCommit !== source.commit) output.write(`Source-wide change: ${previousCommit} → ${source.commit}\n`);
           const seriesChanges = new Map(selectedArtifacts.filter((artifact) => {
             const previousPatch = previousPatches.get(artifact.id);
@@ -232,8 +245,19 @@ export async function addResources(requestedSource, {
   const project = resolveProjectContext(cwd);
   const resolved = resolveSourceRepository(sourceInput);
   try {
-    const discovery = discoverPiArtifacts(resolved.checkout, { piBase: active.receipt.piBase });
     const previous = selections.sources.find((source) => source.locator === resolved.locator);
+    if (previous?.trackedBranch && previous.trackedBranch !== resolved.trackedBranch) {
+      fail(`Tracked Branch identity changed unexpectedly from ${previous.trackedBranch} to ${resolved.trackedBranch ?? "a pinned ref"}; accepted exact snapshot ${previous.commit} is preserved`);
+    }
+    if (
+      previous?.trackedBranch
+      && previous.trackedBranch === resolved.trackedBranch
+      && previous.commit !== resolved.commit
+      && !branchContainsAcceptedCommit(resolved.checkout, previous.commit, resolved.commit)
+    ) {
+      fail(`Tracked Branch ${resolved.trackedBranch} moved unexpectedly; accepted exact snapshot ${previous.commit} is preserved`);
+    }
+    const discovery = discoverPiArtifacts(resolved.checkout, { piBase: active.receipt.piBase });
     if (previous?.commit === resolved.commit) {
       const discoveredPatches = new Map(discovery.artifacts.filter(isPatchSeries).map((artifact) => [artifact.id, artifact]));
       for (const series of previous.artifacts.filter(isPatchSeries)) {
@@ -281,7 +305,10 @@ export async function addResources(requestedSource, {
       : globalCount === 0
         ? `${projectCount} project Pi resource selections`
         : `${globalCount + projectCount} Pi resource selections (${globalCount} global, ${projectCount} project)`;
-    output.write(`\nSaved ${scopeSummary} and ${patchCount} Patch Series selection${patchCount === 1 ? "" : "s"} from ${resolved.locator}@${resolved.commit}.\n`);    output.write("Pi owns package checkout, dependencies, updates, and loading. Managed Pi activation is unchanged.\n");
+    output.write(`\nSaved ${scopeSummary} and ${patchCount} Patch Series selection${patchCount === 1 ? "" : "s"} from ${resolved.locator}.\n`);
+    output.write(resolved.trackedBranch ? `Tracked Branch: ${resolved.trackedBranch}\n` : "Pinned source\n");
+    output.write(`Accepted exact commit: ${resolved.commit}\n`);
+    output.write("Pi owns package checkout, dependencies, updates, and loading. Managed Pi activation is unchanged.\n");
     output.write(patchPendingMessage(patchIntentPending(sources, active.activation.active.patches)));
     return { saved: true, count: result.length };
   } finally {

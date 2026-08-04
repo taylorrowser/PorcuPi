@@ -1293,6 +1293,11 @@ test("the packed release preserves active Patches and scoped Pi resources throug
   const migratedSelections = JSON.parse(readFileSync(join(managedRoot, "state", "selections.json"), "utf8"));
   assert.equal(JSON.parse(selectionsBefore).schemaVersion, 1);
   assert.equal(migratedSelections.schemaVersion, 2);
+  assert.equal(Object.hasOwn(migratedSelections.sources[0], "trackedBranch"), false);
+  const migratedManage = runPorcuPi(home, ["manage"], "1b", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" }, project);
+  assert.equal(migratedManage.status, 0, migratedManage.stderr || migratedManage.stdout);
+  assert.match(migratedManage.stdout, /Pinned source/);
+  assert.match(migratedManage.stdout, new RegExp(`Accepted exact commit: ${repository.commit}`));
   const migratedSeries = migratedSelections.sources[0].artifacts.find((artifact) => artifact.kind === "PatchSeries");
   assert.deepEqual(migratedSeries, {
     kind: "PatchSeries",
@@ -2655,6 +2660,7 @@ test("porcupi add pins and filters all four Pi resource kinds through Pi", async
     locator: canonicalLocator,
     commit: repository.commit,
     packageSource,
+    trackedBranch: "refs/heads/main",
     artifacts: [
       { kind: "Extension", path: "extensions/fixture.ts", scope: "global" },
       { kind: "Prompt", path: "prompts/fixture.md", scope: "global" },
@@ -2733,6 +2739,7 @@ test("porcupi add discovers only exact regular nested Patches and leaves them pe
     locator: canonicalLocator,
     commit: repository.commit,
     packageSource: `git:${locator}@${repository.commit}`,
+    trackedBranch: "refs/heads/main",
     artifacts: [
       {
         kind: "PatchSeries",
@@ -4289,7 +4296,7 @@ test("a Pi package failure saves no Selection Intent and never rebuilds or activ
   assert.equal(existsSync(join(home, ".pi", "agent", "settings.json")), false);
 });
 
-test("missing and ambiguous Git refs fail without mutation", async () => {
+test("named and default branches retain canonical channels while tags and commits stay pinned", async () => {
   const root = temporaryRoot();
   const home = join(root, "home");
   mkdirSync(home);
@@ -4297,22 +4304,114 @@ test("missing and ambiguous Git refs fail without mutation", async () => {
   const release = createReleaseFixture(root, base);
   assert.equal(runInstaller(release, home).status, 0);
   const repository = createResourceRepository(root);
+  git(repository.source, "branch", "release/stable");
+  git(repository.source, "tag", "snapshot");
+  const locator = await serveGitRepository(root, repository);
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const settingsPath = join(home, ".pi", "agent", "settings.json");
+
+  const named = runPorcuPi(home, ["add", `${locator}@origin/release/stable`], "206e6e0d");
+  assert.equal(named.status, 0, named.stderr || named.stdout);
+  let source = JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0];
+  assert.equal(source.trackedBranch, "refs/heads/release/stable");
+  assert.equal(source.commit, repository.commit);
+  assert.match(source.packageSource, new RegExp(`@${repository.commit}$`));
+  assert.match(JSON.stringify(JSON.parse(readFileSync(settingsPath, "utf8"))), new RegExp(`@${repository.commit}`));
+  const trackedManage = runPorcuPi(home, ["manage"], "1b", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+  assert.equal(trackedManage.status, 0, trackedManage.stderr || trackedManage.stdout);
+  assert.match(trackedManage.stdout, /Tracked Branch: refs\/heads\/release\/stable/);
+  assert.match(trackedManage.stdout, new RegExp(`Accepted exact commit: ${repository.commit}`));
+
+  const namedRemoval = runPorcuPi(home, ["add", `${locator}@origin/release/stable`], "646e6e0d");
+  assert.equal(namedRemoval.status, 0, namedRemoval.stderr || namedRemoval.stdout);
+  assert.deepEqual(JSON.parse(readFileSync(selectionsPath, "utf8")).sources, []);
+
+  const defaultBranch = runPorcuPi(home, ["add", locator], "206e6e0d");
+  assert.equal(defaultBranch.status, 0, defaultBranch.stderr || defaultBranch.stdout);
+  source = JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0];
+  assert.equal(source.trackedBranch, "refs/heads/main");
+  assert.equal(source.commit, repository.commit);
+
+  const acceptedDefault = readFileSync(selectionsPath);
+  const remote = join(root, "git-daemon", "owner", "resources.git");
+  git(remote, "symbolic-ref", "HEAD", "refs/heads/release/stable");
+  const changedDefault = runPorcuPi(home, ["add", locator], "");
+  assert.notEqual(changedDefault.status, 0);
+  assert.match(changedDefault.stdout, new RegExp(`Tracked Branch identity changed unexpectedly from refs/heads/main to refs/heads/release/stable; accepted exact snapshot ${repository.commit} is preserved`));
+  assert.deepEqual(readFileSync(selectionsPath), acceptedDefault);
+  git(remote, "symbolic-ref", "HEAD", "refs/heads/main");
+
+  const removal = runPorcuPi(home, ["add", locator], "646e6e0d");
+  assert.equal(removal.status, 0, removal.stderr || removal.stdout);
+  assert.deepEqual(JSON.parse(readFileSync(selectionsPath, "utf8")).sources, []);
+
+  const tagged = runPorcuPi(home, ["add", `${locator}@refs/tags/snapshot`], "206e6e0d");
+  assert.equal(tagged.status, 0, tagged.stderr || tagged.stdout);
+  source = JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0];
+  assert.equal(Object.hasOwn(source, "trackedBranch"), false);
+  assert.equal(source.commit, repository.commit);
+  const pinnedManage = runPorcuPi(home, ["manage"], "1b", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+  assert.equal(pinnedManage.status, 0, pinnedManage.stderr || pinnedManage.stdout);
+  assert.match(pinnedManage.stdout, /Pinned source/);
+  assert.match(pinnedManage.stdout, new RegExp(`Accepted exact commit: ${repository.commit}`));
+
+  const committed = runPorcuPi(home, ["add", `${locator}@${repository.commit}`], "6e6e0d");
+  assert.equal(committed.status, 0, committed.stderr || committed.stdout);
+  source = JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0];
+  assert.equal(Object.hasOwn(source, "trackedBranch"), false);
+  assert.equal(source.commit, repository.commit);
+});
+
+test("branch movement and ref failures preserve the accepted exact snapshot", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  git(repository.source, "branch", "deleted-later");
   git(repository.source, "branch", "collision");
   git(repository.source, "tag", "collision");
   const locator = await serveGitRepository(root, repository);
+  const remote = join(root, "git-daemon", "owner", "resources.git");
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const settingsPath = join(home, ".pi", "agent", "settings.json");
   const activationPath = join(dataRoot(home), "state", "activation.json");
+
+  const added = runPorcuPi(home, ["add", `${locator}@main`], "206e6e0d");
+  assert.equal(added.status, 0, added.stderr || added.stdout);
+  const acceptedCommit = repository.commit;
+  const selectionsBefore = readFileSync(selectionsPath);
+  const settingsBefore = readFileSync(settingsPath);
   const activationBefore = readFileSync(activationPath);
 
+  repository.commit = git(repository.source, "commit-tree", "HEAD^{tree}", "-m", "Rewrite tracked branch");
+  git(repository.source, "push", "--force", remote, `${repository.commit}:main`);
+  git(remote, "update-ref", "-d", "refs/heads/deleted-later");
+
+  const manage = runPorcuPi(home, ["manage"], "1b", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+  assert.equal(manage.status, 0, manage.stderr || manage.stdout);
+  assert.match(manage.stdout, /Tracked Branch: refs\/heads\/main/);
+  assert.match(manage.stdout, new RegExp(`Accepted exact commit: ${acceptedCommit}`));
+  assert.doesNotMatch(manage.stdout, new RegExp(repository.commit));
+
+  const unexpectedlyMoved = runPorcuPi(home, ["add", `${locator}@main`], "");
   const missing = runPorcuPi(home, ["add", `${locator}@does-not-exist`], "");
+  const deleted = runPorcuPi(home, ["add", `${locator}@deleted-later`], "");
   const ambiguous = runPorcuPi(home, ["add", `${locator}@collision`], "");
 
+  assert.notEqual(unexpectedlyMoved.status, 0);
+  assert.match(unexpectedlyMoved.stdout, new RegExp(`Tracked Branch refs/heads/main moved unexpectedly; accepted exact snapshot ${acceptedCommit} is preserved`));
   assert.notEqual(missing.status, 0);
   assert.match(missing.stdout, /does-not-exist.*does not exist/);
+  assert.notEqual(deleted.status, 0);
+  assert.match(deleted.stdout, /deleted-later.*does not exist/);
   assert.notEqual(ambiguous.status, 0);
   assert.match(ambiguous.stdout, /collision.*ambiguous between a branch and tag/);
+  assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
+  assert.deepEqual(readFileSync(settingsPath), settingsBefore);
   assert.deepEqual(readFileSync(activationPath), activationBefore);
-  assert.equal(existsSync(join(dataRoot(home), "state", "selections.json")), false);
-  assert.equal(existsSync(join(home, ".pi", "agent", "settings.json")), false);
 });
 
 test("re-adding a Source Repository reviews and replaces its commit and complete selection", async () => {

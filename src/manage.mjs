@@ -16,12 +16,18 @@ function managedArtifactKey(item) {
   return `${item.locator}\0${artifactKey(item)}`;
 }
 
+function writeAcceptedSourceSnapshot(output, source) {
+  output.write(source.trackedBranch ? `Tracked Branch: ${source.trackedBranch}\n` : "Pinned source\n");
+  output.write(`Accepted exact commit: ${source.commit}\n`);
+}
+
 function flattenedSelections(selections) {
   return selections.sources.flatMap((source) => source.artifacts.map((artifact) => ({
     ...artifact,
     locator: source.locator,
     commit: source.commit,
     packageSource: source.packageSource,
+    ...(source.trackedBranch ? { trackedBranch: source.trackedBranch } : {}),
   }))).sort((left, right) => managedArtifactKey(left).localeCompare(managedArtifactKey(right)));
 }
 
@@ -71,8 +77,9 @@ function runManageWizard({ items, project, patchPending, input, output }) {
           }
           output.write(`  ${itemWindow.start} above · ${items.length - itemWindow.end} below\n`);
           if (items[itemCursor]) {
-            output.write(`Focused exact source: ${items[itemCursor].locator}@${items[itemCursor].commit}\n`);
-            if (isPatchSeries(items[itemCursor])) {
+            const focusedSource = items[itemCursor];
+            writeAcceptedSourceSnapshot(output, focusedSource);
+            if (isPatchSeries(focusedSource)) {
               const focused = items[itemCursor];
               output.write(`Focused inventory: ${focused.members.length} Patch File${focused.members.length === 1 ? "" : "s"} in retained order\n`);
               for (const [memberIndex, member] of focused.members.entries()) {
@@ -95,7 +102,10 @@ function runManageWizard({ items, project, patchPending, input, output }) {
             output.write(`${truncateForTerminal(output, `${index === scopeCursor ? "›" : " "} [${context}] ${item.kind.padEnd(9)} ${item.locator} :: ${item.path}`)}\n`);
           }
           if (selectedItems.length === 0) output.write("  No retained Pi resources.\n");
-          else output.write(`Focused exact source: ${selectedItems[scopeCursor].locator}@${selectedItems[scopeCursor].commit}\n`);
+          else {
+            const focusedSource = selectedItems[scopeCursor];
+            writeAcceptedSourceSnapshot(output, focusedSource);
+          }
           output.write("\n[↑/↓ j/k] move  [Space/Enter] toggle scope\n[n → l] Next  [← h] Back  [Esc] cancel\n");
         } else {
           const pending = changes();
@@ -111,7 +121,7 @@ function runManageWizard({ items, project, patchPending, input, output }) {
             output.write(`${truncateForTerminal(output, `${index === reviewCursor ? "›" : " "} ${pending[index]}`)}\n`);
           }
           if (pending.length === 0) output.write("  No changes.\n");
-          output.write("\nExact source commits remain pinned; advancing one requires `porcupi add` and review.\n");
+          output.write("\nAccepted source commits remain exact snapshots; Tracked Branch movement never advances them without review.\n");
           output.write("Pi retains project trust authority; PorcuPi never approves a project.\n");
           output.write("[↑/↓ j/k] review  [← h] Back  [Esc] cancel\n[Space/Enter] Save changes\n");
         }
@@ -155,7 +165,13 @@ function runManageWizard({ items, project, patchPending, input, output }) {
 function nextSourcesFromItems(selections, items) {
   return selections.sources.flatMap((source) => {
     const artifacts = items.filter((item) => item.locator === source.locator).map((item) => {
-      const { locator: _locator, commit: _commit, packageSource: _packageSource, ...artifact } = item;
+      const {
+        locator: _locator,
+        commit: _commit,
+        packageSource: _packageSource,
+        trackedBranch: _trackedBranch,
+        ...artifact
+      } = item;
       return artifact;
     });
     return artifacts.length > 0 ? [{ ...source, artifacts }] : [];

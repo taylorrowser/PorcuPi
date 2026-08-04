@@ -227,16 +227,25 @@ function historicalSource() {
   return source;
 }
 
-function exactTargetSource() {
+function releaseSourceIdentity() {
+  const expectedTag = `v${manifest.version}`;
+  assert.equal(release.tag, expectedTag);
+  assert.equal(release.source.tag, expectedTag);
   const head = git(repositoryRoot, "rev-parse", "HEAD");
-  const tagRevision = optionalGit(repositoryRoot, "rev-parse", `v${manifest.version}^{commit}`);
+  const tagRevision = optionalGit(repositoryRoot, "rev-parse", "--verify", `refs/tags/${expectedTag}^{commit}`);
   if (requireTag) {
-    assert.equal(tagRevision, head, `v${manifest.version} must resolve to the tested revision`);
+    assert.equal(tagRevision, head, `${expectedTag} must resolve to the tested revision`);
     assert.equal(git(repositoryRoot, "status", "--porcelain"), "", "the exact release tag must have a clean worktree");
   }
+  return { head, tagRevision };
+}
+
+function exactTargetSource(sourceIdentity) {
   const source = join(runRoot, `porcupi-v${manifest.version}`);
   external("clone-exact-target-source", "git", ["clone", "--shared", "--no-checkout", repositoryRoot, source]);
-  external("checkout-exact-target-source", "git", ["checkout", "--detach", requireTag ? tagRevision : head], { cwd: source });
+  external("checkout-exact-target-source", "git", [
+    "checkout", "--detach", requireTag ? sourceIdentity.tagRevision : sourceIdentity.head,
+  ], { cwd: source });
   return source;
 }
 
@@ -301,10 +310,10 @@ function packedReleaseJourney(artifact) {
   assertStockUnchanged(upgrade.stockBin);
 }
 
-function sourceParityJourney(artifact) {
+function sourceParityJourney(artifact, sourceIdentity) {
   const sourceFixture = makeHome("source-parity-source");
   const packedFixture = makeHome("source-parity-packed");
-  const source = exactTargetSource();
+  const source = exactTargetSource(sourceIdentity);
   installSource("exact-source-install", source, sourceFixture.home, sourceFixture.env);
   installPacked("packed-install", artifact, packedFixture.home, packedFixture.env);
 
@@ -330,7 +339,7 @@ function sourceParityJourney(artifact) {
 
 function report(status, error) {
   const revision = optionalGit(repositoryRoot, "rev-parse", "HEAD") ?? "unknown";
-  const tagRevision = optionalGit(repositoryRoot, "rev-parse", `v${manifest.version}^{commit}`);
+  const tagRevision = optionalGit(repositoryRoot, "rev-parse", "--verify", `refs/tags/v${manifest.version}^{commit}`);
   const historicalRevision = optionalGit(repositoryRoot, "rev-parse", "v0.1.0^{commit}");
   const record = {
     schemaVersion: 1,
@@ -394,9 +403,10 @@ try {
   assert.equal(manifest.version, release.npmArtifact.version);
   assert.equal(release.packageInputsSha256, release.npmArtifact.packageInputsSha256);
   assert.deepEqual(release.piBase, { repository: piBase.repository, tag: piBase.tag, commit: piBase.commit });
+  const sourceIdentity = releaseSourceIdentity();
   const artifact = packArtifact();
   if (journey === "packed-release") packedReleaseJourney(artifact);
-  else sourceParityJourney(artifact);
+  else sourceParityJourney(artifact, sourceIdentity);
   report("PASS");
 } catch (error) {
   report("FAIL", error);

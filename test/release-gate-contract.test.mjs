@@ -1,12 +1,57 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const fixture = JSON.parse(readFileSync(join(root, "test", "fixtures", "real-handoff.json"), "utf8"));
+
+function releaseGateRepository(t, tagState) {
+  const repository = mkdtempSync(join(tmpdir(), "porcupi-release-gate-tag-"));
+  t.after(() => rmSync(repository, { recursive: true, force: true }));
+  for (const path of ["scripts", "release", "upstream"]) mkdirSync(join(repository, path), { recursive: true });
+  writeFileSync(
+    join(repository, "scripts", "release-installation-gate.mjs"),
+    readFileSync(join(root, "scripts", "release-installation-gate.mjs")),
+  );
+  writeFileSync(join(repository, "scripts", "install.mjs"), "#!/usr/bin/env node\n");
+  writeFileSync(join(repository, ".gitignore"), "artifacts/\n");
+  writeFileSync(join(repository, "package.json"), `${JSON.stringify({
+    name: "porcupi",
+    version: "0.2.0",
+    type: "module",
+    bin: { porcupi: "scripts/install.mjs" },
+  }, null, 2)}\n`);
+  const piBase = { repository: "https://example.test/pi.git", tag: "v1.0.0", commit: "a".repeat(40) };
+  writeFileSync(join(repository, "upstream", "pi-base.json"), `${JSON.stringify(piBase, null, 2)}\n`);
+  writeFileSync(join(repository, "release", "v0.2.0.json"), `${JSON.stringify({
+    porcupiVersion: "0.2.0",
+    tag: "v0.2.0",
+    source: { repository: "https://example.test/PorcuPi.git", tag: "v0.2.0" },
+    npmArtifact: { name: "porcupi", version: "0.2.0", executable: "porcupi", packageInputsSha256: "fixture" },
+    supportedOperatingSystems: ["macOS", "Linux"],
+    piBase,
+    recipeId: "fixture-recipe",
+    packageInputsSha256: "fixture",
+    acceptanceEvidence: {},
+  }, null, 2)}\n`);
+  const commit = (message) => execFileSync("git", [
+    "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--quiet", "-m", message,
+  ], { cwd: repository });
+  execFileSync("git", ["init", "--quiet"], { cwd: repository });
+  execFileSync("git", ["add", "."], { cwd: repository });
+  commit("fixture");
+  if (tagState === "mismatched") {
+    execFileSync("git", ["tag", "v0.2.0"], { cwd: repository });
+    writeFileSync(join(repository, "candidate-marker"), "new candidate\n");
+    execFileSync("git", ["add", "candidate-marker"], { cwd: repository });
+    commit("candidate");
+  }
+  return repository;
+}
 
 test("real handoff fixture pins only the exact source identities and canonical 20-Patch inventory", () => {
   assert.equal(fixture.schemaVersion, 1);
@@ -72,6 +117,23 @@ test("release gate runners reject unsupported journey and Stock Pi inputs before
     });
     assert.notEqual(result.status, 0);
     assert.match(`${result.stdout}${result.stderr}`, /--journey=packed-release\|source-parity|--stock-pi=absent\|present/);
+  }
+});
+
+test("packed release tag enforcement rejects a missing or mismatched exact tag", (t) => {
+  for (const tagState of ["missing", "mismatched"]) {
+    const repository = releaseGateRepository(t, tagState);
+    const result = spawnSync(process.execPath, [
+      join(repository, "scripts", "release-installation-gate.mjs"),
+      "--journey=packed-release",
+      "--require-tag",
+    ], {
+      cwd: repository,
+      encoding: "utf8",
+      env: { ...process.env, PORCUPI_ACCEPTANCE_ROOT: join(repository, "acceptance-tmp") },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(`${result.stdout}${result.stderr}`, /v0\.2\.0 must resolve to the tested revision/);
   }
 });
 

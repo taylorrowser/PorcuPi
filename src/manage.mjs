@@ -168,21 +168,23 @@ function candidateSelectionSource(previous, resolved, artifacts) {
     commit: resolved.commit,
     packageSource: resolved.packageSource,
     trackedBranch: resolved.trackedBranch,
-    artifacts: artifacts.map((artifact) => isPatchSeries(artifact) ? {
-      kind: "PatchSeries",
-      id: artifact.id,
-      members: artifact.members.map((member) => ({
-        commit: resolved.commit,
-        path: member.path,
-        sha256: member.sha256,
-      })),
-    } : {
-      kind: artifact.kind,
-      path: artifact.path,
-      scope: previous.artifacts.find((selected) => artifactKey(selected) === artifactKey(artifact)).scope,
-      ...(previous.artifacts.find((selected) => artifactKey(selected) === artifactKey(artifact)).projectRoot
-        ? { projectRoot: previous.artifacts.find((selected) => artifactKey(selected) === artifactKey(artifact)).projectRoot }
-        : {}),
+    artifacts: artifacts.map((artifact) => {
+      if (isPatchSeries(artifact)) return {
+        kind: "PatchSeries",
+        id: artifact.id,
+        members: artifact.members.map((member) => ({
+          commit: resolved.commit,
+          path: member.path,
+          sha256: member.sha256,
+        })),
+      };
+      const retained = previous.artifacts.find((selected) => artifactKey(selected) === artifactKey(artifact));
+      return {
+        kind: artifact.kind,
+        path: artifact.path,
+        scope: retained.scope,
+        ...(retained.projectRoot ? { projectRoot: retained.projectRoot } : {}),
+      };
     }),
   };
 }
@@ -292,7 +294,7 @@ function runSourceUpdateWizard({ previous, candidate, reviews, active, input, ou
   });
 }
 
-function trackedCandidate(selections, active) {
+function resolveTrackedCandidate(selections, active) {
   for (const previous of selections.sources.filter((source) => source.trackedBranch)) {
     const resolved = resolveTrackedSourceRepository(previous);
     if (resolved.commit === previous.commit) {
@@ -399,7 +401,7 @@ export async function manageResources({
 } = {}) {
   const active = readActiveComposition(dataRoot);
   const selections = readSelections(dataRoot);
-  const candidate = trackedCandidate(selections, active);
+  const candidate = resolveTrackedCandidate(selections, active);
   if (candidate) {
     return adoptTrackedCandidate({ candidate, selections, active, input, output, environment, dataRoot });
   }

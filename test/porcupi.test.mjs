@@ -4457,6 +4457,7 @@ test("porcupi manage reviews and accepts one compatible resource-only Inter-rele
 
   const selectionsBefore = readFileSync(selectionsPath);
   const settingsBefore = readFileSync(settingsPath);
+  const packageLogBefore = readFileSync(packageLog);
   const activationBefore = readFileSync(activationPath);
   const cancelled = runPorcuPi(home, ["manage"], "6e1b", {
     ...environment,
@@ -4467,6 +4468,7 @@ test("porcupi manage reviews and accepts one compatible resource-only Inter-rele
   assert.match(cancelled.stdout, new RegExp(`Candidate exact commit: ${candidateCommit}`));
   assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
   assert.deepEqual(readFileSync(settingsPath), settingsBefore);
+  assert.deepEqual(readFileSync(packageLog), packageLogBefore);
   assert.deepEqual(readFileSync(activationPath), activationBefore);
 
   const accepted = runPorcuPi(home, ["manage"], "6e6e0d", {
@@ -4534,6 +4536,14 @@ test("a Patch-only Inter-release Source Update stays pending until explicit appl
   git(repository.source, "add", ".");
   git(repository.source, "commit", "-m", "Advance selected Patch Series");
   const candidateCommit = publishRepositoryHead(root, repository);
+  const selectionBefore = readFileSync(selectionsPath);
+  const cancelled = runPorcuPi(home, ["manage"], "6e6e1b", {
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+  });
+  assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+  assert.match(cancelled.stdout, /pending Patches, and Managed Pi activation are unchanged/);
+  assert.deepEqual(readFileSync(selectionsPath), selectionBefore);
+  assert.deepEqual(readFileSync(activationPath), activeBefore);
 
   const update = runPorcuPi(home, ["manage"], "6e6e0d", {
     PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",

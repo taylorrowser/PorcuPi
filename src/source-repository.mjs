@@ -202,6 +202,20 @@ export function branchContainsAcceptedCommit(checkout, acceptedCommit, candidate
   }).status === 0;
 }
 
+export function resolveTrackedSourceRepository(source, options = {}) {
+  if (!isCanonicalTrackedBranch(source?.trackedBranch)) fail("Tracked Branch identity is malformed");
+  const parsed = parseRequestedGitSource(source.packageSource);
+  if (parsed.locator !== source.locator || parsed.ref !== source.commit) {
+    fail("Tracked Source Repository accepted snapshot is malformed");
+  }
+  const resolved = resolveSourceRepository(`git:${parsed.packageRepository}@${source.trackedBranch}`, options);
+  if (resolved.locator !== source.locator || resolved.trackedBranch !== source.trackedBranch) {
+    resolved.dispose();
+    fail("Tracked Branch candidate resolved to a different Source Repository or channel");
+  }
+  return resolved;
+}
+
 export function resolveSourceRepository(requested, { temporaryParent = tmpdir() } = {}) {
   const parsed = parseRequestedGitSource(requested);
   const temporaryRoot = mkdtempSync(join(temporaryParent, "porcupi-source-"));
@@ -555,11 +569,14 @@ function compatibilityValidationError(value, identity) {
 
 function compatibilityStatus(declaration, piBase) {
   if (!declaration || !compatibilityDeclared(declaration)) return {};
+  const compatibility = Object.fromEntries(compatibilityFields.flatMap(([key]) => (
+    declaration[key] === undefined ? [] : [[key, [...declaration[key]].sort()]]
+  )));
   const versionCompatible = declaration.supportedPiBaseVersions === undefined
     || declaration.supportedPiBaseVersions.includes(piBase?.tag);
   const commitCompatible = declaration.supportedPiBaseCommits === undefined
     || declaration.supportedPiBaseCommits.some((commit) => commit.toLowerCase() === piBase?.commit?.toLowerCase());
-  return { compatible: versionCompatible && commitCompatible, compatibilityDeclared: true };
+  return { compatible: versionCompatible && commitCompatible, compatibilityDeclared: true, compatibility };
 }
 
 function effectiveCompatibility(entry, sourceDefault) {
@@ -729,6 +746,7 @@ function implicitPatchArtifact(patch) {
     ...(patch.description === undefined ? {} : { description: patch.description }),
     ...(patch.compatible === undefined ? {} : { compatible: patch.compatible }),
     ...(patch.compatibilityDeclared === undefined ? {} : { compatibilityDeclared: patch.compatibilityDeclared }),
+    ...(patch.compatibility === undefined ? {} : { compatibility: patch.compatibility }),
   };
 }
 
@@ -786,6 +804,7 @@ function declaredPatchArtifacts(metadata, inventory, diagnostics) {
     ...(series.description === undefined ? {} : { description: series.description }),
     ...(series.compatible === undefined ? {} : { compatible: series.compatible }),
     ...(series.compatibilityDeclared === undefined ? {} : { compatibilityDeclared: series.compatibilityDeclared }),
+    ...(series.compatibility === undefined ? {} : { compatibility: series.compatibility }),
   }));
 }
 

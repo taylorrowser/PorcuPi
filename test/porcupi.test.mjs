@@ -662,6 +662,12 @@ async function serveGitRepository(root, repository) {
   throw new Error("Git fixture daemon did not start");
 }
 
+function publishRepositoryHead(root, repository) {
+  const bare = join(root, "git-daemon", "owner", "resources.git");
+  git(repository.source, "push", "--force", bare, "main:main");
+  return git(repository.source, "rev-parse", "HEAD");
+}
+
 async function serveHttpRepository(root, repository) {
   const serverRoot = join(root, "git-http");
   const bare = join(serverRoot, "Owner", "CaseRepo.git");
@@ -4412,6 +4418,220 @@ test("branch movement and ref failures preserve the accepted exact snapshot", as
   assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
   assert.deepEqual(readFileSync(settingsPath), settingsBefore);
   assert.deepEqual(readFileSync(activationPath), activationBefore);
+});
+
+test("porcupi manage reviews and accepts one compatible resource-only Inter-release Source Update", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  const locator = await serveGitRepository(root, repository);
+  const packageLog = join(root, "package.log");
+  const launchLog = join(root, "launch.log");
+  const environment = { PI_FIXTURE_PACKAGE_LOG: packageLog, PI_FIXTURE_LAUNCH_LOG: launchLog };
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d", environment);
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  const forwardedUpdate = runPorcuPiProcess(home, ["update", "fixture-package"], environment);
+  assert.equal(forwardedUpdate.status, 0, forwardedUpdate.stderr || forwardedUpdate.stdout);
+  assert.deepEqual(JSON.parse(readFileSync(launchLog, "utf8").trim()), ["update", "fixture-package"]);
+
+  const managedRoot = dataRoot(home);
+  const selectionsPath = join(managedRoot, "state", "selections.json");
+  const settingsPath = join(home, ".pi", "agent", "settings.json");
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const acceptedCommit = repository.commit;
+  for (const path of [
+    "extensions/fixture.ts",
+    "skills/fixture-skill/SKILL.md",
+    "prompts/fixture.md",
+  ]) writeFileSync(join(repository.source, path), `${readFileSync(join(repository.source, path), "utf8")}\nCandidate resource change.\n`);
+  const candidateTheme = JSON.parse(readFileSync(join(repository.source, "themes", "fixture.json"), "utf8"));
+  candidateTheme.name = "fixture-theme-candidate";
+  writeFileSync(join(repository.source, "themes", "fixture.json"), `${JSON.stringify(candidateTheme, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Advance every selected Pi resource");
+  const candidateCommit = publishRepositoryHead(root, repository);
+
+  const selectionsBefore = readFileSync(selectionsPath);
+  const settingsBefore = readFileSync(settingsPath);
+  const packageLogBefore = readFileSync(packageLog);
+  const activationBefore = readFileSync(activationPath);
+  const cancelled = runPorcuPi(home, ["manage"], "6e1b", {
+    ...environment,
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+  });
+  assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+  assert.match(cancelled.stdout, new RegExp(`Accepted exact commit: ${acceptedCommit}`));
+  assert.match(cancelled.stdout, new RegExp(`Candidate exact commit: ${candidateCommit}`));
+  assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
+  assert.deepEqual(readFileSync(settingsPath), settingsBefore);
+  assert.deepEqual(readFileSync(packageLog), packageLogBefore);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+
+  const accepted = runPorcuPi(home, ["manage"], "6e6e0d", {
+    ...environment,
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+  });
+  assert.equal(accepted.status, 0, accepted.stderr || accepted.stdout);
+  assert.match(accepted.stdout, /Extension.*changed.*extensions\/fixture\.ts/);
+  assert.match(accepted.stdout, /Skill.*changed.*skills\/fixture-skill\/SKILL\.md/);
+  assert.match(accepted.stdout, /Prompt.*changed.*prompts\/fixture\.md/);
+  assert.match(accepted.stdout, /Theme.*changed.*themes\/fixture\.json/);
+  assert.match(accepted.stdout, new RegExp(`Current PorcuPi release: ${porcupiVersion}`));
+  assert.match(accepted.stdout, new RegExp(`Current Pi Base: .*${base.commit}`));
+  assert.match(accepted.stdout, /Pi retains project trust authority; PorcuPi never approves a project/);
+  assert.match(accepted.stdout, /Immediately reconciled 4 Pi resources through Pi's public package lifecycle/);
+  assert.match(accepted.stdout, /No changed Patch Series await `porcupi apply`/);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+  const selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
+  assert.equal(selections.sources[0].commit, candidateCommit);
+  assert.ok(selections.sources[0].artifacts.every((artifact) => artifact.kind !== "PatchSeries"));
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  assert.match(settings.packages[0].source, new RegExp(`@${candidateCommit}$`));
+  const calls = readFileSync(packageLog, "utf8").trim().split("\n").map(JSON.parse);
+  assert.deepEqual(calls.at(-1), ["install", selections.sources[0].packageSource]);
+
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    supportedPiBaseCommits: ["f".repeat(40)],
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Publish incompatible resource candidate");
+  const incompatibleCommit = publishRepositoryHead(root, repository);
+  const acceptedSelections = readFileSync(selectionsPath);
+  const acceptedSettings = readFileSync(settingsPath);
+  const incompatible = runPorcuPiProcess(home, ["manage"], environment);
+  assert.notEqual(incompatible.status, 0);
+  assert.match(`${incompatible.stdout}${incompatible.stderr}`, new RegExp(`Inter-release Source Update blocked:.*${incompatibleCommit}.*does not support current Pi Base`));
+  assert.deepEqual(readFileSync(selectionsPath), acceptedSelections);
+  assert.deepEqual(readFileSync(settingsPath), acceptedSettings);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+});
+
+test("a Patch-only Inter-release Source Update stays pending until explicit apply", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createApplicablePatchRepository(root, [[
+    "patches/series.patch",
+    textPatch("series.txt", "base", "accepted"),
+  ]]);
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "206e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  const initialApply = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(initialApply.status, 0, initialApply.stderr || initialApply.stdout);
+
+  const managedRoot = dataRoot(home);
+  const selectionsPath = join(managedRoot, "state", "selections.json");
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const activeBefore = readFileSync(activationPath);
+  writeFileSync(join(repository.source, "patches", "series.patch"), textPatch("series.txt", "base", "candidate"));
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Advance selected Patch Series");
+  const candidateCommit = publishRepositoryHead(root, repository);
+  const selectionBefore = readFileSync(selectionsPath);
+  const cancelled = runPorcuPi(home, ["manage"], "6e6e1b", {
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+  });
+  assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+  assert.match(cancelled.stdout, /pending Patches, and Managed Pi activation are unchanged/);
+  assert.deepEqual(readFileSync(selectionsPath), selectionBefore);
+  assert.deepEqual(readFileSync(activationPath), activeBefore);
+
+  const update = runPorcuPi(home, ["manage"], "6e6e0d", {
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+  });
+  assert.equal(update.status, 0, update.stderr || update.stdout);
+  assert.match(update.stdout, /Patch Series.*changed.*patches\/series\.patch/);
+  assert.match(update.stdout, /Immediately reconciled 0 Pi resources/);
+  assert.match(update.stdout, /Recorded 1 Patch Series.*await `porcupi apply`/);
+  assert.match(update.stdout, /Patch Selection Intent is pending `porcupi apply`/);
+  assert.deepEqual(readFileSync(activationPath), activeBefore);
+  const selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
+  assert.equal(selections.sources[0].commit, candidateCommit);
+  assert.equal(selections.sources[0].artifacts[0].members[0].commit, candidateCommit);
+  assert.equal(
+    selections.sources[0].artifacts[0].members[0].sha256,
+    createHash("sha256").update(readFileSync(join(repository.source, "patches", "series.patch"))).digest("hex"),
+  );
+
+  const applied = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(applied.status, 0, applied.stderr || applied.stdout);
+  const activation = JSON.parse(readFileSync(activationPath, "utf8"));
+  assert.equal(
+    readFileSync(join(managedRoot, "compositions", activation.active.compositionId, "payload", "series.txt"), "utf8"),
+    "candidate\n",
+  );
+  assert.match(applied.stdout, /Patch Selection Intent matches the active Managed Pi Composition/);
+});
+
+test("a mixed Inter-release Source Update reconciles Pi resources now and applies Patches later", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  mkdirSync(join(repository.source, "patches"));
+  writeFileSync(join(repository.source, "patches", "mixed.patch"), textPatch("series.txt", "base", "mixed-accepted"));
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    supportedPiBaseVersions: ["v0.81.1"],
+    supportedPiBaseCommits: [base.commit],
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Add compatible Patch Series");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  const initialApply = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(initialApply.status, 0, initialApply.stderr || initialApply.stdout);
+
+  const managedRoot = dataRoot(home);
+  const selectionsPath = join(managedRoot, "state", "selections.json");
+  const settingsPath = join(home, ".pi", "agent", "settings.json");
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const activeBefore = readFileSync(activationPath);
+  writeFileSync(join(repository.source, "extensions", "fixture.ts"), "export default function candidateFixture() {}\n");
+  writeFileSync(join(repository.source, "patches", "mixed.patch"), textPatch("series.txt", "base", "mixed-candidate"));
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Advance mixed selected content");
+  const candidateCommit = publishRepositoryHead(root, repository);
+
+  const update = runPorcuPi(home, ["manage"], "6e6e0d", {
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+  });
+  assert.equal(update.status, 0, update.stderr || update.stdout);
+  assert.match(update.stdout, /Extension.*changed.*extensions\/fixture\.ts/);
+  assert.match(update.stdout, /Patch Series.*changed.*patches\/mixed\.patch/);
+  assert.match(update.stdout, /author declaration matches this exact Pi Base/);
+  assert.match(update.stdout, /Immediately reconciled 4 Pi resources/);
+  assert.match(update.stdout, /Recorded 1 Patch Series.*await `porcupi apply`/);
+  assert.deepEqual(readFileSync(activationPath), activeBefore);
+  const selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
+  assert.equal(selections.sources[0].commit, candidateCommit);
+  assert.ok(selections.sources[0].artifacts.every((artifact) => (
+    artifact.kind !== "PatchSeries" || artifact.members.every((member) => member.commit === candidateCommit)
+  )));
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  assert.match(settings.packages[0].source, new RegExp(`@${candidateCommit}$`));
+
+  const applied = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(applied.status, 0, applied.stderr || applied.stdout);
+  const activation = JSON.parse(readFileSync(activationPath, "utf8"));
+  assert.equal(
+    readFileSync(join(managedRoot, "compositions", activation.active.compositionId, "payload", "series.txt"), "utf8"),
+    "mixed-candidate\n",
+  );
 });
 
 test("re-adding a Source Repository reviews and replaces its commit and complete selection", async () => {

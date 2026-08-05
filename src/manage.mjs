@@ -1,4 +1,5 @@
-import { canonicalJson, defaultDataRoot, readActiveComposition } from "./runtime.mjs";
+import { join } from "node:path";
+import { canonicalJson, defaultDataRoot, fail, readActiveComposition, sha256File } from "./runtime.mjs";
 import {
   artifactKey,
   artifactStructuralIdentity,
@@ -11,7 +12,13 @@ import {
   saveSelectionSources,
 } from "./resource-intent.mjs";
 import { runGuidedTerminal, truncateForTerminal, windowAround } from "./guided-terminal.mjs";
-import { sourceSnapshotSummary } from "./source-repository.mjs";
+import {
+  branchContainsAcceptedCommit,
+  discoverPiArtifacts,
+  resolveSourceRepository,
+  resolveTrackedSourceRepository,
+  sourceSnapshotSummary,
+} from "./source-repository.mjs";
 
 function managedArtifactKey(item) {
   return `${item.source.locator}\0${artifactKey(item.artifact)}`;
@@ -155,6 +162,227 @@ function runManageWizard({ items, project, patchPending, input, output }) {
   });
 }
 
+function candidateSelectionSource(previous, resolved, artifacts) {
+  return {
+    locator: resolved.locator,
+    commit: resolved.commit,
+    packageSource: resolved.packageSource,
+    trackedBranch: resolved.trackedBranch,
+    artifacts: artifacts.map((artifact) => {
+      if (isPatchSeries(artifact)) return {
+        kind: "PatchSeries",
+        id: artifact.id,
+        members: artifact.members.map((member) => ({
+          commit: resolved.commit,
+          path: member.path,
+          sha256: member.sha256,
+        })),
+      };
+      const retained = previous.artifacts.find((selected) => artifactKey(selected) === artifactKey(artifact));
+      return {
+        kind: artifact.kind,
+        path: artifact.path,
+        scope: retained.scope,
+        ...(retained.projectRoot ? { projectRoot: retained.projectRoot } : {}),
+      };
+    }),
+  };
+}
+
+function artifactReview({ selected, accepted, candidate, acceptedCheckout, candidateCheckout }) {
+  const compatibilityBefore = accepted?.compatibility ?? null;
+  const compatibilityAfter = candidate.compatibility ?? null;
+  if (isPatchSeries(selected)) {
+    const previousMembers = selected.members.map(({ path, sha256 }) => ({ path, sha256 }));
+    const candidateMembers = candidate.members.map(({ path, sha256 }) => ({ path, sha256 }));
+    return {
+      selected,
+      candidate,
+      changed: canonicalJson(previousMembers) !== canonicalJson(candidateMembers)
+        || canonicalJson(compatibilityBefore) !== canonicalJson(compatibilityAfter),
+      previous: previousMembers.map((member) => `${member.path}@sha256:${member.sha256}`).join(" → "),
+      next: candidateMembers.map((member) => `${member.path}@sha256:${member.sha256}`).join(" → "),
+      compatibilityBefore,
+      compatibilityAfter,
+    };
+  }
+  const previousDigest = sha256File(join(acceptedCheckout, selected.path));
+  const candidateDigest = sha256File(join(candidateCheckout, selected.path));
+  return {
+    selected,
+    candidate,
+    changed: previousDigest !== candidateDigest
+      || canonicalJson(compatibilityBefore) !== canonicalJson(compatibilityAfter),
+    previous: `sha256:${previousDigest}`,
+    next: `sha256:${candidateDigest}`,
+    compatibilityBefore,
+    compatibilityAfter,
+  };
+}
+
+function compatibilityReview(value) {
+  return value === null ? "no author-declared restriction" : canonicalJson(value);
+}
+
+function runSourceUpdateWizard({ previous, candidate, reviews, active, input, output }) {
+  let page = 0;
+  let cursor = 0;
+  return runGuidedTerminal({
+    command: "porcupi manage",
+    input,
+    output,
+    createController: ({ finish }) => {
+      const render = () => {
+        output.write("\x1b[2J\x1b[H");
+        if (page === 0) {
+          output.write("1 of 3 — Review Tracked Branch candidate\n");
+          output.write(`Source Repository: ${previous.locator}\nTracked Branch: ${previous.trackedBranch}\n`);
+          output.write(`Accepted exact commit: ${previous.commit}\nCandidate exact commit: ${candidate.commit}\n\n`);
+          const visible = windowAround(output, cursor, reviews.length, 12);
+          for (let index = visible.start; index < visible.end; index += 1) {
+            const review = reviews[index];
+            const kind = isPatchSeries(review.selected) ? "Patch Series" : review.selected.kind;
+            output.write(`${truncateForTerminal(output, `${index === cursor ? "›" : " "} ${kind.padEnd(12)} [${review.changed ? "changed" : "unchanged"}] ${artifactStructuralIdentity(review.selected)}`)}\n`);
+          }
+          if (reviews.length > 0) {
+            const focused = reviews[cursor];
+            output.write(`  Accepted: ${focused.previous}\n  Candidate: ${focused.next}\n`);
+            if (canonicalJson(focused.compatibilityBefore) !== canonicalJson(focused.compatibilityAfter)) {
+              output.write(`  Compatibility changed: ${compatibilityReview(focused.compatibilityBefore)} → ${compatibilityReview(focused.compatibilityAfter)}\n`);
+            }
+          }
+          output.write("\n[↑/↓ j/k] inspect every selected Artifact change  [n → l] Next  [Esc] cancel\n");
+        } else if (page === 1) {
+          output.write("2 of 3 — Check current release and Pi Base\n\n");
+          output.write(`Current PorcuPi release: ${active.receipt.porcupiVersion}\n`);
+          output.write(`Current Pi Base: ${active.receipt.piBase.tag} (${active.receipt.piBase.commit})\n`);
+          output.write(`Candidate exact commit: ${candidate.commit}\n\n`);
+          for (const review of reviews) {
+            const kind = isPatchSeries(review.selected) ? "Patch Series" : review.selected.kind;
+            const declaration = review.candidate.compatibilityDeclared
+              ? "author declaration matches this exact Pi Base"
+              : "no author-declared restriction; PorcuPi's fixed checks remain authoritative";
+            output.write(`${truncateForTerminal(output, `  ✓ ${kind} ${artifactStructuralIdentity(review.selected)} — ${declaration}`)}\n`);
+          }
+          output.write("\nAll selected Artifacts are discoverable and eligible for this release-pinned Pi Base.\n");
+          output.write("Patch Series will still pass the fixed preflight, build, conformance, and smoke pipeline only during explicit `porcupi apply`.\n");
+          output.write("\n[n → l] Next  [← h] Back  [Esc] cancel\n");
+        } else {
+          const resourceCount = reviews.filter((review) => !isPatchSeries(review.selected)).length;
+          const patchCount = reviews.length - resourceCount;
+          output.write("3 of 3 — Accept exact source snapshot\n\n");
+          output.write(`Advance all ${reviews.length} selected Artifacts from ${previous.commit} to ${candidate.commit}.\n`);
+          output.write(`Pi resources reconciled now: ${resourceCount}. Patch Series recorded as pending: ${patchCount}.\n`);
+          output.write("The active Managed Pi Composition remains unchanged until explicit `porcupi apply`.\n\n");
+          output.write("Selecting this candidate trusts its code and dependencies with your user authority.\n");
+          output.write("Pi retains project trust authority; PorcuPi never approves a project.\n");
+          output.write("Neither Pi nor PorcuPi is a sandbox.\n\n");
+          output.write("[← h] Back  [Esc] cancel\n[Space/Enter] Accept candidate\n");
+        }
+      };
+      const handleKeypress = (_character, key) => {
+        if (key.name === "escape" || (key.ctrl && key.name === "c")) return finish(false);
+        if (key.name === "left" || key.name === "h") page = Math.max(0, page - 1);
+        else if (key.name === "right" || key.name === "l" || key.name === "n") page = Math.min(2, page + 1);
+        else if (page === 0 && (key.name === "up" || key.name === "k")) cursor = Math.max(0, cursor - 1);
+        else if (page === 0 && (key.name === "down" || key.name === "j")) cursor = Math.min(Math.max(0, reviews.length - 1), cursor + 1);
+        else if (page === 2 && (key.name === "space" || key.name === "return")) return finish(true);
+        render();
+      };
+      return { render, handleKeypress };
+    },
+  });
+}
+
+function resolveTrackedCandidate(selections, active) {
+  for (const previous of selections.sources.filter((source) => source.trackedBranch)) {
+    const resolved = resolveTrackedSourceRepository(previous);
+    if (resolved.commit === previous.commit) {
+      resolved.dispose();
+      continue;
+    }
+    if (!branchContainsAcceptedCommit(resolved.checkout, previous.commit, resolved.commit)) {
+      resolved.dispose();
+      continue;
+    }
+    let accepted;
+    try {
+      accepted = resolveSourceRepository(previous.packageSource);
+      const acceptedDiscovery = discoverPiArtifacts(accepted.checkout, { piBase: active.receipt.piBase });
+      const candidateDiscovery = discoverPiArtifacts(resolved.checkout, { piBase: active.receipt.piBase });
+      const acceptedByKey = new Map(acceptedDiscovery.artifacts.map((artifact) => [artifactKey(artifact), artifact]));
+      const candidateByKey = new Map(candidateDiscovery.artifacts.map((artifact) => [artifactKey(artifact), artifact]));
+      const selectedCandidates = previous.artifacts.map((selected) => {
+        const candidate = candidateByKey.get(artifactKey(selected));
+        const identity = `${previous.locator}@${resolved.commit}:${artifactStructuralIdentity(selected)}`;
+        if (!candidate) fail(`Inter-release Source Update blocked: selected ${isPatchSeries(selected) ? "Patch Series" : selected.kind} ${identity} is not discoverable at the candidate exact commit`);
+        if (candidate.compatible === false) {
+          fail(`Inter-release Source Update blocked: selected ${isPatchSeries(selected) ? "Patch Series" : selected.kind} ${identity} does not support current Pi Base ${active.receipt.piBase.tag} (${active.receipt.piBase.commit})`);
+        }
+        return candidate;
+      });
+      const candidateSource = candidateSelectionSource(previous, resolved, selectedCandidates);
+      const reviews = previous.artifacts.map((selected, index) => artifactReview({
+        selected,
+        accepted: acceptedByKey.get(artifactKey(selected)),
+        candidate: selectedCandidates[index],
+        acceptedCheckout: accepted.checkout,
+        candidateCheckout: resolved.checkout,
+      }));
+      return { previous, candidateSource, reviews, resolved, accepted };
+    } catch (error) {
+      accepted?.dispose();
+      resolved.dispose();
+      throw error;
+    }
+  }
+  return undefined;
+}
+
+async function adoptTrackedCandidate({ candidate, selections, active, input, output, environment, dataRoot }) {
+  try {
+    const confirmed = await runSourceUpdateWizard({
+      previous: candidate.previous,
+      candidate: candidate.candidateSource,
+      reviews: candidate.reviews,
+      active,
+      input,
+      output,
+    });
+    if (!confirmed) {
+      output.write("\nSource update cancelled; Selection Intent, Pi package settings/checkouts, pending Patches, and Managed Pi activation are unchanged.\n");
+      return { saved: false, cancelled: true };
+    }
+    const sources = selections.sources.map((source) => (
+      source.locator === candidate.previous.locator ? candidate.candidateSource : source
+    ));
+    const previousResources = candidate.previous.artifacts.filter((artifact) => !isPatchSeries(artifact));
+    const nextResources = candidate.candidateSource.artifacts.filter((artifact) => !isPatchSeries(artifact));
+    await realizeResourceChanges({
+      executable: active.executable,
+      environment,
+      changes: previousResources.length > 0 || nextResources.length > 0 ? [{
+        source: candidate.candidateSource,
+        previous: { ...candidate.previous, artifacts: previousResources },
+        nextArtifacts: nextResources,
+      }] : [],
+      save: () => saveSelectionSources(dataRoot, sources),
+    });
+    const patchCount = candidate.candidateSource.artifacts.filter(isPatchSeries).length;
+    output.write(`\nAccepted Tracked Branch candidate ${candidate.candidateSource.commit} for ${candidate.candidateSource.locator}.\n`);
+    output.write(`Immediately reconciled ${nextResources.length} Pi resources through Pi's public package lifecycle.\n`);
+    output.write(patchCount > 0
+      ? `Recorded ${patchCount} Patch Series at the accepted exact snapshot; they await \`porcupi apply\`.\n`
+      : "No changed Patch Series await `porcupi apply`.\n");
+    output.write("Managed Pi activation is unchanged.\n");
+    output.write(patchPendingMessage(patchIntentPending(sources, active.activation.active.patches)));
+    return { saved: true, updated: true, count: candidate.candidateSource.artifacts.length };
+  } finally {
+    candidate.accepted.dispose();
+    candidate.resolved.dispose();
+  }
+}
+
 function nextSourcesFromItems(selections, items) {
   return selections.sources.flatMap((source) => {
     const artifacts = items
@@ -173,6 +401,10 @@ export async function manageResources({
 } = {}) {
   const active = readActiveComposition(dataRoot);
   const selections = readSelections(dataRoot);
+  const candidate = resolveTrackedCandidate(selections, active);
+  if (candidate) {
+    return adoptTrackedCandidate({ candidate, selections, active, input, output, environment, dataRoot });
+  }
   const items = managedSelections(selections);
   if (items.length === 0) {
     output.write("There are no retained Artifact selections to manage. Use `porcupi add [git-source]` first.\n");

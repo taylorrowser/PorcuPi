@@ -11,6 +11,17 @@ export function isFullGitCommit(value) {
   return typeof value === "string" && fullCommitPattern.test(value);
 }
 
+export function isCanonicalTrackedBranch(value) {
+  return typeof value === "string"
+    && value.startsWith("refs/heads/")
+    && spawnSync("git", ["check-ref-format", value], { stdio: "ignore" }).status === 0;
+}
+
+export function sourceSnapshotSummary(source, exactCommitState) {
+  const channel = source.trackedBranch ? `Tracked Branch: ${source.trackedBranch}` : "Pinned source";
+  return `${channel}\n${exactCommitState} exact commit: ${source.commit}\n`;
+}
+
 const themeColors = [
   "accent", "border", "borderAccent", "borderMuted", "success", "error", "warning", "muted", "dim", "text",
   "thinkingText", "selectedBg", "userMessageBg", "userMessageText", "customMessageBg", "customMessageText",
@@ -129,25 +140,66 @@ function peelCommit(checkout, ref) {
   return commit;
 }
 
-function resolveRequestedCommit(checkout, requestedRef) {
-  if (!requestedRef) return peelCommit(checkout, "refs/remotes/origin/HEAD");
-  if (isFullGitCommit(requestedRef)) return peelCommit(checkout, requestedRef);
+function trackedBranchFromRemoteRef(ref) {
+  const prefix = "refs/remotes/origin/";
+  if (!ref.startsWith(prefix) || ref.length === prefix.length || ref === `${prefix}HEAD`) {
+    fail("Git branch did not resolve to one canonical remote branch");
+  }
+  const trackedBranch = `refs/heads/${ref.slice(prefix.length)}`;
+  if (!isCanonicalTrackedBranch(trackedBranch)) fail("Git branch has no canonical branch identity");
+  return trackedBranch;
+}
+
+function defaultBranchResult(checkout) {
+  const remoteRef = git(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], { cwd: checkout });
+  if (!refExists(checkout, remoteRef)) fail("Git default branch does not exist");
+  return {
+    commit: peelCommit(checkout, remoteRef),
+    trackedBranch: trackedBranchFromRemoteRef(remoteRef),
+  };
+}
+
+function resolveRequestedSource(checkout, requestedRef) {
+  if (!requestedRef || requestedRef === "HEAD" || requestedRef === "origin/HEAD" || requestedRef === "refs/remotes/origin/HEAD") {
+    return defaultBranchResult(checkout);
+  }
+  if (isFullGitCommit(requestedRef)) return { commit: peelCommit(checkout, requestedRef) };
 
   let candidates;
-  if (requestedRef === "HEAD") candidates = ["refs/remotes/origin/HEAD"];
-  else if (requestedRef.startsWith("refs/heads/")) candidates = [`refs/remotes/origin/${requestedRef.slice(11)}`];
-  else if (requestedRef.startsWith("refs/tags/")) candidates = [requestedRef];
-  else if (requestedRef.startsWith("refs/remotes/origin/")) candidates = [requestedRef];
-  else if (requestedRef.startsWith("origin/")) candidates = [`refs/remotes/${requestedRef}`];
-  else candidates = [`refs/remotes/origin/${requestedRef}`, `refs/tags/${requestedRef}`];
+  if (requestedRef.startsWith("refs/heads/")) {
+    candidates = [{ ref: `refs/remotes/origin/${requestedRef.slice(11)}`, branch: true }];
+  } else if (requestedRef.startsWith("refs/tags/")) {
+    candidates = [{ ref: requestedRef, branch: false }];
+  } else if (requestedRef.startsWith("refs/remotes/origin/")) {
+    candidates = [{ ref: requestedRef, branch: true }];
+  } else if (requestedRef.startsWith("origin/")) {
+    candidates = [{ ref: `refs/remotes/${requestedRef}`, branch: true }];
+  } else {
+    candidates = [
+      { ref: `refs/remotes/origin/${requestedRef}`, branch: true },
+      { ref: `refs/tags/${requestedRef}`, branch: false },
+    ];
+  }
 
-  const matches = candidates.filter((candidate) => refExists(checkout, candidate));
-  if (matches.length === 0 && /^[a-fA-F0-9]{4,63}$/.test(requestedRef)) {
+  const matches = candidates.filter((candidate) => refExists(checkout, candidate.ref));
+  if (matches.length === 0 && !requestedRef.startsWith("refs/") && /^[a-fA-F0-9]{4,63}$/.test(requestedRef)) {
     fail("Abbreviated commit IDs are ambiguous; provide the full commit");
   }
   if (matches.length === 0) fail(`Git ref '${requestedRef}' does not exist`);
   if (matches.length > 1) fail(`Git ref '${requestedRef}' is ambiguous between a branch and tag`);
-  return peelCommit(checkout, matches[0]);
+  const match = matches[0];
+  return {
+    commit: peelCommit(checkout, match.ref),
+    ...(match.branch ? { trackedBranch: trackedBranchFromRemoteRef(match.ref) } : {}),
+  };
+}
+
+export function branchContainsAcceptedCommit(checkout, acceptedCommit, candidateCommit) {
+  if (!isFullGitCommit(acceptedCommit) || !isFullGitCommit(candidateCommit)) return false;
+  return spawnSync("git", ["merge-base", "--is-ancestor", acceptedCommit, candidateCommit], {
+    cwd: checkout,
+    stdio: "ignore",
+  }).status === 0;
 }
 
 export function resolveSourceRepository(requested, { temporaryParent = tmpdir() } = {}) {
@@ -157,7 +209,7 @@ export function resolveSourceRepository(requested, { temporaryParent = tmpdir() 
   try {
     process.stdout.write(`Resolving Source Repository ${parsed.locator}...\n`);
     git(["clone", "--quiet", "--filter=blob:none", "--no-checkout", "--", parsed.cloneRepository, checkout]);
-    const commit = resolveRequestedCommit(checkout, parsed.ref);
+    const { commit, trackedBranch } = resolveRequestedSource(checkout, parsed.ref);
     git(["checkout", "--quiet", "--detach", commit], { cwd: checkout });
     if (git(["rev-parse", "HEAD"], { cwd: checkout }) !== commit) fail("Git checkout does not match resolved commit");
     if (git(["status", "--porcelain", "--untracked-files=no"], { cwd: checkout })) {
@@ -166,6 +218,7 @@ export function resolveSourceRepository(requested, { temporaryParent = tmpdir() 
     return {
       locator: parsed.locator,
       commit,
+      ...(trackedBranch ? { trackedBranch } : {}),
       checkout,
       packageSource: `git:${parsed.packageRepository}@${commit}`,
       dispose() {

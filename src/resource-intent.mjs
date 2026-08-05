@@ -12,6 +12,7 @@ import {
 } from "./runtime.mjs";
 import {
   discoverPiArtifacts,
+  isCanonicalTrackedBranch,
   isFullGitCommit,
   parseRequestedGitSource,
   resolveSourceRepository,
@@ -19,7 +20,7 @@ import {
 
 const installationScopes = new Set(["global", "project"]);
 const selectionRootFields = new Set(["schemaVersion", "sources"]);
-const selectionSourceFields = new Set(["locator", "commit", "packageSource", "artifacts"]);
+const selectionSourceFields = new Set(["locator", "commit", "packageSource", "trackedBranch", "artifacts"]);
 const legacyPatchFields = new Set(["kind", "path", "sha256"]);
 const patchSeriesFields = new Set(["kind", "id", "members"]);
 const patchMemberFields = new Set(["commit", "path", "sha256"]);
@@ -235,6 +236,8 @@ export function readSelections(dataRoot) {
       || typeof source.locator !== "string"
       || !isFullGitCommit(source.commit)
       || typeof source.packageSource !== "string"
+      || (legacy && source.trackedBranch !== undefined)
+      || (source.trackedBranch !== undefined && !isCanonicalTrackedBranch(source.trackedBranch))
       || !Array.isArray(source.artifacts)
       || source.artifacts.length === 0
       || source.artifacts.some((artifact) => {

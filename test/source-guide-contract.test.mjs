@@ -50,6 +50,37 @@ test("the source guide covers consuming and authoring every PorcuPi artifact kin
   assert.match(guide, /cannot declare commands, hooks, dependencies, recipes, force options, custom verifiers, or activation policy/i);
 });
 
+test("the source guide defines Tracked Branch publication and exact-snapshot semantics", () => {
+  const guide = readText("docs/source-guide.md");
+
+  assert.match(guide, /^This guide explains .* PorcuPi v0\.2\.0/m);
+  assert.match(guide, /\[Release Installation guide\]\(release-installation\.md\)/);
+  assert.match(guide, /^### Publish a Tracked Branch$/m);
+  assert.match(guide, /named branch.*Tracked Branch/i);
+  assert.match(guide, /omitted ref.*default branch.*Tracked Branch/i);
+  assert.match(guide, /Selection Intent.*exact accepted commit/i);
+  assert.match(guide, /tags and full commits remain pinned/i);
+  assert.doesNotMatch(guide, /immutable channel/i);
+  assert.match(guide, /advance the same Tracked Branch.*add.*same branch/is);
+  assert.match(guide, /change an existing Tracked Branch.*remove.*before selecting a different branch, tag, or full commit/is);
+  assert.match(guide, /pinned source.*re-add.*branch.*opt into tracking/is);
+  assert.match(guide, /merging selected-content changes.*update candidate/i);
+  assert.match(guide, /Selected content comprises selected resource bytes.*Patch Series membership, order, bytes, and compatibility/i);
+  assert.match(guide, /Documentation, tests, unrelated files, and new independent unselected Artifacts do not/i);
+  assert.match(guide, /Adoption requires review of one resolved exact candidate/i);
+  assert.match(guide, /branch movement alone never mutates/i);
+  assert.match(guide, /Post-release Compatibility Update.*exact compatibility metadata.*fast-forward/is);
+});
+
+test("the Tracked Branch ADR explicitly amends the retained Selection Intent inventory", () => {
+  const delegatedPackagesDecision = readText("docs/adr/0003-delegate-filtered-git-packages-to-pi.md");
+  const trackedBranchesDecision = readText("docs/adr/0015-retain-tracked-branches-with-exact-snapshots.md");
+
+  assert.match(delegatedPackagesDecision, /amended by ADR 0015.*optional.*Tracked Branch identity/is);
+  assert.match(delegatedPackagesDecision, /exact commit, optional canonical Tracked Branch identity, package source/);
+  assert.match(trackedBranchesDecision, /amends ADR 0003.*optional canonical Tracked Branch identity/is);
+});
+
 test("the primary user documentation links the source guide", () => {
   const readme = readText("README.md");
   const operations = readText("docs/operations.md");

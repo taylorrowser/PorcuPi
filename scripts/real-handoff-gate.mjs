@@ -247,6 +247,8 @@ function verifyRealSelections() {
   const source = selections.sources.find((entry) => entry.commit === fixture.source.commit);
   assert.ok(source, "exact pi-wait-for-user source was not retained");
   assert.equal(source.locator, "github.com/taylorrowser/pi-wait-for-user");
+  assert.equal(Object.hasOwn(source, "trackedBranch"), false, "the full-commit source must remain pinned");
+  assert.equal(source.packageSource, `git:https://github.com/taylorrowser/pi-wait-for-user.git@${fixture.source.commit}`);
   const series = source.artifacts.filter((artifact) => artifact.kind === "PatchSeries");
   assert.deepEqual(
     series.map((series) => ({
@@ -359,7 +361,9 @@ async function main() {
     inputHex: "616e6e0d",
     waitFor: "1 of 3 — Select Artifacts",
   });
-  assert.match(add.output, new RegExp(`Exact commit: ${fixture.source.commit}`));
+  assert.match(add.output, /Pinned source/);
+  assert.match(add.output, new RegExp(`Resolved exact commit: ${fixture.source.commit}`));
+  assert.match(add.output, new RegExp(`Accepted exact commit: ${fixture.source.commit}`));
   assert.match(add.output, /0 global Pi resource selections and 20 Patch Series selections/);
   assert.match(add.output, /pending `porcupi apply`/);
   verifyRealSelections();

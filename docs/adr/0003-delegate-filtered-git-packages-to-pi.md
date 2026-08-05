@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for global and project non-Patch Selection Intent in issues #14 and #15.
+Accepted for global and project non-Patch Selection Intent in issues #14 and #15. Amended by ADR 0015 in issue #49 to retain an optional canonical Tracked Branch identity.
 
 ## Context
 
@@ -18,7 +18,7 @@ When PorcuPi retains the same source in both scopes, its project entry uses `aut
 
 A Pi package failure restores the prior settings bytes and saves no PorcuPi Selection Intent; when replacing or moving an existing selection, PorcuPi also asks Pi to reconcile the checkout in each affected scope back to its prior exact commit.
 
-PorcuPi separately retains only the Selection Intent needed to identify its source-wide choices: credential-free canonical Source Repository locator, exact commit, package source, Artifact kind, structural path, Installation Scope, and the canonical project root needed to locate project settings. Re-adding that locator verifies prior filtered entries before replacing them. A matching Pi package entry that PorcuPi did not create is treated as foreign and is not adopted or overwritten.
+PorcuPi separately retains only the Selection Intent needed to identify its source-wide choices: credential-free canonical Source Repository locator, exact commit, optional canonical Tracked Branch identity, package source, Artifact kind, structural path, Installation Scope, and the canonical project root needed to locate project settings. Re-adding that locator verifies prior filtered entries before replacing them. A matching Pi package entry that PorcuPi did not create is treated as foreign and is not adopted or overwritten.
 
 Discovery follows the package manifest or root convention rules pinned by the supported Pi Base. The saved Pi filter is one package entry because Pi package identity ignores the Git ref.
 

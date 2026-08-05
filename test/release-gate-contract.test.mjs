@@ -91,6 +91,10 @@ test("the real handoff gate validates implicit Patch Series identities", () => {
   assert.match(gate, /series\.id/);
   assert.match(gate, /series\.members/);
   assert.match(gate, /20 Patch Series selections/);
+  assert.match(gate, /Pinned source/);
+  assert.match(gate, /Resolved exact commit:/);
+  assert.match(gate, /Accepted exact commit:/);
+  assert.match(gate, /Object\.hasOwn\(source, "trackedBranch"\)/);
   assert.doesNotMatch(gate, /artifact\.kind === "Patch"/);
 });
 

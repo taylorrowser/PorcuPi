@@ -356,8 +356,7 @@ function collectExtensions(root, directory, diagnostics) {
       if (Array.isArray(entries) && entries.every((value) => typeof value === "string")) {
         const enabled = nestedManifestExtensions(root, path, entries, diagnostics);
         if (enabled.length > 0) {
-          const packageManifest = relativePath(root, join(path, "package.json"));
-          artifacts.push(...enabled.map((candidate) => ({ path: candidate, packageManifest })));
+          artifacts.push(...enabled.map((candidate) => ({ path: candidate })));
           continue;
         }
       }
@@ -938,10 +937,10 @@ export function discoverPiArtifacts(root, { piBase } = {}) {
   const packageJson = join(checkout, "package.json");
   try {
     const stat = lstatSync(packageJson);
+    rootPackageManifest = "package.json";
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("not a regular file");
     const packageValue = JSON.parse(readFileSync(packageJson, "utf8"));
     if (packageValue === null || typeof packageValue !== "object" || Array.isArray(packageValue)) throw new Error("not an object");
-    rootPackageManifest = "package.json";
     if (Object.hasOwn(packageValue, "pi")) manifest = packageValue.pi;
   } catch (error) {
     if (error?.code !== "ENOENT") diagnostics.push({ path: "package.json", reason: "Package manifest is malformed" });
@@ -962,15 +961,12 @@ export function discoverPiArtifacts(root, { piBase } = {}) {
     };
     artifacts = artifactKinds.flatMap((kind) => discovered[kind]
       .filter((artifact) => validateArtifact(checkout, kind, artifact.path, diagnostics))
-      .map(({ path, structuralDirectory, packageManifest }) => {
-        const applicablePackageManifest = packageManifest ?? rootPackageManifest;
-        return {
-          kind,
-          path: relativePath(checkout, path),
-          ...(structuralDirectory ? { structuralDirectory } : {}),
-          ...(applicablePackageManifest ? { packageManifest: applicablePackageManifest } : {}),
-        };
-      }));
+      .map(({ path, structuralDirectory }) => ({
+        kind,
+        path: relativePath(checkout, path),
+        ...(structuralDirectory ? { structuralDirectory } : {}),
+        ...(rootPackageManifest ? { packageManifest: rootPackageManifest } : {}),
+      })));
   }
   const patchDiscovery = discoverPatchArtifacts(checkout, diagnostics, piBase);
   artifacts = applyResourceCompatibility(checkout, artifacts, patchDiscovery.metadata, piBase, diagnostics);

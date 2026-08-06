@@ -81,6 +81,16 @@ function renderSourceUpdatePage({ previous, candidate, reviews, active, page, cu
   output.write("[← h] Back  [Esc] cancel\n[Space/Enter] Accept candidate\n");
 }
 
+function navigateSourceUpdateReview({ page, cursor, reviewCount, key }) {
+  if (key.name === "escape" || (key.ctrl && key.name === "c")) return { outcome: "cancel", page, cursor };
+  if (key.name === "left" || key.name === "h") page = Math.max(0, page - 1);
+  else if (key.name === "right" || key.name === "l" || key.name === "n") page = Math.min(2, page + 1);
+  else if (page === 0 && (key.name === "up" || key.name === "k")) cursor = Math.max(0, cursor - 1);
+  else if (page === 0 && (key.name === "down" || key.name === "j")) cursor = Math.min(Math.max(0, reviewCount - 1), cursor + 1);
+  else if (page === 2 && (key.name === "space" || key.name === "return")) return { outcome: "accept", page, cursor };
+  return { outcome: "continue", page, cursor };
+}
+
 function runManageWizard({ items, project, patchPending, forceableCandidate, active, input, output }) {
   const kept = new Set(items.map(managedArtifactKey));
   const scopes = new Map(items.filter((item) => !isPatchSeries(item.artifact)).map((item) => [managedArtifactKey(item), {
@@ -197,11 +207,16 @@ function runManageWizard({ items, project, patchPending, forceableCandidate, act
       const handleKeypress = (_character, key) => {
         if (key.name === "escape" || (key.ctrl && key.name === "c")) return finish(null);
         if (forcedPage !== null) {
-          if (key.name === "left" || key.name === "h") forcedPage = Math.max(0, forcedPage - 1);
-          else if (key.name === "right" || key.name === "l" || key.name === "n") forcedPage = Math.min(2, forcedPage + 1);
-          else if (forcedPage === 0 && (key.name === "up" || key.name === "k")) forcedCursor = Math.max(0, forcedCursor - 1);
-          else if (forcedPage === 0 && (key.name === "down" || key.name === "j")) forcedCursor = Math.min(Math.max(0, forceableCandidate.reviews.length - 1), forcedCursor + 1);
-          else if (forcedPage === 2 && (key.name === "space" || key.name === "return")) return finish({ forceLatestAccepted: true });
+          const navigation = navigateSourceUpdateReview({
+            page: forcedPage,
+            cursor: forcedCursor,
+            reviewCount: forceableCandidate.reviews.length,
+            key,
+          });
+          if (navigation.outcome === "cancel") return finish(null);
+          if (navigation.outcome === "accept") return finish({ forceLatestAccepted: true });
+          forcedPage = navigation.page;
+          forcedCursor = navigation.cursor;
           render();
           return undefined;
         }
@@ -294,18 +309,6 @@ function resourceReviewDetails(acceptedValue, candidateValue) {
 
   const previousInputs = acceptedValue.packageInputs;
   const candidateInputs = candidateValue.packageInputs;
-  if (previousInputs === null || candidateInputs === null) {
-    if (canonicalJson(previousInputs) !== canonicalJson(candidateInputs)) {
-      details.push(`Bounded package inputs changed: accepted ${canonicalJson(previousInputs)} → candidate ${canonicalJson(candidateInputs)}`);
-    }
-    return details;
-  }
-  if (
-    previousInputs.manifest.path !== candidateInputs.manifest.path
-    || previousInputs.manifest.mode !== candidateInputs.manifest.mode
-  ) {
-    details.push(`Applicable package manifest changed: accepted ${previousInputs.manifest.path} (${previousInputs.manifest.mode}) → candidate ${candidateInputs.manifest.path} (${candidateInputs.manifest.mode})`);
-  }
   if (canonicalJson(previousInputs.manifest.dependencies) !== canonicalJson(candidateInputs.manifest.dependencies)) {
     details.push(`Dependency declarations changed: accepted ${canonicalJson(previousInputs.manifest.dependencies)} → candidate ${canonicalJson(candidateInputs.manifest.dependencies)}`);
   }
@@ -365,12 +368,11 @@ function runSourceUpdateWizard({ previous, candidate, reviews, active, input, ou
         renderSourceUpdatePage({ previous, candidate, reviews, active, page, cursor, output });
       };
       const handleKeypress = (_character, key) => {
-        if (key.name === "escape" || (key.ctrl && key.name === "c")) return finish(false);
-        if (key.name === "left" || key.name === "h") page = Math.max(0, page - 1);
-        else if (key.name === "right" || key.name === "l" || key.name === "n") page = Math.min(2, page + 1);
-        else if (page === 0 && (key.name === "up" || key.name === "k")) cursor = Math.max(0, cursor - 1);
-        else if (page === 0 && (key.name === "down" || key.name === "j")) cursor = Math.min(Math.max(0, reviews.length - 1), cursor + 1);
-        else if (page === 2 && (key.name === "space" || key.name === "return")) return finish(true);
+        const navigation = navigateSourceUpdateReview({ page, cursor, reviewCount: reviews.length, key });
+        if (navigation.outcome === "cancel") return finish(false);
+        if (navigation.outcome === "accept") return finish(true);
+        page = navigation.page;
+        cursor = navigation.cursor;
         render();
       };
       return { render, handleKeypress };

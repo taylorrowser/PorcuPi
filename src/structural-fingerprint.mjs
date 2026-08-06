@@ -132,27 +132,26 @@ function trackedFile(checkout, path) {
   return { path, mode: records[0].mode, sha256: sha256File(absolute) };
 }
 
-function applicableLock(checkout, manifestPath) {
-  let directory = dirname(manifestPath);
-  while (true) {
-    for (const name of ["npm-shrinkwrap.json", "package-lock.json"]) {
-      const path = directory === "." ? name : `${directory}/${name}`;
-      try {
-        lstatSync(join(checkout, path));
-        return trackedFile(checkout, path);
-      } catch (error) {
-        if (error?.code !== "ENOENT") throw error;
-      }
+function applicableRootLock(checkout) {
+  for (const path of ["npm-shrinkwrap.json", "package-lock.json"]) {
+    try {
+      lstatSync(join(checkout, path));
+      return trackedFile(checkout, path);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
     }
-    if (directory === ".") return null;
-    directory = dirname(directory);
   }
+  return null;
 }
 
 function boundedPackageInputs(checkout, artifact) {
   const manifestPath = artifact.packageManifest;
-  if (!manifestPath) return null;
-  const manifestFile = trackedFile(checkout, manifestPath);
+  if (!manifestPath) return {
+    manifest: { dependencies: {}, installLifecycleScripts: {} },
+    lock: null,
+  };
+  if (manifestPath !== "package.json") fail(`Applicable package manifest is not the Source Repository root: ${manifestPath}`);
+  trackedFile(checkout, manifestPath);
   let manifest;
   try {
     manifest = JSON.parse(readFileSync(join(checkout, manifestPath), "utf8"));
@@ -171,8 +170,8 @@ function boundedPackageInputs(checkout, artifact) {
       )))
     : {};
   return {
-    manifest: { path: manifestPath, mode: manifestFile.mode, dependencies, installLifecycleScripts: scripts },
-    lock: applicableLock(checkout, manifestPath),
+    manifest: { dependencies, installLifecycleScripts: scripts },
+    lock: applicableRootLock(checkout),
   };
 }
 

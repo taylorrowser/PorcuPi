@@ -4740,7 +4740,7 @@ test("unrelated ancestor package manifests stay outside a conventional Skill inv
   assert.match(manage.stdout, new RegExp(`Latest exact commit ${candidateCommit} has unchanged selected structural content`));
 });
 
-test("productive nested Extension manifests remain bounded package inputs", async () => {
+test("a malformed root package manifest blocks a Tracked Branch candidate", async () => {
   const root = temporaryRoot();
   const home = join(root, "home");
   mkdirSync(home);
@@ -4748,13 +4748,79 @@ test("productive nested Extension manifests remain bounded package inputs", asyn
   const release = createReleaseFixture(root, base);
   assert.equal(runInstaller(release, home).status, 0);
   const repository = createResourceRepository(root);
+  const manifestPath = join(repository.source, "package.json");
+  writeFileSync(manifestPath, `${JSON.stringify({
+    name: "root-package",
+    dependencies: { runtime: "1.0.0" },
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Add root package manifest");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "6a6a206e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const selectionsBefore = readFileSync(selectionsPath);
+
+  writeFileSync(manifestPath, "{ malformed\n");
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Break root package manifest");
+  publishRepositoryHead(root, repository);
+
+  const manage = runPorcuPi(home, ["manage"], "1b");
+  assert.notEqual(manage.status, 0);
+  assert.match(`${manage.stdout}${manage.stderr}`, /Inter-release Source Update blocked: Applicable package manifest is malformed: package\.json/);
+  assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
+});
+
+test("root package manifest mode alone does not change bounded package inputs", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  const manifestPath = join(repository.source, "package.json");
+  writeFileSync(manifestPath, `${JSON.stringify({ name: "root-package" }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Add root package manifest");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "6a6a206e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+
+  chmodSync(manifestPath, 0o755);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Change only root package manifest mode");
+  const candidateCommit = publishRepositoryHead(root, repository);
+
+  const manage = runPorcuPi(home, ["manage"], "1b");
+  assert.equal(manage.status, 0, manage.stderr || manage.stdout);
+  assert.doesNotMatch(manage.stdout, /Review Tracked Branch candidate/);
+  assert.match(manage.stdout, new RegExp(`Latest exact commit ${candidateCommit} has unchanged selected structural content`));
+});
+
+test("the root package manifest remains authoritative for nested-manifest Extension discovery", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  const rootManifestPath = join(repository.source, "package.json");
+  writeFileSync(rootManifestPath, `${JSON.stringify({
+    name: "root-package",
+    dependencies: { runtime: "1.0.0" },
+  }, null, 2)}\n`);
   const extensionDirectory = join(repository.source, "extensions", "nested");
   mkdirSync(extensionDirectory);
   writeFileSync(join(extensionDirectory, "index.ts"), "export default function nested() {}\n");
-  const manifestPath = join(extensionDirectory, "package.json");
-  writeFileSync(manifestPath, `${JSON.stringify({
+  const nestedManifestPath = join(extensionDirectory, "package.json");
+  writeFileSync(nestedManifestPath, `${JSON.stringify({
     name: "nested-extension",
-    dependencies: { runtime: "1.0.0" },
+    dependencies: { unrelated: "1.0.0" },
     pi: { extensions: ["index.ts"] },
   }, null, 2)}\n`);
   git(repository.source, "add", ".");
@@ -4764,17 +4830,29 @@ test("productive nested Extension manifests remain bounded package inputs", asyn
   const add = runPorcuPi(home, ["add", `${locator}@main`], "6a206e6e0d");
   assert.equal(add.status, 0, add.stderr || add.stdout);
 
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-  manifest.dependencies.runtime = "2.0.0";
-  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const nestedManifest = JSON.parse(readFileSync(nestedManifestPath, "utf8"));
+  nestedManifest.dependencies.unrelated = "2.0.0";
+  writeFileSync(nestedManifestPath, `${JSON.stringify(nestedManifest, null, 2)}\n`);
   git(repository.source, "add", ".");
-  git(repository.source, "commit", "-m", "Change nested Extension dependency");
+  git(repository.source, "commit", "-m", "Change discovery-only nested manifest dependency");
+  const nestedCommit = publishRepositoryHead(root, repository);
+
+  const quiet = runPorcuPi(home, ["manage"], "1b");
+  assert.equal(quiet.status, 0, quiet.stderr || quiet.stdout);
+  assert.doesNotMatch(quiet.stdout, /Review Tracked Branch candidate/);
+  assert.match(quiet.stdout, new RegExp(`Latest exact commit ${nestedCommit} has unchanged selected structural content`));
+
+  const rootManifest = JSON.parse(readFileSync(rootManifestPath, "utf8"));
+  rootManifest.dependencies.runtime = "2.0.0";
+  writeFileSync(rootManifestPath, `${JSON.stringify(rootManifest, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Change root package dependency");
   publishRepositoryHead(root, repository);
 
-  const manage = runPorcuPi(home, ["manage"], "1b");
-  assert.equal(manage.status, 0, manage.stderr || manage.stdout);
-  assert.match(manage.stdout, /Review Tracked Branch candidate/);
-  assert.match(manage.stdout, /Dependency declarations changed: accepted \{"dependencies":\{"runtime":"1\.0\.0"\}\} → candidate \{"dependencies":\{"runtime":"2\.0\.0"\}\}/);
+  const changed = runPorcuPi(home, ["manage"], "1b");
+  assert.equal(changed.status, 0, changed.stderr || changed.stdout);
+  assert.match(changed.stdout, /Review Tracked Branch candidate/);
+  assert.match(changed.stdout, /Dependency declarations changed: accepted \{"dependencies":\{"runtime":"1\.0\.0"\}\} → candidate \{"dependencies":\{"runtime":"2\.0\.0"\}\}/);
 });
 
 test("npm dependencies lifecycle changes remain bounded package inputs", async () => {

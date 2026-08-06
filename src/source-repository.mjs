@@ -324,16 +324,38 @@ function directoryEntries(root, path) {
   }
 }
 
+function nestedManifestExtensions(root, directory, entries, diagnostics) {
+  const declared = new Set();
+  for (const declaredPath of entries.filter((value) => !/^[!+-]/.test(value))) {
+    const matches = /[*?]/.test(declaredPath)
+      ? globSync(declaredPath, { cwd: directory, dot: false }).map((match) => join(directory, match))
+      : [resolve(directory, declaredPath)];
+    for (const match of matches) {
+      if (match === directory || match.startsWith(`${directory}${sep}`)) {
+        for (const candidate of collectFromPath(root, "Extension", match, diagnostics)) {
+          declared.add(relativePath(directory, candidate));
+        }
+      }
+    }
+  }
+  return applyManifestOverrides([...declared].sort(), entries).map((candidate) => join(directory, candidate));
+}
+
 function conventionalExtensionDirectory(root, structuralPath) {
   if (!/^extensions\/[^/]+\/index\.(?:js|ts)$/.test(structuralPath)) return undefined;
-  const directory = dirname(structuralPath);
+  const directory = join(root, dirname(structuralPath));
   try {
-    const manifest = JSON.parse(readFileSync(join(root, directory, "package.json"), "utf8"));
-    if (Array.isArray(manifest?.pi?.extensions)) return undefined;
+    const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
+    const entries = manifest?.pi?.extensions;
+    if (
+      Array.isArray(entries)
+      && entries.every((value) => typeof value === "string")
+      && nestedManifestExtensions(root, directory, entries, []).some((path) => relativePath(root, path) === structuralPath)
+    ) return undefined;
   } catch {
-    // A conventional index without an applicable nested Pi declaration owns its directory boundary.
+    // A conventional index without a productive nested Pi declaration owns its directory boundary.
   }
-  return directory;
+  return relativePath(root, directory);
 }
 
 function collectExtensions(root, directory, diagnostics) {
@@ -349,20 +371,9 @@ function collectExtensions(root, directory, diagnostics) {
       const packageValue = JSON.parse(readFileSync(join(path, "package.json"), "utf8"));
       const entries = packageValue?.pi?.extensions;
       if (Array.isArray(entries) && entries.every((value) => typeof value === "string")) {
-        const declared = new Set();
-        for (const declaredPath of entries.filter((value) => !/^[!+-]/.test(value))) {
-          const matches = /[*?]/.test(declaredPath)
-            ? globSync(declaredPath, { cwd: path, dot: false }).map((match) => join(path, match))
-            : [resolve(path, declaredPath)];
-          for (const match of matches) {
-            if (match === path || match.startsWith(`${path}${sep}`)) {
-              for (const candidate of collectFromPath(root, "Extension", match, diagnostics)) declared.add(relativePath(path, candidate));
-            }
-          }
-        }
-        const enabled = applyManifestOverrides([...declared].sort(), entries);
+        const enabled = nestedManifestExtensions(root, path, entries, diagnostics);
         if (enabled.length > 0) {
-          paths.push(...enabled.map((candidate) => join(path, candidate)));
+          paths.push(...enabled);
           continue;
         }
       }

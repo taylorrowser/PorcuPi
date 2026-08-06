@@ -4647,6 +4647,10 @@ test("Tracked Branch updates filter structural inventory changes and allow force
   mkdirSync(join(repository.source, "extensions", "directory"));
   writeFileSync(join(repository.source, "extensions", "directory", "index.ts"), "export default function directoryExtension() {}\n");
   writeFileSync(join(repository.source, "extensions", "directory", "helper.ts"), "export const acceptedHelper = true;\n");
+  writeFileSync(join(repository.source, "extensions", "directory", "package.json"), `${JSON.stringify({
+    name: "empty-extension-manifest",
+    pi: { extensions: [] },
+  }, null, 2)}\n`);
   writeFileSync(join(repository.source, "skills", "fixture-skill", "helper.txt"), "accepted helper\n");
   git(repository.source, "add", ".");
   git(repository.source, "commit", "-m", "Add selected Skill helper");
@@ -4679,12 +4683,14 @@ test("Tracked Branch updates filter structural inventory changes and allow force
   git(repository.source, "add", ".");
   git(repository.source, "commit", "-m", "Change selected Skill helper");
   const relevantCommit = publishRepositoryHead(root, repository);
-  const relevant = runPorcuPi(home, ["manage"], "6e6e0d", {
+  const relevant = runPorcuPi(home, ["manage"], "6a6e6e0d", {
     PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
   });
   assert.equal(relevant.status, 0, relevant.stderr || relevant.stdout);
   assert.match(relevant.stdout, /Skill.*changed.*skills\/fixture-skill\/SKILL\.md/);
   assert.match(relevant.stdout, /2 tracked regular files/);
+  assert.match(relevant.stdout, /Content file changed: skills\/fixture-skill\/helper\.txt/);
+  assert.match(relevant.stdout, /accepted 100644 sha256:[a-f0-9]{64} → candidate 100644 sha256:[a-f0-9]{64}/);
   assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].commit, relevantCommit);
 
   writeFileSync(join(repository.source, "extensions", "directory", "new-helper.ts"), "export const addedHelper = true;\n");
@@ -4696,7 +4702,8 @@ test("Tracked Branch updates filter structural inventory changes and allow force
   });
   assert.equal(extension.status, 0, extension.stderr || extension.stdout);
   assert.match(extension.stdout, /Extension.*changed.*extensions\/directory\/index\.ts/);
-  assert.match(extension.stdout, /3 tracked regular files/);
+  assert.match(extension.stdout, /4 tracked regular files/);
+  assert.match(extension.stdout, /Content file added: extensions\/directory\/new-helper\.ts · 100644 sha256:[a-f0-9]{64}/);
   assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].commit, extensionCommit);
 });
 
@@ -4769,11 +4776,23 @@ test("declared resource content and bounded package inputs conservatively produc
   const content = acceptCandidate("Add file beneath declared content directory");
   assert.match(content.stdout, /Extension.*changed.*extensions\/fixture\.ts/);
   assert.match(content.stdout, /3 tracked regular files/);
+  assert.match(content.stdout, /Content file added: shared\/added\.txt · 100644 sha256:[a-f0-9]{64}/);
+
+  const metadata = JSON.parse(readFileSync(join(repository.source, "porcupi.json"), "utf8"));
+  metadata.resources[0].content = ["extensions/fixture.ts", "shared/helper.txt", "shared/added.txt"];
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify(metadata, null, 2)}\n`);
+  const declaration = acceptCandidate("Change selected-content declaration without changing file inventory");
+  assert.match(declaration.stdout, /Content declaration changed:/);
+  assert.match(declaration.stdout, /accepted \["extensions\/fixture\.ts","shared"\]/);
+  assert.match(declaration.stdout, /candidate \["extensions\/fixture\.ts","shared\/helper\.txt","shared\/added\.txt"\]/);
 
   const manifest = JSON.parse(readFileSync(join(repository.source, "package.json"), "utf8"));
   manifest.dependencies.fixture = "2.0.0";
   writeFileSync(join(repository.source, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-  acceptCandidate("Change bounded dependency declaration");
+  const dependency = acceptCandidate("Change bounded dependency declaration");
+  assert.match(dependency.stdout, /Dependency declarations changed:/);
+  assert.match(dependency.stdout, /accepted \{"dependencies":\{"fixture":"1\.0\.0"\}\}/);
+  assert.match(dependency.stdout, /candidate \{"dependencies":\{"fixture":"2\.0\.0"\}\}/);
 
   manifest.scripts.test = "still ignored";
   writeFileSync(join(repository.source, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -4786,10 +4805,14 @@ test("declared resource content and bounded package inputs conservatively produc
 
   manifest.scripts.postinstall = "changed-install";
   writeFileSync(join(repository.source, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-  acceptCandidate("Change install lifecycle declaration");
+  const lifecycle = acceptCandidate("Change install lifecycle declaration");
+  assert.match(lifecycle.stdout, /Install-lifecycle scripts changed:/);
+  assert.match(lifecycle.stdout, /accepted \{"postinstall":"accepted-install"\}/);
+  assert.match(lifecycle.stdout, /candidate \{"postinstall":"changed-install"\}/);
 
   writeFileSync(join(repository.source, "package-lock.json"), "{\"lockfileVersion\":3,\"changed\":true}\n");
-  acceptCandidate("Change applicable committed package lock");
+  const lock = acceptCandidate("Change applicable committed package lock");
+  assert.match(lock.stdout, /Package lock changed: accepted package-lock\.json · 100644 sha256:[a-f0-9]{64} → candidate package-lock\.json · 100644 sha256:[a-f0-9]{64}/);
 });
 
 test("selected declared Patch Series coalesce latest membership while standalone additions stay quiet", async () => {

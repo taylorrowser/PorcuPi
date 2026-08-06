@@ -44,6 +44,7 @@ function renderSourceUpdatePage({ previous, candidate, reviews, active, page, cu
     if (reviews.length > 0) {
       const focused = reviews[cursor];
       output.write(`  Accepted: ${focused.previous}\n  Candidate: ${focused.next}\n`);
+      for (const detail of focused.details) output.write(`  ${detail}\n`);
       if (canonicalJson(focused.compatibilityBefore) !== canonicalJson(focused.compatibilityAfter)) {
         output.write(`  Compatibility changed: ${compatibilityReview(focused.compatibilityBefore)} → ${compatibilityReview(focused.compatibilityAfter)}\n`);
       }
@@ -266,6 +267,57 @@ function candidateSelectionSource(previous, resolved, artifacts) {
   };
 }
 
+function fileInventoryChanges(previousFiles, candidateFiles) {
+  const previousByPath = new Map(previousFiles.map((file) => [file.path, file]));
+  const candidateByPath = new Map(candidateFiles.map((file) => [file.path, file]));
+  const paths = [...new Set([...previousByPath.keys(), ...candidateByPath.keys()])].sort();
+  return paths.flatMap((path) => {
+    const previous = previousByPath.get(path);
+    const candidate = candidateByPath.get(path);
+    if (!previous) return [`Content file added: ${path} · ${candidate.mode} sha256:${candidate.sha256}`];
+    if (!candidate) return [`Content file removed: ${path} · ${previous.mode} sha256:${previous.sha256}`];
+    if (canonicalJson(previous) === canonicalJson(candidate)) return [];
+    return [`Content file changed: ${path} · accepted ${previous.mode} sha256:${previous.sha256} → candidate ${candidate.mode} sha256:${candidate.sha256}`];
+  });
+}
+
+function lockReview(lock) {
+  return lock === null ? "none" : `${lock.path} · ${lock.mode} sha256:${lock.sha256}`;
+}
+
+function resourceReviewDetails(acceptedValue, candidateValue) {
+  const details = [];
+  if (canonicalJson(acceptedValue.content.declaration) !== canonicalJson(candidateValue.content.declaration)) {
+    details.push(`Content declaration changed: accepted ${canonicalJson(acceptedValue.content.declaration)} → candidate ${canonicalJson(candidateValue.content.declaration)}`);
+  }
+  details.push(...fileInventoryChanges(acceptedValue.content.files, candidateValue.content.files));
+
+  const previousInputs = acceptedValue.packageInputs;
+  const candidateInputs = candidateValue.packageInputs;
+  if (previousInputs === null || candidateInputs === null) {
+    if (canonicalJson(previousInputs) !== canonicalJson(candidateInputs)) {
+      details.push(`Bounded package inputs changed: accepted ${canonicalJson(previousInputs)} → candidate ${canonicalJson(candidateInputs)}`);
+    }
+    return details;
+  }
+  if (
+    previousInputs.manifest.path !== candidateInputs.manifest.path
+    || previousInputs.manifest.mode !== candidateInputs.manifest.mode
+  ) {
+    details.push(`Applicable package manifest changed: accepted ${previousInputs.manifest.path} (${previousInputs.manifest.mode}) → candidate ${candidateInputs.manifest.path} (${candidateInputs.manifest.mode})`);
+  }
+  if (canonicalJson(previousInputs.manifest.dependencies) !== canonicalJson(candidateInputs.manifest.dependencies)) {
+    details.push(`Dependency declarations changed: accepted ${canonicalJson(previousInputs.manifest.dependencies)} → candidate ${canonicalJson(candidateInputs.manifest.dependencies)}`);
+  }
+  if (canonicalJson(previousInputs.manifest.installLifecycleScripts) !== canonicalJson(candidateInputs.manifest.installLifecycleScripts)) {
+    details.push(`Install-lifecycle scripts changed: accepted ${canonicalJson(previousInputs.manifest.installLifecycleScripts)} → candidate ${canonicalJson(candidateInputs.manifest.installLifecycleScripts)}`);
+  }
+  if (canonicalJson(previousInputs.lock) !== canonicalJson(candidateInputs.lock)) {
+    details.push(`Package lock changed: accepted ${lockReview(previousInputs.lock)} → candidate ${lockReview(candidateInputs.lock)}`);
+  }
+  return details;
+}
+
 function artifactReview({ selected, acceptedRecord, candidateRecord }) {
   const candidate = candidateRecord.discovered;
   const compatibilityBefore = acceptedRecord.discovered.compatibility ?? null;
@@ -279,6 +331,7 @@ function artifactReview({ selected, acceptedRecord, candidateRecord }) {
       changed: acceptedRecord.fingerprint !== candidateRecord.fingerprint,
       previous: previousMembers.map((member) => `${member.path}@sha256:${member.sha256}`).join(" → "),
       next: candidateMembers.map((member) => `${member.path}@sha256:${member.sha256}`).join(" → "),
+      details: [],
       compatibilityBefore,
       compatibilityAfter,
     };
@@ -289,6 +342,7 @@ function artifactReview({ selected, acceptedRecord, candidateRecord }) {
     changed: acceptedRecord.fingerprint !== candidateRecord.fingerprint,
     previous: acceptedRecord.summary,
     next: candidateRecord.summary,
+    details: resourceReviewDetails(acceptedRecord.value, candidateRecord.value),
     compatibilityBefore,
     compatibilityAfter,
   };

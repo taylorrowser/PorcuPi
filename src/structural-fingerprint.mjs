@@ -22,6 +22,7 @@ const installLifecycleScripts = [
   "preprepare",
   "prepare",
   "postprepare",
+  "dependencies",
 ];
 
 function safePath(value) {

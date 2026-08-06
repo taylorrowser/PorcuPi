@@ -4777,6 +4777,39 @@ test("productive nested Extension manifests remain bounded package inputs", asyn
   assert.match(manage.stdout, /Dependency declarations changed: accepted \{"dependencies":\{"runtime":"1\.0\.0"\}\} → candidate \{"dependencies":\{"runtime":"2\.0\.0"\}\}/);
 });
 
+test("npm dependencies lifecycle changes remain bounded package inputs", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  const manifestPath = join(repository.source, "package.json");
+  writeFileSync(manifestPath, `${JSON.stringify({
+    name: "lifecycle-fixture",
+    scripts: { dependencies: "node accepted-dependencies.mjs" },
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Declare dependencies lifecycle");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "6a6a206e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  manifest.scripts.dependencies = "node candidate-dependencies.mjs";
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Change dependencies lifecycle");
+  publishRepositoryHead(root, repository);
+
+  const manage = runPorcuPi(home, ["manage"], "1b");
+  assert.equal(manage.status, 0, manage.stderr || manage.stdout);
+  assert.match(manage.stdout, /Review Tracked Branch candidate/);
+  assert.match(manage.stdout, /Install-lifecycle scripts changed: accepted \{"dependencies":"node accepted-dependencies\.mjs"\} → candidate \{"dependencies":"node candidate-dependencies\.mjs"\}/);
+});
+
 test("declared resource content and bounded package inputs conservatively produce candidates", async () => {
   const root = temporaryRoot();
   const home = join(root, "home");

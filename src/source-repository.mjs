@@ -3,6 +3,7 @@ import { globSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSy
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { canonicalSourceLocator, fail, sha256File } from "./runtime.mjs";
+import { inventoryStructuralContent } from "./structural-fingerprint.mjs";
 
 const artifactKinds = ["Extension", "Prompt", "Skill", "Theme"];
 const regularGitModes = new Set(["100644", "100755"]);
@@ -894,31 +895,17 @@ function discoverPatchArtifacts(checkout, diagnostics, piBase) {
 
 function resourceContentError(checkout, entry) {
   if (entry.content === undefined) return undefined;
-  const realCheckout = realpathSync(checkout);
-  let coversStructuralPath = false;
-  for (const root of entry.content) {
-    const absolute = join(checkout, root);
-    let stat;
-    try {
-      stat = lstatSync(absolute);
-      const real = realpathSync(absolute);
-      if (
-        stat.isSymbolicLink()
-        || (!stat.isFile() && !stat.isDirectory())
-        || (real !== realCheckout && !real.startsWith(`${realCheckout}${sep}`))
-      ) throw new Error();
-    } catch {
-      return `declared content path is not a repository-bounded regular file or directory: ${root}`;
-    }
-    coversStructuralPath ||= stat.isDirectory() ? entry.path.startsWith(`${root}/`) : entry.path === root;
-    const raw = git(["ls-files", "--stage", "-z", "--", `:(literal)${root}`], { cwd: checkout });
-    const records = raw.split("\0").filter(Boolean).map((record) => record.match(/^([0-9]{6}) [a-f0-9]+ [0-9]\t(.+)$/));
-    const selected = records.filter((match) => match && (stat.isFile() ? match[2] === root : match[2].startsWith(`${root}/`)));
-    if (selected.length === 0 || selected.some((match) => !regularGitModes.has(match[1]) || !safeArtifactPath(match[2]))) {
-      return `declared content path does not contain only tracked regular files: ${root}`;
-    }
+  try {
+    inventoryStructuralContent({
+      checkout,
+      roots: entry.content,
+      structuralPath: entry.path,
+      declared: true,
+    });
+    return undefined;
+  } catch (error) {
+    return error.message;
   }
-  return coversStructuralPath ? undefined : `declared content does not cover selected structural path ${entry.path}`;
 }
 
 function applyResourceCompatibility(checkout, artifacts, metadata, piBase, diagnostics) {

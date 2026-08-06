@@ -4396,11 +4396,13 @@ test("branch movement and ref failures preserve the accepted exact snapshot", as
   git(repository.source, "push", "--force", remote, `${repository.commit}:main`);
   git(remote, "update-ref", "-d", "refs/heads/deleted-later");
 
-  const manage = runPorcuPi(home, ["manage"], "1b", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
-  assert.equal(manage.status, 0, manage.stderr || manage.stdout);
-  assert.match(manage.stdout, /Tracked Branch: refs\/heads\/main/);
-  assert.match(manage.stdout, new RegExp(`Accepted exact commit: ${acceptedCommit}`));
-  assert.doesNotMatch(manage.stdout, new RegExp(repository.commit));
+  const manage = runPorcuPiProcess(home, ["manage"]);
+  assert.notEqual(manage.status, 0);
+  assert.match(
+    `${manage.stdout}${manage.stderr}`,
+    new RegExp(`Tracked Branch refs/heads/main moved non-fast-forward; accepted exact snapshot ${acceptedCommit} is preserved`),
+  );
+  assert.doesNotMatch(`${manage.stdout}${manage.stderr}`, /requires an interactive terminal/);
 
   const unexpectedlyMoved = runPorcuPi(home, ["add", `${locator}@main`], "");
   const missing = runPorcuPi(home, ["add", `${locator}@does-not-exist`], "");
@@ -4712,8 +4714,13 @@ test("declared resource content and bounded package inputs conservatively produc
     name: "structural-fixture",
     dependencies: { fixture: "1.0.0" },
     scripts: { test: "ignored-test", postinstall: "accepted-install" },
+    pi: { extensions: ["extensions/fixture.ts"] },
   }, null, 2)}\n`);
   writeFileSync(join(repository.source, "package-lock.json"), "{\"lockfileVersion\":3}\n");
+  writeFileSync(join(repository.source, "extensions", "package.json"), `${JSON.stringify({
+    name: "nested-nonauthoritative-fixture",
+    dependencies: { nested: "1.0.0" },
+  }, null, 2)}\n`);
   writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
     schemaVersion: 1,
     resources: [{
@@ -4741,6 +4748,22 @@ test("declared resource content and bounded package inputs conservatively produc
     assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].commit, commit);
     return result;
   };
+
+  const nestedManifestPath = join(repository.source, "extensions", "package.json");
+  const nestedManifest = JSON.parse(readFileSync(nestedManifestPath, "utf8"));
+  nestedManifest.dependencies.nested = "2.0.0";
+  writeFileSync(nestedManifestPath, `${JSON.stringify(nestedManifest, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Change nonauthoritative nested package input");
+  const nestedCommit = publishRepositoryHead(root, repository);
+  const nestedChange = runPorcuPi(home, ["manage"], "1b", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+  assert.equal(nestedChange.status, 0, nestedChange.stderr || nestedChange.stdout);
+  assert.match(nestedChange.stdout, new RegExp(`Latest exact commit ${nestedCommit} has unchanged selected structural content`));
+  assert.doesNotMatch(nestedChange.stdout, /Review Tracked Branch candidate/);
+
+  const forcedNested = runPorcuPi(home, ["manage"], "756e6e0d", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+  assert.equal(forcedNested.status, 0, forcedNested.stderr || forcedNested.stdout);
+  assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].commit, nestedCommit);
 
   writeFileSync(join(repository.source, "shared", "added.txt"), "declared additive content\n");
   const content = acceptCandidate("Add file beneath declared content directory");

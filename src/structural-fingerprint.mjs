@@ -70,7 +70,7 @@ function exactTrackedFiles(checkout, rootPath) {
     ? inventory.filter((entry) => entry.path === rootPath)
     : inventory.filter((entry) => entry.path.startsWith(`${rootPath}/`));
   if (records.length === 0) fail(`Selected content path has no tracked regular files: ${rootPath}`);
-  return records.map(({ mode, path }) => {
+  const files = records.map(({ mode, path }) => {
     if (!regularGitModes.has(mode)) fail(`Selected content path has unsupported tracked mode ${mode}: ${path}`);
     const file = join(checkout, path);
     try {
@@ -82,6 +82,23 @@ function exactTrackedFiles(checkout, rootPath) {
     }
     return { path, mode, sha256: sha256File(file) };
   });
+  return { directory: rootStat.isDirectory(), files };
+}
+
+/** Validate and inventory exact declared or conventional structural roots. */
+export function inventoryStructuralContent({ checkout, roots, structuralPath, declared = false }) {
+  const files = new Map();
+  let coversStructuralPath = !declared;
+  for (const root of roots) {
+    const inventory = exactTrackedFiles(checkout, root);
+    coversStructuralPath ||= inventory.directory ? structuralPath.startsWith(`${root}/`) : structuralPath === root;
+    for (const file of inventory.files) files.set(file.path, file);
+  }
+  if (!coversStructuralPath) fail(`Selected content declaration does not cover ${structuralPath}`);
+  return {
+    declaration: declared ? [...roots] : null,
+    files: [...files.values()].sort((left, right) => left.path.localeCompare(right.path)),
+  };
 }
 
 function defaultContentRoots(artifact) {
@@ -95,27 +112,12 @@ function defaultContentRoots(artifact) {
 }
 
 function selectedContent(checkout, artifact) {
-  const roots = artifact.content ?? defaultContentRoots(artifact);
-  if (artifact.content) {
-    const coversStructuralPath = roots.some((root) => {
-      const absolute = join(checkout, root);
-      try {
-        const stat = lstatSync(absolute);
-        return stat.isDirectory() ? artifact.path.startsWith(`${root}/`) : artifact.path === root;
-      } catch {
-        return false;
-      }
-    });
-    if (!coversStructuralPath) fail(`Selected content declaration does not cover ${artifact.kind} ${artifact.path}`);
-  }
-  const files = new Map();
-  for (const root of roots) {
-    for (const file of exactTrackedFiles(checkout, root)) files.set(file.path, file);
-  }
-  return {
-    declaration: artifact.content ? [...artifact.content] : null,
-    files: [...files.values()].sort((left, right) => left.path.localeCompare(right.path)),
-  };
+  return inventoryStructuralContent({
+    checkout,
+    roots: artifact.content ?? defaultContentRoots(artifact),
+    structuralPath: artifact.path,
+    declared: artifact.content !== undefined,
+  });
 }
 
 function nearestPackageManifest(checkout, artifactPath) {
@@ -133,6 +135,18 @@ function nearestPackageManifest(checkout, artifactPath) {
     if (directory === ".") return undefined;
     directory = dirname(directory);
   }
+}
+
+function applicablePackageManifest(checkout, artifactPath) {
+  try {
+    const rootManifest = JSON.parse(readFileSync(join(checkout, "package.json"), "utf8"));
+    if (rootManifest !== null && typeof rootManifest === "object" && !Array.isArray(rootManifest) && Object.hasOwn(rootManifest, "pi")) {
+      return "package.json";
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") fail("Applicable package manifest is malformed: package.json");
+  }
+  return nearestPackageManifest(checkout, artifactPath);
 }
 
 function trackedFile(checkout, path) {
@@ -164,7 +178,7 @@ function applicableLock(checkout, manifestPath) {
 }
 
 function boundedPackageInputs(checkout, artifact) {
-  const manifestPath = nearestPackageManifest(checkout, artifact.path);
+  const manifestPath = applicablePackageManifest(checkout, artifact.path);
   if (!manifestPath) return null;
   const manifestFile = trackedFile(checkout, manifestPath);
   let manifest;
@@ -195,7 +209,7 @@ function fingerprintRecord(checkout, selected, discovered) {
   if (discovered.inventoryError) fail(`Selected ${selected.kind} ${identity} has invalid structural metadata: ${discovered.inventoryError}`);
   if (selected.kind === "PatchSeries") {
     const files = discovered.members.map((member) => {
-      const [file] = exactTrackedFiles(checkout, member.path);
+      const { files: [file] } = exactTrackedFiles(checkout, member.path);
       if (!file || file.path !== member.path || file.sha256 !== member.sha256) {
         fail(`Selected Patch Series inventory changed while reading ${identity}`);
       }

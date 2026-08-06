@@ -385,9 +385,14 @@ function resolveTrackedCandidates(selections, active) {
   let forceable;
   for (const previous of selections.sources.filter((source) => source.trackedBranch)) {
     const resolved = resolveTrackedSourceRepository(previous);
-    if (resolved.commit === previous.commit || !branchContainsAcceptedCommit(resolved.checkout, previous.commit, resolved.commit)) {
+    if (resolved.commit === previous.commit) {
       resolved.dispose();
       continue;
+    }
+    if (!branchContainsAcceptedCommit(resolved.checkout, previous.commit, resolved.commit)) {
+      resolved.dispose();
+      disposeTrackedCandidate(forceable);
+      fail(`Tracked Branch ${previous.trackedBranch} moved non-fast-forward; accepted exact snapshot ${previous.commit} is preserved`);
     }
     let accepted;
     try {

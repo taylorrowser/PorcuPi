@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { globSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { canonicalSourceLocator, fail, sha256File } from "./runtime.mjs";
 
 const artifactKinds = ["Extension", "Prompt", "Skill", "Theme"];
@@ -323,6 +323,18 @@ function directoryEntries(root, path) {
   }
 }
 
+function conventionalExtensionDirectory(root, structuralPath) {
+  if (!/^extensions\/[^/]+\/index\.(?:js|ts)$/.test(structuralPath)) return undefined;
+  const directory = dirname(structuralPath);
+  try {
+    const manifest = JSON.parse(readFileSync(join(root, directory, "package.json"), "utf8"));
+    if (Array.isArray(manifest?.pi?.extensions)) return undefined;
+  } catch {
+    // A conventional index without an applicable nested Pi declaration owns its directory boundary.
+  }
+  return directory;
+}
+
 function collectExtensions(root, directory, diagnostics) {
   const paths = [];
   for (const entry of directoryEntries(root, directory)) {
@@ -595,8 +607,9 @@ function readSourceMetadata(checkout, patches, piBase, diagnostics) {
       patches, patchSeries: [], patchEntries: [], resourceEntries: [], sourceCompatibility: undefined,
     };
     const reason = error instanceof SyntaxError ? "malformed JSON" : "metadata root is not a readable regular file";
-    diagnostics.push({ path: "porcupi.json", reason: `Source metadata is invalid and ignored as a whole: ${reason}` });
-    return { patches, patchSeries: [], patchEntries: [], resourceEntries: [], sourceCompatibility: undefined };
+    const metadataError = `Source metadata is invalid and ignored as a whole: ${reason}`;
+    diagnostics.push({ path: "porcupi.json", reason: metadataError });
+    return { patches, patchSeries: [], patchEntries: [], resourceEntries: [], sourceCompatibility: undefined, metadataError };
   }
 
   const rootKeys = new Set([
@@ -625,12 +638,14 @@ function readSourceMetadata(checkout, patches, piBase, diagnostics) {
   const resourceKeys = new Set([
     "kind",
     "path",
+    "content",
     "supportedPiBaseVersions",
     "supportedPiBaseCommits",
   ]);
   const invalid = (reason) => {
-    diagnostics.push({ path: "porcupi.json", reason: `Source metadata is invalid and ignored as a whole: ${reason}` });
-    return { patches, patchSeries: [], patchEntries: [], resourceEntries: [], sourceCompatibility: undefined };
+    const metadataError = `Source metadata is invalid and ignored as a whole: ${reason}`;
+    diagnostics.push({ path: "porcupi.json", reason: metadataError });
+    return { patches, patchSeries: [], patchEntries: [], resourceEntries: [], sourceCompatibility: undefined, metadataError };
   };
   if (
     !exactObjectKeys(value, rootKeys)
@@ -685,7 +700,13 @@ function readSourceMetadata(checkout, patches, piBase, diagnostics) {
       !exactObjectKeys(resource, resourceKeys)
       || !artifactKinds.includes(resource.kind)
       || !safeArtifactPath(resource.path)
-    ) return invalid("resource compatibility entries require only a supported kind, safe path, and exact Pi Base values");
+      || (resource.content !== undefined && (
+        !Array.isArray(resource.content)
+        || resource.content.length === 0
+        || resource.content.some((path) => !safeArtifactPath(path))
+        || new Set(resource.content).size !== resource.content.length
+      ))
+    ) return invalid("resource entries require only a supported kind, safe path, optional unique non-empty content paths, and exact Pi Base values");
     const identity = `${resource.kind}:${resource.path}`;
     if (resourceIdentities.has(identity)) return invalid(`duplicate resource compatibility entry ${identity}`);
     resourceIdentities.add(identity);
@@ -871,7 +892,36 @@ function discoverPatchArtifacts(checkout, diagnostics, piBase) {
   };
 }
 
-function applyResourceCompatibility(artifacts, metadata, piBase, diagnostics) {
+function resourceContentError(checkout, entry) {
+  if (entry.content === undefined) return undefined;
+  const realCheckout = realpathSync(checkout);
+  let coversStructuralPath = false;
+  for (const root of entry.content) {
+    const absolute = join(checkout, root);
+    let stat;
+    try {
+      stat = lstatSync(absolute);
+      const real = realpathSync(absolute);
+      if (
+        stat.isSymbolicLink()
+        || (!stat.isFile() && !stat.isDirectory())
+        || (real !== realCheckout && !real.startsWith(`${realCheckout}${sep}`))
+      ) throw new Error();
+    } catch {
+      return `declared content path is not a repository-bounded regular file or directory: ${root}`;
+    }
+    coversStructuralPath ||= stat.isDirectory() ? entry.path.startsWith(`${root}/`) : entry.path === root;
+    const raw = git(["ls-files", "--stage", "-z", "--", `:(literal)${root}`], { cwd: checkout });
+    const records = raw.split("\0").filter(Boolean).map((record) => record.match(/^([0-9]{6}) [a-f0-9]+ [0-9]\t(.+)$/));
+    const selected = records.filter((match) => match && (stat.isFile() ? match[2] === root : match[2].startsWith(`${root}/`)));
+    if (selected.length === 0 || selected.some((match) => !regularGitModes.has(match[1]) || !safeArtifactPath(match[2]))) {
+      return `declared content path does not contain only tracked regular files: ${root}`;
+    }
+  }
+  return coversStructuralPath ? undefined : `declared content does not cover selected structural path ${entry.path}`;
+}
+
+function applyResourceCompatibility(checkout, artifacts, metadata, piBase, diagnostics) {
   const discovered = new Set(artifacts.map((artifact) => `${artifact.kind}:${artifact.path}`));
   for (const entry of metadata.resourceEntries) {
     const identity = `${entry.kind}:${entry.path}`;
@@ -881,13 +931,21 @@ function applyResourceCompatibility(artifacts, metadata, piBase, diagnostics) {
     });
   }
   const entries = new Map(metadata.resourceEntries.map((entry) => [`${entry.kind}:${entry.path}`, entry]));
-  return artifacts.map((artifact) => ({
-    ...artifact,
-    ...compatibilityStatus(
-      effectiveCompatibility(entries.get(`${artifact.kind}:${artifact.path}`), metadata.sourceCompatibility),
-      piBase,
-    ),
-  }));
+  return artifacts.map((artifact) => {
+    const entry = entries.get(`${artifact.kind}:${artifact.path}`);
+    const contentError = entry ? resourceContentError(checkout, entry) : undefined;
+    if (contentError) diagnostics.push({
+      path: "porcupi.json",
+      reason: `Resource selected-content declaration ${artifact.kind}:${artifact.path} is invalid: ${contentError}`,
+    });
+    return {
+      ...artifact,
+      ...(entry?.content === undefined || contentError ? {} : { content: [...entry.content] }),
+      ...(contentError ? { contentInvalid: true } : {}),
+      ...(metadata.metadataError || contentError ? { inventoryError: metadata.metadataError ?? contentError } : {}),
+      ...compatibilityStatus(effectiveCompatibility(entry, metadata.sourceCompatibility), piBase),
+    };
+  });
 }
 
 export function discoverPiArtifacts(root, { piBase } = {}) {
@@ -915,11 +973,24 @@ export function discoverPiArtifacts(root, { piBase } = {}) {
     };
     artifacts = artifactKinds.flatMap((kind) => paths[kind]
       .filter((path) => validateArtifact(checkout, kind, path, diagnostics))
-      .map((path) => ({ kind, path: relativePath(checkout, path) })));
+      .map((path) => {
+        const structuralPath = relativePath(checkout, path);
+        const structuralDirectory = kind === "Extension"
+          ? conventionalExtensionDirectory(checkout, structuralPath)
+          : undefined;
+        return {
+          kind,
+          path: structuralPath,
+          ...(structuralDirectory ? { structuralDirectory } : {}),
+        };
+      }));
   }
   const patchDiscovery = discoverPatchArtifacts(checkout, diagnostics, piBase);
-  artifacts = applyResourceCompatibility(artifacts, patchDiscovery.metadata, piBase, diagnostics);
-  artifacts.push(...patchDiscovery.artifacts);
+  artifacts = applyResourceCompatibility(checkout, artifacts, patchDiscovery.metadata, piBase, diagnostics);
+  artifacts.push(...patchDiscovery.artifacts.map((artifact) => ({
+    ...artifact,
+    ...(patchDiscovery.metadata.metadataError ? { inventoryError: patchDiscovery.metadata.metadataError } : {}),
+  })));
   artifacts.sort((left, right) => `${left.kind}\0${left.kind === "PatchSeries" ? left.id : left.path}`
     .localeCompare(`${right.kind}\0${right.kind === "PatchSeries" ? right.id : right.path}`));
   diagnostics.sort((left, right) => left.path.localeCompare(right.path));

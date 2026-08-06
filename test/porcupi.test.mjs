@@ -4634,6 +4634,256 @@ test("a mixed Inter-release Source Update reconciles Pi resources now and applie
   );
 });
 
+test("Tracked Branch updates filter structural inventory changes and allow forced exact-commit review", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  mkdirSync(join(repository.source, "extensions", "directory"));
+  writeFileSync(join(repository.source, "extensions", "directory", "index.ts"), "export default function directoryExtension() {}\n");
+  writeFileSync(join(repository.source, "extensions", "directory", "helper.ts"), "export const acceptedHelper = true;\n");
+  writeFileSync(join(repository.source, "skills", "fixture-skill", "helper.txt"), "accepted helper\n");
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Add selected Skill helper");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "206a6a6a206e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const acceptedCommit = JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].commit;
+  writeFileSync(join(repository.source, "unrelated", "documentation.md"), "irrelevant\n");
+  writeFileSync(join(repository.source, "extensions", "independent.ts"), "export default function independent() {}\n");
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Change only unselected content");
+  const irrelevantCommit = publishRepositoryHead(root, repository);
+
+  const quiet = runPorcuPi(home, ["manage"], "1b", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+  assert.equal(quiet.status, 0, quiet.stderr || quiet.stdout);
+  assert.doesNotMatch(quiet.stdout, /Review Tracked Branch candidate/);
+  assert.match(quiet.stdout, new RegExp(`Latest exact commit ${irrelevantCommit} has unchanged selected structural content`));
+  assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].commit, acceptedCommit);
+
+  const forced = runPorcuPi(home, ["manage"], "756e6e0d", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+  assert.equal(forced.status, 0, forced.stderr || forced.stdout);
+  assert.match(forced.stdout, /Review Tracked Branch candidate/);
+  assert.match(forced.stdout, /explicit latest-commit review/);
+  assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].commit, irrelevantCommit);
+
+  writeFileSync(join(repository.source, "skills", "fixture-skill", "helper.txt"), "changed selected helper\n");
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Change selected Skill helper");
+  const relevantCommit = publishRepositoryHead(root, repository);
+  const relevant = runPorcuPi(home, ["manage"], "6e6e0d", {
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+  });
+  assert.equal(relevant.status, 0, relevant.stderr || relevant.stdout);
+  assert.match(relevant.stdout, /Skill.*changed.*skills\/fixture-skill\/SKILL\.md/);
+  assert.match(relevant.stdout, /2 tracked regular files/);
+  assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].commit, relevantCommit);
+
+  writeFileSync(join(repository.source, "extensions", "directory", "new-helper.ts"), "export const addedHelper = true;\n");
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Add file beneath selected directory Extension");
+  const extensionCommit = publishRepositoryHead(root, repository);
+  const extension = runPorcuPi(home, ["manage"], "6e6e0d", {
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+  });
+  assert.equal(extension.status, 0, extension.stderr || extension.stdout);
+  assert.match(extension.stdout, /Extension.*changed.*extensions\/directory\/index\.ts/);
+  assert.match(extension.stdout, /3 tracked regular files/);
+  assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].commit, extensionCommit);
+});
+
+test("declared resource content and bounded package inputs conservatively produce candidates", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  mkdirSync(join(repository.source, "shared"));
+  writeFileSync(join(repository.source, "shared", "helper.txt"), "accepted helper\n");
+  writeFileSync(join(repository.source, "package.json"), `${JSON.stringify({
+    name: "structural-fixture",
+    dependencies: { fixture: "1.0.0" },
+    scripts: { test: "ignored-test", postinstall: "accepted-install" },
+  }, null, 2)}\n`);
+  writeFileSync(join(repository.source, "package-lock.json"), "{\"lockfileVersion\":3}\n");
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    resources: [{
+      kind: "Extension",
+      path: "extensions/fixture.ts",
+      content: ["extensions/fixture.ts", "shared"],
+    }],
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Declare selected Extension content");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "206e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+
+  const acceptCandidate = (message) => {
+    git(repository.source, "add", ".");
+    git(repository.source, "commit", "-m", message);
+    const commit = publishRepositoryHead(root, repository);
+    const result = runPorcuPi(home, ["manage"], "6e6e0d", {
+      PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].commit, commit);
+    return result;
+  };
+
+  writeFileSync(join(repository.source, "shared", "added.txt"), "declared additive content\n");
+  const content = acceptCandidate("Add file beneath declared content directory");
+  assert.match(content.stdout, /Extension.*changed.*extensions\/fixture\.ts/);
+  assert.match(content.stdout, /3 tracked regular files/);
+
+  const manifest = JSON.parse(readFileSync(join(repository.source, "package.json"), "utf8"));
+  manifest.dependencies.fixture = "2.0.0";
+  writeFileSync(join(repository.source, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  acceptCandidate("Change bounded dependency declaration");
+
+  manifest.scripts.test = "still ignored";
+  writeFileSync(join(repository.source, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Change unrelated package script");
+  const ignoredScriptCommit = publishRepositoryHead(root, repository);
+  const ignoredScript = runPorcuPi(home, ["manage"], "1b", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+  assert.equal(ignoredScript.status, 0, ignoredScript.stderr || ignoredScript.stdout);
+  assert.match(ignoredScript.stdout, new RegExp(`Latest exact commit ${ignoredScriptCommit} has unchanged selected structural content`));
+
+  manifest.scripts.postinstall = "changed-install";
+  writeFileSync(join(repository.source, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  acceptCandidate("Change install lifecycle declaration");
+
+  writeFileSync(join(repository.source, "package-lock.json"), "{\"lockfileVersion\":3,\"changed\":true}\n");
+  acceptCandidate("Change applicable committed package lock");
+});
+
+test("selected declared Patch Series coalesce latest membership while standalone additions stay quiet", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createApplicablePatchRepository(root, [
+    ["patches/one.patch", textPatch("series.txt", "base", "one")],
+    ["patches/unselected.patch", newFilePatch("unselected.txt", "unselected")],
+  ]);
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    patchSeries: [{ id: "selected-series", members: ["patches/one.patch"] }],
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Declare selected series");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "6a206e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  const managedRoot = dataRoot(home);
+  const selectionsPath = join(managedRoot, "state", "selections.json");
+  const activationBefore = readFileSync(join(managedRoot, "state", "activation.json"));
+
+  writeFileSync(join(repository.source, "patches", "two.patch"), textPatch("series.txt", "one", "two"));
+  const metadata = JSON.parse(readFileSync(join(repository.source, "porcupi.json"), "utf8"));
+  metadata.patchSeries[0].members.push("patches/two.patch");
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify(metadata, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Add selected series member");
+  publishRepositoryHead(root, repository);
+  const additive = runPorcuPi(home, ["manage"], "6e6e0d", {
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+  });
+  assert.equal(additive.status, 0, additive.stderr || additive.stdout);
+  assert.match(additive.stdout, /Patch Series.*changed.*selected-series/);
+  assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].artifacts[0].members.length, 2);
+  assert.deepEqual(readFileSync(join(managedRoot, "state", "activation.json")), activationBefore);
+
+  writeFileSync(join(repository.source, "patches", "independent.patch"), newFilePatch("independent.txt", "independent"));
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Add unselected standalone Patch File");
+  const standaloneCommit = publishRepositoryHead(root, repository);
+  const quiet = runPorcuPi(home, ["manage"], "1b", { PTY_WAIT_FOR: "1 of 3 — Keep or remove" });
+  assert.equal(quiet.status, 0, quiet.stderr || quiet.stdout);
+  assert.match(quiet.stdout, new RegExp(`Latest exact commit ${standaloneCommit} has unchanged selected structural content`));
+
+  writeFileSync(join(repository.source, "patches", "two.patch"), textPatch("series.txt", "one", "latest"));
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Replace pending selected member bytes");
+  const latestCommit = publishRepositoryHead(root, repository);
+  const repeated = runPorcuPi(home, ["manage"], "6e6e0d", {
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+  });
+  assert.equal(repeated.status, 0, repeated.stderr || repeated.stdout);
+  const latest = JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0];
+  assert.equal(latest.commit, latestCommit);
+  assert.ok(latest.artifacts[0].members.every((member) => member.commit === latestCommit));
+  assert.equal(latest.artifacts[0].members[1].sha256, createHash("sha256").update(readFileSync(join(repository.source, "patches", "two.patch"))).digest("hex"));
+  assert.deepEqual(readFileSync(join(managedRoot, "state", "activation.json")), activationBefore);
+});
+
+test("final acceptance rejects Tracked Branch movement and removed selected Artifacts", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "6a6a206e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const selectionsBefore = readFileSync(selectionsPath);
+
+  writeFileSync(join(repository.source, "skills", "fixture-skill", "SKILL.md"), "---\nname: fixture-skill\ndescription: Reviewed candidate.\n---\nReviewed.\n");
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Publish reviewed candidate");
+  const reviewedCommit = publishRepositoryHead(root, repository);
+  writeFileSync(join(repository.source, "skills", "fixture-skill", "SKILL.md"), "---\nname: fixture-skill\ndescription: Moved candidate.\n---\nMoved.\n");
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Move branch during review");
+  const movedCommit = git(repository.source, "rev-parse", "HEAD");
+  const bare = join(root, "git-daemon", "owner", "resources.git");
+  git(repository.source, "push", bare, `${movedCommit}:refs/heads/future`);
+
+  const moved = runPorcuPi(home, ["manage"], "6e6e0d", {
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+    PTY_BEFORE_INPUT_COMMAND: `git --git-dir=${JSON.stringify(bare)} update-ref refs/heads/main ${movedCommit}`,
+  });
+  assert.notEqual(moved.status, 0);
+  assert.match(`${moved.stdout}${moved.stderr}`, new RegExp(`Candidate exact commit: ${reviewedCommit}`));
+  assert.match(`${moved.stdout}${moved.stderr}`, new RegExp(`Tracked Branch moved after review; reviewed exact commit ${reviewedCommit} was not accepted`));
+  assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
+
+  const latest = runPorcuPi(home, ["manage"], "6e6e0d", {
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+  });
+  assert.equal(latest.status, 0, latest.stderr || latest.stdout);
+  assert.match(latest.stdout, new RegExp(`Candidate exact commit: ${movedCommit}`));
+  assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].commit, movedCommit);
+  const validSelections = readFileSync(selectionsPath);
+
+  rmSync(join(repository.source, "skills", "fixture-skill", "SKILL.md"));
+  git(repository.source, "add", "--all");
+  git(repository.source, "commit", "-m", "Remove selected Skill");
+  const removalCommit = publishRepositoryHead(root, repository);
+  const removed = runPorcuPiProcess(home, ["manage"]);
+  assert.notEqual(removed.status, 0);
+  assert.match(`${removed.stdout}${removed.stderr}`, new RegExp(`Inter-release Source Update blocked:.*${removalCommit}.*is not discoverable`));
+  assert.deepEqual(readFileSync(selectionsPath), validSelections);
+});
+
 test("re-adding a Source Repository reviews and replaces its commit and complete selection", async () => {
   const root = temporaryRoot();
   const home = join(root, "home");

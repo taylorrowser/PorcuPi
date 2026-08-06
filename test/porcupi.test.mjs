@@ -4707,6 +4707,76 @@ test("Tracked Branch updates filter structural inventory changes and allow force
   assert.equal(JSON.parse(readFileSync(selectionsPath, "utf8")).sources[0].commit, extensionCommit);
 });
 
+test("unrelated ancestor package manifests stay outside a conventional Skill inventory", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  const manifestPath = join(repository.source, "skills", "package.json");
+  writeFileSync(manifestPath, `${JSON.stringify({
+    name: "unrelated-skill-parent",
+    dependencies: { unrelated: "1.0.0" },
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Add unrelated parent manifest");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "6a6a206e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  manifest.dependencies.unrelated = "2.0.0";
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Change unrelated parent manifest");
+  const candidateCommit = publishRepositoryHead(root, repository);
+
+  const manage = runPorcuPi(home, ["manage"], "1b");
+  assert.equal(manage.status, 0, manage.stderr || manage.stdout);
+  assert.doesNotMatch(manage.stdout, /Review Tracked Branch candidate/);
+  assert.match(manage.stdout, new RegExp(`Latest exact commit ${candidateCommit} has unchanged selected structural content`));
+});
+
+test("productive nested Extension manifests remain bounded package inputs", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+  const repository = createResourceRepository(root);
+  const extensionDirectory = join(repository.source, "extensions", "nested");
+  mkdirSync(extensionDirectory);
+  writeFileSync(join(extensionDirectory, "index.ts"), "export default function nested() {}\n");
+  const manifestPath = join(extensionDirectory, "package.json");
+  writeFileSync(manifestPath, `${JSON.stringify({
+    name: "nested-extension",
+    dependencies: { runtime: "1.0.0" },
+    pi: { extensions: ["index.ts"] },
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Add manifest-discovered Extension");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "6a206e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  manifest.dependencies.runtime = "2.0.0";
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Change nested Extension dependency");
+  publishRepositoryHead(root, repository);
+
+  const manage = runPorcuPi(home, ["manage"], "1b");
+  assert.equal(manage.status, 0, manage.stderr || manage.stdout);
+  assert.match(manage.stdout, /Review Tracked Branch candidate/);
+  assert.match(manage.stdout, /Dependency declarations changed: accepted \{"dependencies":\{"runtime":"1\.0\.0"\}\} → candidate \{"dependencies":\{"runtime":"2\.0\.0"\}\}/);
+});
+
 test("declared resource content and bounded package inputs conservatively produce candidates", async () => {
   const root = temporaryRoot();
   const home = join(root, "home");

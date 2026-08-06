@@ -120,35 +120,6 @@ function selectedContent(checkout, artifact) {
   });
 }
 
-function nearestPackageManifest(checkout, artifactPath) {
-  let directory = dirname(artifactPath);
-  while (true) {
-    const manifestPath = directory === "." ? "package.json" : `${directory}/package.json`;
-    try {
-      const stat = lstatSync(join(checkout, manifestPath));
-      if (!stat.isFile() || stat.isSymbolicLink()) fail(`Applicable package manifest is not a regular file: ${manifestPath}`);
-      return manifestPath;
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-      // Continue toward the Source Repository root.
-    }
-    if (directory === ".") return undefined;
-    directory = dirname(directory);
-  }
-}
-
-function applicablePackageManifest(checkout, artifactPath) {
-  try {
-    const rootManifest = JSON.parse(readFileSync(join(checkout, "package.json"), "utf8"));
-    if (rootManifest !== null && typeof rootManifest === "object" && !Array.isArray(rootManifest) && Object.hasOwn(rootManifest, "pi")) {
-      return "package.json";
-    }
-  } catch (error) {
-    if (error?.code !== "ENOENT") fail("Applicable package manifest is malformed: package.json");
-  }
-  return nearestPackageManifest(checkout, artifactPath);
-}
-
 function trackedFile(checkout, path) {
   const records = gitInventory(checkout, path);
   if (records.length !== 1 || records[0].path !== path || !regularGitModes.has(records[0].mode)) {
@@ -178,7 +149,7 @@ function applicableLock(checkout, manifestPath) {
 }
 
 function boundedPackageInputs(checkout, artifact) {
-  const manifestPath = applicablePackageManifest(checkout, artifact.path);
+  const manifestPath = artifact.packageManifest;
   if (!manifestPath) return null;
   const manifestFile = trackedFile(checkout, manifestPath);
   let manifest;

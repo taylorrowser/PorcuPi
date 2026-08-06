@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { globSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { canonicalSourceLocator, fail, sha256File } from "./runtime.mjs";
 import { inventoryStructuralContent } from "./structural-fingerprint.mjs";
 
@@ -341,29 +341,12 @@ function nestedManifestExtensions(root, directory, entries, diagnostics) {
   return applyManifestOverrides([...declared].sort(), entries).map((candidate) => join(directory, candidate));
 }
 
-function conventionalExtensionDirectory(root, structuralPath) {
-  if (!/^extensions\/[^/]+\/index\.(?:js|ts)$/.test(structuralPath)) return undefined;
-  const directory = join(root, dirname(structuralPath));
-  try {
-    const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
-    const entries = manifest?.pi?.extensions;
-    if (
-      Array.isArray(entries)
-      && entries.every((value) => typeof value === "string")
-      && nestedManifestExtensions(root, directory, entries, []).some((path) => relativePath(root, path) === structuralPath)
-    ) return undefined;
-  } catch {
-    // A conventional index without a productive nested Pi declaration owns its directory boundary.
-  }
-  return relativePath(root, directory);
-}
-
 function collectExtensions(root, directory, diagnostics) {
-  const paths = [];
+  const artifacts = [];
   for (const entry of directoryEntries(root, directory)) {
     const path = join(directory, entry.name);
     if (entry.isFile() || entry.isSymbolicLink()) {
-      if (/\.(ts|js)$/.test(entry.name) && regularFile(root, path, diagnostics, "Extension")) paths.push(path);
+      if (/\.(ts|js)$/.test(entry.name) && regularFile(root, path, diagnostics, "Extension")) artifacts.push({ path });
       continue;
     }
     if (!entry.isDirectory()) continue;
@@ -373,7 +356,8 @@ function collectExtensions(root, directory, diagnostics) {
       if (Array.isArray(entries) && entries.every((value) => typeof value === "string")) {
         const enabled = nestedManifestExtensions(root, path, entries, diagnostics);
         if (enabled.length > 0) {
-          paths.push(...enabled);
+          const packageManifest = relativePath(root, join(path, "package.json"));
+          artifacts.push(...enabled.map((candidate) => ({ path: candidate, packageManifest })));
           continue;
         }
       }
@@ -387,9 +371,9 @@ function collectExtensions(root, directory, diagnostics) {
         return false;
       }
     });
-    if (index) paths.push(index);
+    if (index) artifacts.push({ path: index, structuralDirectory: relativePath(root, path) });
   }
-  return paths;
+  return artifacts;
 }
 
 function collectSkills(root, directory, diagnostics, includeRootMarkdown = true) {
@@ -950,36 +934,41 @@ export function discoverPiArtifacts(root, { piBase } = {}) {
   const checkout = resolve(root);
   const diagnostics = [];
   let manifest;
+  let rootPackageManifest;
   const packageJson = join(checkout, "package.json");
   try {
     const stat = lstatSync(packageJson);
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("not a regular file");
     const packageValue = JSON.parse(readFileSync(packageJson, "utf8"));
+    if (packageValue === null || typeof packageValue !== "object" || Array.isArray(packageValue)) throw new Error("not an object");
+    rootPackageManifest = "package.json";
     if (Object.hasOwn(packageValue, "pi")) manifest = packageValue.pi;
   } catch (error) {
     if (error?.code !== "ENOENT") diagnostics.push({ path: "package.json", reason: "Package manifest is malformed" });
   }
 
   let artifacts;
-  if (manifest !== undefined) artifacts = manifestArtifacts(checkout, manifest, diagnostics);
-  else {
-    const paths = {
+  if (manifest !== undefined) {
+    artifacts = manifestArtifacts(checkout, manifest, diagnostics).map((artifact) => ({
+      ...artifact,
+      packageManifest: rootPackageManifest,
+    }));
+  } else {
+    const discovered = {
       Extension: collectExtensions(checkout, join(checkout, "extensions"), diagnostics),
-      Skill: collectSkills(checkout, join(checkout, "skills"), diagnostics),
-      Prompt: collectRecursiveFiles(checkout, join(checkout, "prompts"), ".md", diagnostics, "Prompt"),
-      Theme: collectRecursiveFiles(checkout, join(checkout, "themes"), ".json", diagnostics, "Theme"),
+      Skill: collectSkills(checkout, join(checkout, "skills"), diagnostics).map((path) => ({ path })),
+      Prompt: collectRecursiveFiles(checkout, join(checkout, "prompts"), ".md", diagnostics, "Prompt").map((path) => ({ path })),
+      Theme: collectRecursiveFiles(checkout, join(checkout, "themes"), ".json", diagnostics, "Theme").map((path) => ({ path })),
     };
-    artifacts = artifactKinds.flatMap((kind) => paths[kind]
-      .filter((path) => validateArtifact(checkout, kind, path, diagnostics))
-      .map((path) => {
-        const structuralPath = relativePath(checkout, path);
-        const structuralDirectory = kind === "Extension"
-          ? conventionalExtensionDirectory(checkout, structuralPath)
-          : undefined;
+    artifacts = artifactKinds.flatMap((kind) => discovered[kind]
+      .filter((artifact) => validateArtifact(checkout, kind, artifact.path, diagnostics))
+      .map(({ path, structuralDirectory, packageManifest }) => {
+        const applicablePackageManifest = packageManifest ?? rootPackageManifest;
         return {
           kind,
-          path: structuralPath,
+          path: relativePath(checkout, path),
           ...(structuralDirectory ? { structuralDirectory } : {}),
+          ...(applicablePackageManifest ? { packageManifest: applicablePackageManifest } : {}),
         };
       }));
   }

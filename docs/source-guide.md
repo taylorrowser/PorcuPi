@@ -123,7 +123,7 @@ pi-resources/
     └── 0002-expose-capability-to-extensions.patch
 ```
 
-A source does not need every directory. Prefer one root Pi package manifest when publishing resources with dependencies or nonconventional paths. Keep PorcuPi compatibility and Patch Series metadata in the separate optional root `porcupi.json`; `package.json` cannot declare Patches, and `porcupi.json` resource entries only overlay compatibility on resources already discovered through Pi's rules—they cannot declare new Pi resources.
+A source does not need every directory. Prefer one root Pi package manifest when publishing resources with dependencies or nonconventional paths. Keep PorcuPi compatibility, structural-content boundaries, and Patch Series metadata in the separate optional root `porcupi.json`; `package.json` cannot declare Patches, and `porcupi.json` resource entries only overlay already discovered resources—they cannot declare new Pi resources.
 
 ### Resource discovery choices
 
@@ -327,6 +327,7 @@ Standalone Patch Files and Pi resources need no `porcupi.json`. Use an optional 
     {
       "kind": "Extension",
       "path": "extensions/example.ts",
+      "content": ["extensions/example.ts", "shared/runtime"],
       "supportedPiBaseVersions": ["v0.81.1"]
     },
     {
@@ -364,7 +365,9 @@ Standalone Patch Files and Pi resources need no `porcupi.json`. Use an optional 
 
 The root `supportedPiBaseVersions` and `supportedPiBaseCommits` form an optional source-wide compatibility default. Each is a nonempty set of unique exact release versions or full SHA-1/SHA-256 commit object IDs. If both dimensions are present, the current Pi Base must match both. A declaration is only an author filter: a match never skips Patch preflight, target build, model-data/resource validation, public conformance, version, or smoke checks.
 
-A `resources` entry identifies one already discovered Extension, Skill, Prompt, or Theme by its exact `kind` and source-relative `path`. It does not add a resource. `patchSeries` entries and `patches` overlays identify Patch Series as described below. Compatibility on any such entry is a per-Artifact override: once an entry supplies either compatibility field, that entry's complete declaration replaces the source default rather than merging with it. An entry with no compatibility fields inherits the source default. Omitting compatibility both at the root and for an Artifact does not restrict or suppress discovery.
+A `resources` entry identifies one already discovered Extension, Skill, Prompt, or Theme by its exact `kind` and source-relative `path`. It does not add a resource. Its optional `content` is a nonempty list of unique safe exact file or directory paths and must cover that selected structural path. Declared directories recurse through tracked regular files; symbolic links, submodules, special modes, unsafe or missing paths, and repository escapes are invalid. Content is data-only: it cannot add a Pi resource, execute code, declare dependencies, or alter installation/build policy. `patchSeries` entries and `patches` overlays identify Patch Series as described below.
+
+Compatibility on any such entry is a per-Artifact override: once an entry supplies either compatibility field, that entry's complete declaration replaces the source default rather than merging with it. An entry with no compatibility fields inherits the source default. Omitting compatibility both at the root and for an Artifact does not restrict or suppress discovery.
 
 `patchSeries` entries declare Artifacts. `id` is the nonempty, control-free, source-local stable identity; changing it creates a different Artifact. `displayName` and `description` are optional mutable presentation and are not retained in Selection Intent. `members` is a nonempty ordered list of unique safe `patches/**/*.patch` paths. A declared single-file series is valid too.
 
@@ -372,7 +375,7 @@ Every member must be a tracked `100644` or `100755` repository-bounded regular f
 
 The optional `patches` array overlays only implicit one-file series with display text and compatibility. Its paths must identify convention-discovered regular Patch Files. An overlay entry for a declared member is visibly ignored rather than creating another Artifact.
 
-The schema is deliberately closed. The root permits only `schemaVersion`, the two compatibility fields, `resources`, `patchSeries`, and `patches`; each entry permits only its documented fields; all paths and display text must be safe, nonempty, and control-free. Malformed JSON, unknown fields, duplicate identities, ranges, empty/duplicate compatibility sets, and invalid exact values visibly invalidate and ignore the whole metadata overlay without suppressing convention discovery. An otherwise valid overlay that names an unavailable discovered Artifact is diagnosed and ignored individually.
+The schema is deliberately closed. The root permits only `schemaVersion`, the two compatibility fields, `resources`, `patchSeries`, and `patches`; each entry permits only its documented fields; all paths and display text must be safe, nonempty, and control-free. Resource `content` lists must also be nonempty and duplicate-free. Malformed JSON, unknown fields, duplicate identities, ranges, empty/duplicate compatibility sets, and invalid exact values visibly invalidate and ignore the whole metadata overlay without suppressing convention discovery. An otherwise valid overlay that names an unavailable discovered Artifact is diagnosed and ignored individually.
 
 Metadata cannot declare commands, hooks, dependencies, recipes, force options, custom verifiers, or activation policy. It also cannot declare scripts, cross-series ordering, ranges, or any other source-supplied behavior. Declared incompatibility is visible and prevents selecting or advancing that Artifact.
 
@@ -443,9 +446,11 @@ Changing Patch bytes changes the exact member digest. Moving a standalone Patch 
 
 Give followers a credential-free locator naming the branch, such as `https://github.com/example/pi-resources@main`, or omit the ref only when the repository's default branch is the intended long-lived channel. PorcuPi canonicalizes that choice while preserving the exact accepted commit. Changing the remote default later does not retarget an already accepted channel.
 
-For a Tracked Branch, merging selected-content changes into the published branch creates an update candidate for followers. Selected content comprises selected resource bytes; selected Patch Series membership, order, bytes, and compatibility; and shared package metadata or dependencies that affect selected resources. Documentation, tests, unrelated files, and new independent unselected Artifacts do not by themselves define an update for an existing selection.
+For a Tracked Branch, merging selected-content changes into the published branch creates an update candidate for followers. Selected content comprises selected resource bytes and structural membership; selected Patch Series membership, order, bytes, and compatibility; and bounded shared package inputs that affect selected resources. A directory Skill and convention-discovered directory Extension include every tracked regular file beneath their Artifact directories. A top-level single-file Skill and standalone Extension, Prompt, or Theme include only the selected file unless a valid `resources[].content` declaration supplies authoritative roots. Declared Patch Series include exactly their ordered members; implicit series include their sole Patch File.
 
-Publish each candidate as an immutable commit, advance the branch by fast-forward, and keep every selected Artifact from the Source Repository coherent at that one commit. Branch movement alone never mutates Selection Intent, Pi settings, pending Patch intent, or Managed Pi Activation. Adoption requires review of one resolved exact candidate: re-running `porcupi add` for the same Tracked Branch reviews the complete replacement and writes its exact snapshot only after confirmation. A deleted branch, changed channel, ambiguous ref, or non-fast-forward rewrite is refused while the accepted snapshot remains authoritative.
+For each selected Pi resource, bounded shared package inputs are the Source Repository root `package.json` exact dependency fields, exact install-lifecycle script declarations, and committed root npm lock as a whole. These are the inputs applicable to Pi's Git-package installation. A nested `package.json#pi` can control conventional Extension discovery but does not replace the root package inputs. PorcuPi compares the root inputs conservatively but does not parse scripts, imports, lock dependency graphs, workspaces, build inputs, or runtime filesystem access. Documentation, tests, unrelated files, and new independent unselected Artifacts do not by themselves define an update for an existing selection. An undeclared helper outside an Artifact boundary can therefore be missed: colocate it, declare it in `content`, or tell users to use the explicit latest-commit review action.
+
+Publish each candidate as an immutable commit, advance the branch by fast-forward, and keep every selected Artifact from the Source Repository coherent at that one commit. Branch movement alone never mutates Selection Intent, Pi settings, pending Patch intent, or Managed Pi Activation. Adoption requires review of one resolved exact candidate. `porcupi manage` offers a structurally changed candidate for guided review. When the latest commit has an unchanged selected structural inventory, its `[u]` action still permits an explicit guided review and adoption. Final acceptance re-resolves the branch and requires the exact reviewed commit and inventory before any mutation. A later accepted commit replaces that source's older pending snapshot rather than queuing deltas; desired snapshots from other sources remain intact. A deleted branch, changed channel, ambiguous ref, or non-fast-forward rewrite is refused while the accepted snapshot remains authoritative.
 
 A Post-release Compatibility Update follows the same rule: commit the selected content or exact compatibility metadata that supports the new Pi Base, test that exact commit, and fast-forward the retained branch. This publishes a candidate for explicit compatibility assessment and review; it does not make a compatibility declaration proof, mutate followers, or activate an update automatically. Candidate notices and guided source-update adoption are separate from Tracked Branch retention.
 
@@ -468,6 +473,7 @@ Review third-party source before selection. Use a separate OS account, VM, conta
 - [Filtered exact-commit Pi package decision](adr/0003-delegate-filtered-git-packages-to-pi.md)
 - [Patch discovery and metadata decision](adr/0004-narrow-patch-metadata.md)
 - [Per-Artifact Pi Base compatibility decision](adr/0014-artifact-pi-base-compatibility.md)
+- [Structural Tracked Branch inventory decision](adr/0016-structural-tracked-branch-inventories.md)
 - [Fixed Patch composition pipeline](adr/0005-fixed-patch-composition-pipeline.md)
 - [Real `pi-wait-for-user` Source Repository](https://github.com/taylorrowser/pi-wait-for-user)
 - [Its complete `porcupi.json` example](https://github.com/taylorrowser/pi-wait-for-user/blob/main/porcupi.json)

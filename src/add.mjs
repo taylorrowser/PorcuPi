@@ -42,7 +42,7 @@ async function promptForSource(input, output) {
 }
 
 function runAddWizard({ source, artifacts, diagnostics, currentArtifacts, previousCommit, project, input, output }) {
-  const availableKeys = new Set(artifacts.filter((artifact) => artifact.compatible !== false).map(artifactKey));
+  const availableKeys = new Set(artifacts.filter((artifact) => artifact.compatible !== false && !artifact.contentInvalid).map(artifactKey));
   const selected = new Set(currentArtifacts.map(artifactKey).filter((key) => availableKeys.has(key)));
   const scopes = new Map(currentArtifacts.filter((artifact) => !isPatchSeries(artifact)).map((artifact) => [artifactKey(artifact), {
     scope: artifact.scope,
@@ -85,7 +85,9 @@ function runAddWizard({ source, artifacts, diagnostics, currentArtifacts, previo
             const mark = selected.has(artifactKey(artifact)) ? "x" : " ";
             const identity = artifactStructuralIdentity(artifact);
             const label = artifact.displayName ? `${artifact.displayName} — ${identity}` : identity;
-            const compatibility = artifact.compatible === false ? " [not supported by this Pi Base]" : "";
+            const compatibility = artifact.contentInvalid
+              ? " [invalid selected-content declaration]"
+              : artifact.compatible === false ? " [not supported by this Pi Base]" : "";
             const kind = isPatchSeries(artifact) ? "Patch Series" : artifact.kind;
             output.write(`${truncateForTerminal(output, `${pointer} [${mark}] ${kind.padEnd(12)} ${label}${compatibility}`)}\n`);
           }
@@ -96,9 +98,11 @@ function runAddWizard({ source, artifacts, diagnostics, currentArtifacts, previo
             if (isPatchSeries(focused)) {
               output.write(`${truncateForTerminal(output, `  Members: ${focused.members.length} Patch File${focused.members.length === 1 ? "" : "s"} in declared order`)}\n`);
             }
-            const compatibility = focused.compatibilityDeclared
-              ? focused.compatible ? "supports this exact Pi Base" : "does not support this exact Pi Base"
-              : "has no compatibility declaration; fixed PorcuPi verification remains authoritative";
+            const compatibility = focused.contentInvalid
+              ? "selected-content declaration is invalid; this Artifact cannot be selected"
+              : focused.compatibilityDeclared
+                ? focused.compatible ? "supports this exact Pi Base" : "does not support this exact Pi Base"
+                : "has no compatibility declaration; fixed PorcuPi verification remains authoritative";
             output.write(`${truncateForTerminal(output, `  Compatibility: ${compatibility}`)}\n`);
           }
           const metadataDiagnostics = diagnostics.filter((diagnostic) => diagnostic.path === "porcupi.json");

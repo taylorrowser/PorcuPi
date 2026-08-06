@@ -3,6 +3,7 @@ import { globSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSy
 import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { canonicalSourceLocator, fail, sha256File } from "./runtime.mjs";
+import { inventoryStructuralContent } from "./structural-fingerprint.mjs";
 
 const artifactKinds = ["Extension", "Prompt", "Skill", "Theme"];
 const regularGitModes = new Set(["100644", "100755"]);
@@ -323,12 +324,29 @@ function directoryEntries(root, path) {
   }
 }
 
+function nestedManifestExtensions(root, directory, entries, diagnostics) {
+  const declared = new Set();
+  for (const declaredPath of entries.filter((value) => !/^[!+-]/.test(value))) {
+    const matches = /[*?]/.test(declaredPath)
+      ? globSync(declaredPath, { cwd: directory, dot: false }).map((match) => join(directory, match))
+      : [resolve(directory, declaredPath)];
+    for (const match of matches) {
+      if (match === directory || match.startsWith(`${directory}${sep}`)) {
+        for (const candidate of collectFromPath(root, "Extension", match, diagnostics)) {
+          declared.add(relativePath(directory, candidate));
+        }
+      }
+    }
+  }
+  return applyManifestOverrides([...declared].sort(), entries).map((candidate) => join(directory, candidate));
+}
+
 function collectExtensions(root, directory, diagnostics) {
-  const paths = [];
+  const artifacts = [];
   for (const entry of directoryEntries(root, directory)) {
     const path = join(directory, entry.name);
     if (entry.isFile() || entry.isSymbolicLink()) {
-      if (/\.(ts|js)$/.test(entry.name) && regularFile(root, path, diagnostics, "Extension")) paths.push(path);
+      if (/\.(ts|js)$/.test(entry.name) && regularFile(root, path, diagnostics, "Extension")) artifacts.push({ path });
       continue;
     }
     if (!entry.isDirectory()) continue;
@@ -336,20 +354,9 @@ function collectExtensions(root, directory, diagnostics) {
       const packageValue = JSON.parse(readFileSync(join(path, "package.json"), "utf8"));
       const entries = packageValue?.pi?.extensions;
       if (Array.isArray(entries) && entries.every((value) => typeof value === "string")) {
-        const declared = new Set();
-        for (const declaredPath of entries.filter((value) => !/^[!+-]/.test(value))) {
-          const matches = /[*?]/.test(declaredPath)
-            ? globSync(declaredPath, { cwd: path, dot: false }).map((match) => join(path, match))
-            : [resolve(path, declaredPath)];
-          for (const match of matches) {
-            if (match === path || match.startsWith(`${path}${sep}`)) {
-              for (const candidate of collectFromPath(root, "Extension", match, diagnostics)) declared.add(relativePath(path, candidate));
-            }
-          }
-        }
-        const enabled = applyManifestOverrides([...declared].sort(), entries);
+        const enabled = nestedManifestExtensions(root, path, entries, diagnostics);
         if (enabled.length > 0) {
-          paths.push(...enabled.map((candidate) => join(path, candidate)));
+          artifacts.push(...enabled.map((candidate) => ({ path: candidate })));
           continue;
         }
       }
@@ -363,9 +370,9 @@ function collectExtensions(root, directory, diagnostics) {
         return false;
       }
     });
-    if (index) paths.push(index);
+    if (index) artifacts.push({ path: index, structuralDirectory: relativePath(root, path) });
   }
-  return paths;
+  return artifacts;
 }
 
 function collectSkills(root, directory, diagnostics, includeRootMarkdown = true) {
@@ -595,8 +602,9 @@ function readSourceMetadata(checkout, patches, piBase, diagnostics) {
       patches, patchSeries: [], patchEntries: [], resourceEntries: [], sourceCompatibility: undefined,
     };
     const reason = error instanceof SyntaxError ? "malformed JSON" : "metadata root is not a readable regular file";
-    diagnostics.push({ path: "porcupi.json", reason: `Source metadata is invalid and ignored as a whole: ${reason}` });
-    return { patches, patchSeries: [], patchEntries: [], resourceEntries: [], sourceCompatibility: undefined };
+    const metadataError = `Source metadata is invalid and ignored as a whole: ${reason}`;
+    diagnostics.push({ path: "porcupi.json", reason: metadataError });
+    return { patches, patchSeries: [], patchEntries: [], resourceEntries: [], sourceCompatibility: undefined, metadataError };
   }
 
   const rootKeys = new Set([
@@ -625,12 +633,14 @@ function readSourceMetadata(checkout, patches, piBase, diagnostics) {
   const resourceKeys = new Set([
     "kind",
     "path",
+    "content",
     "supportedPiBaseVersions",
     "supportedPiBaseCommits",
   ]);
   const invalid = (reason) => {
-    diagnostics.push({ path: "porcupi.json", reason: `Source metadata is invalid and ignored as a whole: ${reason}` });
-    return { patches, patchSeries: [], patchEntries: [], resourceEntries: [], sourceCompatibility: undefined };
+    const metadataError = `Source metadata is invalid and ignored as a whole: ${reason}`;
+    diagnostics.push({ path: "porcupi.json", reason: metadataError });
+    return { patches, patchSeries: [], patchEntries: [], resourceEntries: [], sourceCompatibility: undefined, metadataError };
   };
   if (
     !exactObjectKeys(value, rootKeys)
@@ -685,7 +695,13 @@ function readSourceMetadata(checkout, patches, piBase, diagnostics) {
       !exactObjectKeys(resource, resourceKeys)
       || !artifactKinds.includes(resource.kind)
       || !safeArtifactPath(resource.path)
-    ) return invalid("resource compatibility entries require only a supported kind, safe path, and exact Pi Base values");
+      || (resource.content !== undefined && (
+        !Array.isArray(resource.content)
+        || resource.content.length === 0
+        || resource.content.some((path) => !safeArtifactPath(path))
+        || new Set(resource.content).size !== resource.content.length
+      ))
+    ) return invalid("resource entries require only a supported kind, safe path, optional unique non-empty content paths, and exact Pi Base values");
     const identity = `${resource.kind}:${resource.path}`;
     if (resourceIdentities.has(identity)) return invalid(`duplicate resource compatibility entry ${identity}`);
     resourceIdentities.add(identity);
@@ -871,7 +887,22 @@ function discoverPatchArtifacts(checkout, diagnostics, piBase) {
   };
 }
 
-function applyResourceCompatibility(artifacts, metadata, piBase, diagnostics) {
+function resourceContentError(checkout, entry) {
+  if (entry.content === undefined) return undefined;
+  try {
+    inventoryStructuralContent({
+      checkout,
+      roots: entry.content,
+      structuralPath: entry.path,
+      declared: true,
+    });
+    return undefined;
+  } catch (error) {
+    return error.message;
+  }
+}
+
+function applyResourceCompatibility(checkout, artifacts, metadata, piBase, diagnostics) {
   const discovered = new Set(artifacts.map((artifact) => `${artifact.kind}:${artifact.path}`));
   for (const entry of metadata.resourceEntries) {
     const identity = `${entry.kind}:${entry.path}`;
@@ -881,45 +912,68 @@ function applyResourceCompatibility(artifacts, metadata, piBase, diagnostics) {
     });
   }
   const entries = new Map(metadata.resourceEntries.map((entry) => [`${entry.kind}:${entry.path}`, entry]));
-  return artifacts.map((artifact) => ({
-    ...artifact,
-    ...compatibilityStatus(
-      effectiveCompatibility(entries.get(`${artifact.kind}:${artifact.path}`), metadata.sourceCompatibility),
-      piBase,
-    ),
-  }));
+  return artifacts.map((artifact) => {
+    const entry = entries.get(`${artifact.kind}:${artifact.path}`);
+    const contentError = entry ? resourceContentError(checkout, entry) : undefined;
+    if (contentError) diagnostics.push({
+      path: "porcupi.json",
+      reason: `Resource selected-content declaration ${artifact.kind}:${artifact.path} is invalid: ${contentError}`,
+    });
+    return {
+      ...artifact,
+      ...(entry?.content === undefined || contentError ? {} : { content: [...entry.content] }),
+      ...(contentError ? { contentInvalid: true } : {}),
+      ...(metadata.metadataError || contentError ? { inventoryError: metadata.metadataError ?? contentError } : {}),
+      ...compatibilityStatus(effectiveCompatibility(entry, metadata.sourceCompatibility), piBase),
+    };
+  });
 }
 
 export function discoverPiArtifacts(root, { piBase } = {}) {
   const checkout = resolve(root);
   const diagnostics = [];
   let manifest;
+  let rootPackageManifest;
   const packageJson = join(checkout, "package.json");
   try {
     const stat = lstatSync(packageJson);
+    rootPackageManifest = "package.json";
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("not a regular file");
     const packageValue = JSON.parse(readFileSync(packageJson, "utf8"));
+    if (packageValue === null || typeof packageValue !== "object" || Array.isArray(packageValue)) throw new Error("not an object");
     if (Object.hasOwn(packageValue, "pi")) manifest = packageValue.pi;
   } catch (error) {
     if (error?.code !== "ENOENT") diagnostics.push({ path: "package.json", reason: "Package manifest is malformed" });
   }
 
   let artifacts;
-  if (manifest !== undefined) artifacts = manifestArtifacts(checkout, manifest, diagnostics);
-  else {
-    const paths = {
+  if (manifest !== undefined) {
+    artifacts = manifestArtifacts(checkout, manifest, diagnostics).map((artifact) => ({
+      ...artifact,
+      packageManifest: rootPackageManifest,
+    }));
+  } else {
+    const discovered = {
       Extension: collectExtensions(checkout, join(checkout, "extensions"), diagnostics),
-      Skill: collectSkills(checkout, join(checkout, "skills"), diagnostics),
-      Prompt: collectRecursiveFiles(checkout, join(checkout, "prompts"), ".md", diagnostics, "Prompt"),
-      Theme: collectRecursiveFiles(checkout, join(checkout, "themes"), ".json", diagnostics, "Theme"),
+      Skill: collectSkills(checkout, join(checkout, "skills"), diagnostics).map((path) => ({ path })),
+      Prompt: collectRecursiveFiles(checkout, join(checkout, "prompts"), ".md", diagnostics, "Prompt").map((path) => ({ path })),
+      Theme: collectRecursiveFiles(checkout, join(checkout, "themes"), ".json", diagnostics, "Theme").map((path) => ({ path })),
     };
-    artifacts = artifactKinds.flatMap((kind) => paths[kind]
-      .filter((path) => validateArtifact(checkout, kind, path, diagnostics))
-      .map((path) => ({ kind, path: relativePath(checkout, path) })));
+    artifacts = artifactKinds.flatMap((kind) => discovered[kind]
+      .filter((artifact) => validateArtifact(checkout, kind, artifact.path, diagnostics))
+      .map(({ path, structuralDirectory }) => ({
+        kind,
+        path: relativePath(checkout, path),
+        ...(structuralDirectory ? { structuralDirectory } : {}),
+        ...(rootPackageManifest ? { packageManifest: rootPackageManifest } : {}),
+      })));
   }
   const patchDiscovery = discoverPatchArtifacts(checkout, diagnostics, piBase);
-  artifacts = applyResourceCompatibility(artifacts, patchDiscovery.metadata, piBase, diagnostics);
-  artifacts.push(...patchDiscovery.artifacts);
+  artifacts = applyResourceCompatibility(checkout, artifacts, patchDiscovery.metadata, piBase, diagnostics);
+  artifacts.push(...patchDiscovery.artifacts.map((artifact) => ({
+    ...artifact,
+    ...(patchDiscovery.metadata.metadataError ? { inventoryError: patchDiscovery.metadata.metadataError } : {}),
+  })));
   artifacts.sort((left, right) => `${left.kind}\0${left.kind === "PatchSeries" ? left.id : left.path}`
     .localeCompare(`${right.kind}\0${right.kind === "PatchSeries" ? right.id : right.path}`));
   diagnostics.sort((left, right) => left.path.localeCompare(right.path));

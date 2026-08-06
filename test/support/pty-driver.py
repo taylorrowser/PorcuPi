@@ -2,7 +2,9 @@
 import os
 import pty
 import select
+import shlex
 import signal
+import subprocess
 import sys
 
 if len(sys.argv) < 3:
@@ -38,6 +40,9 @@ while True:
                 os.write(fd, initial_input)
                 initial_pending = False
             if input_pending and wait_for in output:
+                before_input_command = os.environ.get("PTY_BEFORE_INPUT_COMMAND")
+                if before_input_command:
+                    subprocess.run(shlex.split(before_input_command), check=True)
                 os.write(fd, input_bytes)
                 input_pending = False
     finished, status = os.waitpid(pid, os.WNOHANG)

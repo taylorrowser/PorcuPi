@@ -60,7 +60,7 @@ function createPiBase(root, { version = "0.81.1", buildFails = false } = {}) {
   mkdirSync(join(source, "packages", "coding-agent"), { recursive: true });
   mkdirSync(join(source, "packages", "ai", "src", "providers"), { recursive: true });
   mkdirSync(join(source, "packages", "agent"), { recursive: true });
-  mkdirSync(join(source, "packages", "tui"), { recursive: true });
+  mkdirSync(join(source, "packages", "tui", "dist"), { recursive: true });
   mkdirSync(join(source, "scripts"), { recursive: true });
   const packages = [
     ["ai", "@earendil-works/pi-ai"],
@@ -84,6 +84,14 @@ function createPiBase(root, { version = "0.81.1", buildFails = false } = {}) {
     }, null, 2)}\n`,
   );
   writeFileSync(join(source, "series.txt"), "base\n");
+  writeFileSync(
+    join(source, "packages", "tui", "dist", "index.js"),
+    `export class TUI {
+  constructor(onRender) { this.onRender = onRender; this.children = []; }
+  requestRender() { this.onRender(); }
+}
+`,
+  );
   writeFileSync(join(source, "packages", "ai", "src", "models.generated.ts"), 'import { FIXTURE_MODELS } from "./providers/fixture.models.ts";\n');
   writeFileSync(join(source, "packages", "ai", "src", "providers", "fixture.models.ts"), [
     'import values from "./data/fixture.json" with { type: "json" };',
@@ -112,6 +120,7 @@ const cli = join(output, "cli.js");
 writeFileSync(cli, \`#!/usr/bin/env node
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { TUI } from "../../tui/dist/index.js";
 const args = process.argv.slice(2);
 if (process.env.PI_FIXTURE_FORWARD_LOG) {
   appendFileSync(process.env.PI_FIXTURE_FORWARD_LOG, JSON.stringify(args) + "\\\\n");
@@ -123,16 +132,17 @@ if (process.env.PI_FIXTURE_FORWARD_LOG) {
   const handlers = new Map();
   let component;
   let renderCount = 0;
+  let renderReason = "update";
   let sessionReason;
   const frameLog = process.env.PI_FIXTURE_TUI_FRAME_LOG;
   const width = Number(process.env.PI_FIXTURE_TUI_WIDTH || 80);
-  const render = (reason) => {
-    if (!component || !frameLog) return;
-    const lines = component.render(width);
-    appendFileSync(frameLog, JSON.stringify({ reason, sessionReason, renderCount: ++renderCount, width, lines }) + "\\\\n");
+  const render = () => {
+    if (!frameLog) return;
+    const lines = component ? ["", ...component.render(width)] : [""];
+    appendFileSync(frameLog, JSON.stringify({ reason: renderReason, sessionReason, renderCount: ++renderCount, width, lines }) + "\\\\n");
   };
   const theme = { fg: (_color, text) => text, bold: (text) => text };
-  const tui = { requestRender: () => render("update") };
+  const tui = new TUI(render);
   const ctx = {
     mode: "tui",
     hasUI: true,
@@ -143,7 +153,7 @@ if (process.env.PI_FIXTURE_FORWARD_LOG) {
         component = typeof value === "function"
           ? value(tui, theme)
           : { render: () => value, invalidate() {} };
-        render("initial");
+        tui.requestRender();
       },
     },
   };
@@ -155,18 +165,30 @@ if (process.env.PI_FIXTURE_FORWARD_LOG) {
     },
   };
   await extension.default(pi);
+  let startupRenderCount = 0;
+  const startupTui = new TUI(() => { startupRenderCount += 1; });
+  startupTui.children.push({});
+  startupTui.requestRender();
+  if (startupRenderCount !== 1) throw new Error("Managed Pi TUI Integration blocked Pi's project-trust UI");
+  tui.children.push({}, {}, {}, {}, {});
+  renderReason = "pre-bind";
+  tui.requestRender();
   const sessionReasons = (process.env.PI_FIXTURE_TUI_SESSION_REASONS || "startup").split(",");
   for (let index = 0; index < sessionReasons.length; index += 1) {
     if (index > 0) {
       for (const handler of handlers.get("session_shutdown") || []) await handler({ reason: sessionReasons[index] }, ctx);
     }
     sessionReason = sessionReasons[index];
+    renderReason = "session-start";
     for (const handler of handlers.get("session_start") || []) await handler({ reason: sessionReason }, ctx);
+    renderReason = "update";
     await new Promise((resolve) => setTimeout(resolve, Number(process.env.PI_FIXTURE_TUI_WAIT_MS || 250)));
   }
   component?.invalidate();
-  render("theme-invalidation");
-  render("repeated");
+  renderReason = "theme-invalidation";
+  tui.requestRender();
+  renderReason = "repeated";
+  tui.requestRender();
   for (const handler of handlers.get("session_shutdown") || []) await handler({ reason: "quit" }, ctx);
 } else if (process.env.PI_FIXTURE_CHECK_FAIL === args[0]) process.exitCode = 44;
 else if (args[0] === "--version") console.log(process.env.PI_FIXTURE_VERSION_OVERRIDE || "${version}");
@@ -812,6 +834,10 @@ function readFrames(path) {
   return readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
 }
 
+function releaseStatusLine(frame) {
+  return frame.lines.find((line) => line.length > 0) ?? "";
+}
+
 async function serveGitRepository(root, repository) {
   const daemonRoot = join(root, "git-daemon");
   mkdirSync(daemonRoot);
@@ -906,17 +932,27 @@ test("Managed Pi renders bounded release availability in one runtime-owned TUI r
   });
   assert.equal(available.status, 0, available.stderr || available.stdout);
   const availableFrames = readFrames(frameLog);
-  assert.match(availableFrames[0].lines[0], /checking release availability/i);
-  assert.ok(availableFrames.some((frame) => /PorcuPi 0\.3\.0 available/.test(frame.lines[0])));
-  assert.ok(availableFrames.some((frame) => /npx --yes porcupi@0\.3\.0/.test(frame.lines[0])));
-  const transitionFrames = availableFrames.filter((frame) => frame.sessionReason !== "startup");
+  assert.match(releaseStatusLine(availableFrames[0]), /checking release availability/i);
+  assert.ok(availableFrames.some((frame) => /PorcuPi 0\.3\.0 available/.test(releaseStatusLine(frame))));
+  assert.ok(availableFrames.some((frame) => /npx --yes porcupi@0\.3\.0/.test(releaseStatusLine(frame))));
+  const transitionReasons = new Set(["new", "resume", "fork", "reload"]);
+  const transitionFrames = availableFrames.filter((frame) => transitionReasons.has(frame.sessionReason));
   assert.ok(transitionFrames.length > 0);
-  assert.ok(transitionFrames.every((frame) => !/checking/i.test(frame.lines[0])));
-  assert.ok(transitionFrames.every((frame) => /PorcuPi 0\.3\.0 available/.test(frame.lines[0])));
-  assert.ok(availableFrames.every((frame) => frame.lines.length === 1 && frame.lines[0].length <= frame.width));
+  assert.ok(transitionFrames.every((frame) => !/checking/i.test(releaseStatusLine(frame))));
+  assert.ok(transitionFrames.every((frame) => /PorcuPi 0\.3\.0 available/.test(releaseStatusLine(frame))));
+  assert.ok(availableFrames.every((frame) => frame.lines.length === 2 && frame.lines.every((line) => line.length <= frame.width)));
   assert.deepEqual(availableFrames.at(-1).lines, availableFrames.at(-2).lines, "theme invalidation and repeated render must be stable");
   assert.deepEqual(readFileSync(activationPath), activationBefore);
   assert.deepEqual(readFileSync(sessionPath), sessionBefore);
+
+  const narrowAvailableFramesPath = join(root, "narrow-available-frames.jsonl");
+  const narrowAvailable = runManagedTui(home, narrowAvailableFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PI_FIXTURE_TUI_WIDTH: "40",
+  });
+  assert.equal(narrowAvailable.status, 0, narrowAvailable.stderr || narrowAvailable.stdout);
+  const narrowAvailableLines = readFrames(narrowAvailableFramesPath).map(releaseStatusLine);
+  assert.ok(narrowAvailableLines.some((line) => line === "npx --yes porcupi@0.3.0"));
 
   const requestsBeforeStatus = readFileSync(server.requestLog, "utf8");
   const status = runPorcuPiProcess(home, ["status"]);
@@ -936,8 +972,8 @@ test("Managed Pi renders bounded release availability in one runtime-owned TUI r
   });
   assert.equal(current.status, 0, current.stderr || current.stdout);
   const currentFrames = readFrames(currentFramesPath);
-  assert.ok(currentFrames.some((frame) => /current/i.test(frame.lines[0])));
-  assert.ok(currentFrames.every((frame) => frame.lines.length === 1 && frame.lines[0].length <= 24));
+  assert.ok(currentFrames.some((frame) => /current/i.test(releaseStatusLine(frame))));
+  assert.ok(currentFrames.every((frame) => frame.lines.length === 2 && frame.lines.every((line) => line.length <= 24)));
 
   const requestCount = readFileSync(server.requestLog, "utf8").trim().split("\n").filter(Boolean).length;
   const offlineFramesPath = join(root, "offline-frames.jsonl");
@@ -947,7 +983,7 @@ test("Managed Pi renders bounded release availability in one runtime-owned TUI r
   }, ["--offline"]);
   assert.equal(offline.status, 0, offline.stderr || offline.stdout);
   assert.equal(readFileSync(server.requestLog, "utf8").trim().split("\n").filter(Boolean).length, requestCount);
-  assert.ok(readFrames(offlineFramesPath).every((frame) => /offline/i.test(frame.lines[0])));
+  assert.ok(readFrames(offlineFramesPath).every((frame) => /offline/i.test(releaseStatusLine(frame))));
 
   const staleFramesPath = join(root, "stale-frames.jsonl");
   const stale = runManagedTui(home, staleFramesPath, {
@@ -955,7 +991,7 @@ test("Managed Pi renders bounded release availability in one runtime-owned TUI r
     PI_FIXTURE_TUI_WIDTH: "72",
   });
   assert.equal(stale.status, 0, stale.stderr || stale.stdout);
-  assert.ok(readFrames(staleFramesPath).some((frame) => /unavailable|stale/i.test(frame.lines[0])));
+  assert.ok(readFrames(staleFramesPath).some((frame) => /unavailable|stale/i.test(releaseStatusLine(frame))));
 
   const verified = runPorcuPiProcess(home, ["verify"]);
   assert.equal(verified.status, 0, verified.stderr || verified.stdout);

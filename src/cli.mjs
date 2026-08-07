@@ -41,6 +41,7 @@ async function launch(args) {
     await runChild(process.execPath, [active.executable, ...managedArgs], {
       ...process.env,
       PORCUPI_INSTALLED_VERSION: porcupiVersion,
+      PORCUPI_MANAGED_PI_EXECUTABLE: active.executable,
     });
   } finally {
     active.lease.release();

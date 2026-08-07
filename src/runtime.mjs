@@ -286,7 +286,7 @@ export function run(command, args, { cwd, environment = process.env, capture = f
   return result.stdout?.trim() || "";
 }
 
-function validatePatchIdentities(value, label) {
+export function validatePatchIdentities(value, label) {
   if (!Array.isArray(value)) fail(`Malformed ${label}`);
   let previousSeriesKey;
   const identities = new Set();

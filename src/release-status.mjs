@@ -5,6 +5,7 @@ import { patchSelectionSnapshot, readSelections } from "./resource-intent.mjs";
 import {
   atomicWrite,
   canonicalJson,
+  canonicalSourceLocator,
   defaultDataRoot,
   exactObject,
   fail,
@@ -13,6 +14,7 @@ import {
   readJson,
   sha256Bytes,
   validateManagedRoot,
+  validatePatchIdentities,
   verifyRuntime,
 } from "./runtime.mjs";
 
@@ -83,31 +85,61 @@ function validIsoDate(value) {
     && new Date(value).toISOString() === value;
 }
 
-function validReadinessPatch(patch) {
-  return exactObject(patch, readinessPatchFields)
-    && typeof patch.locator === "string"
-    && typeof patch.seriesId === "string"
-    && gitCommitPattern.test(patch.commit || "")
-    && typeof patch.path === "string"
-    && sha256Pattern.test(patch.sha256 || "");
+function validText(value) {
+  return typeof value === "string" && value.length > 0 && !/[\x00-\x1f\x7f]/.test(value);
+}
+
+function validSourceLocator(value) {
+  if (!validText(value)) return false;
+  const slash = value.indexOf("/");
+  return slash > 0 && canonicalSourceLocator(value.slice(0, slash), value.slice(slash + 1)) === value;
+}
+
+function validReadinessSources(sources) {
+  if (!Array.isArray(sources)) return false;
+  let previousLocator;
+  const locators = new Set();
+  for (const source of sources) {
+    if (
+      !exactObject(source, readinessSourceFields)
+      || !validSourceLocator(source.locator)
+      || !gitCommitPattern.test(source.commit || "")
+      || locators.has(source.locator)
+      || (previousLocator !== undefined && previousLocator >= source.locator)
+    ) return false;
+    locators.add(source.locator);
+    previousLocator = source.locator;
+  }
+  return true;
+}
+
+function validReadinessPatches(patches, sourceCommits) {
+  if (
+    !Array.isArray(patches)
+    || patches.some((patch) => !exactObject(patch, readinessPatchFields) || !validText(patch.seriesId))
+  ) return false;
+  try {
+    validatePatchIdentities(patches, "PorcuPi Upgrade Readiness cache");
+  } catch {
+    return false;
+  }
+  const commitsByLocator = new Map(sourceCommits.map((source) => [source.locator, source.commit]));
+  return patches.every((patch) => commitsByLocator.get(patch.locator) === patch.commit);
 }
 
 export function validateUpgradeReadinessCache(value) {
   const identity = value?.identity;
+  const validSources = validReadinessSources(identity?.sourceCommits);
   const validIdentity = exactObject(identity, readinessIdentityFields)
     && isReleaseVersion(identity.targetVersion)
     && exactObject(identity.piBase, readinessPiBaseFields)
-    && typeof identity.piBase.version === "string"
+    && validText(identity.piBase.version)
     && gitCommitPattern.test(identity.piBase.commit || "")
     && sha256Pattern.test(identity.selectionIntentSha256 || "")
-    && Array.isArray(identity.sourceCommits)
-    && identity.sourceCommits.every((source) => exactObject(source, readinessSourceFields)
-      && typeof source.locator === "string" && gitCommitPattern.test(source.commit || ""))
-    && Array.isArray(identity.patches)
-    && identity.patches.every(validReadinessPatch)
+    && validSources
+    && validReadinessPatches(identity.patches, identity.sourceCommits)
     && new Set(["darwin", "linux"]).has(identity.platform)
-    && typeof identity.architecture === "string"
-    && identity.architecture.length > 0
+    && validText(identity.architecture)
     && sha256Pattern.test(identity.checkerContractSha256 || "");
   if (
     !exactObject(value, upgradeReadinessFields)
@@ -118,7 +150,7 @@ export function validateUpgradeReadinessCache(value) {
     || value.identitySha256 !== sha256Bytes(canonicalJson(identity))
     || !new Set(["ready", "blocked"]).has(value.outcome)
     || (value.outcome === "ready" ? value.reason !== null : !(
-      typeof value.reason === "string" && value.reason.length > 0 && value.reason.length <= 240 && !/[\r\n]/.test(value.reason)
+      validText(value.reason) && value.reason.length <= 240
     ))
     || !validIsoDate(value.checkedAt)
   ) fail("Malformed PorcuPi Upgrade Readiness cache");
@@ -182,7 +214,7 @@ export function writeUpgradeReadinessCache(paths, { identity, outcome, reason = 
   return cache;
 }
 
-export function matchingUpgradeReadiness(cache, { targetVersion, selections, platform = process.platform, architecture = process.arch }) {
+function locallyMatchingUpgradeReadiness(cache, { targetVersion, selections, platform = process.platform, architecture = process.arch }) {
   if (!cache || cache.identity.targetVersion !== targetVersion) return null;
   const local = readinessLocalInput(selections, platform, architecture);
   return canonicalJson(local) === canonicalJson({
@@ -192,6 +224,47 @@ export function matchingUpgradeReadiness(cache, { targetVersion, selections, pla
     platform: cache.identity.platform,
     architecture: cache.identity.architecture,
   }) ? cache : null;
+}
+
+export function validateUpgradeReadinessTarget(value) {
+  if (
+    !exactObject(value, new Set(["targetVersion", "piBase", "checkerContractSha256"]))
+    || !isReleaseVersion(value.targetVersion)
+    || !exactObject(value.piBase, readinessPiBaseFields)
+    || !validText(value.piBase.version)
+    || !gitCommitPattern.test(value.piBase.commit || "")
+    || !sha256Pattern.test(value.checkerContractSha256 || "")
+  ) fail("Malformed target Upgrade Readiness identity");
+  return value;
+}
+
+export function upgradeReadinessTarget(cache) {
+  validateUpgradeReadinessCache(cache);
+  return {
+    targetVersion: cache.identity.targetVersion,
+    piBase: cache.identity.piBase,
+    checkerContractSha256: cache.identity.checkerContractSha256,
+  };
+}
+
+export function matchingUpgradeReadiness(cache, {
+  target,
+  selections,
+  platform = process.platform,
+  architecture = process.arch,
+}) {
+  validateUpgradeReadinessTarget(target);
+  const local = locallyMatchingUpgradeReadiness(cache, {
+    targetVersion: target.targetVersion,
+    selections,
+    platform,
+    architecture,
+  });
+  return local
+    && canonicalJson(target.piBase) === canonicalJson(local.identity.piBase)
+    && target.checkerContractSha256 === local.identity.checkerContractSha256
+    ? local
+    : null;
 }
 
 export function verifyReleaseStatusState(paths) {
@@ -208,7 +281,7 @@ function statusFromCache(installedVersion, cache) {
 
 function statusFromReadiness({ installedVersion, targetVersion, readiness, selections, context }) {
   const matching = targetVersion
-    ? matchingUpgradeReadiness(readiness, { targetVersion, selections })
+    ? locallyMatchingUpgradeReadiness(readiness, { targetVersion, selections })
     : null;
   if (!matching) return null;
   return {
@@ -259,9 +332,20 @@ export function readinessUnavailableStatus({ installedVersion, targetVersion, st
   return { kind: "readiness-unavailable", installedVersion, targetVersion, cache: null, stale, disabled };
 }
 
-export function readinessStatus({ installedVersion, targetVersion, readiness, selections }) {
-  return statusFromReadiness({ installedVersion, targetVersion, readiness, selections, context: "fresh" })
-    ?? readinessUnavailableStatus({ installedVersion, targetVersion, stale: Boolean(readiness) });
+export function revalidatedReadinessStatus({ installedVersion, target, readiness, selections }) {
+  const matching = matchingUpgradeReadiness(readiness, { target, selections });
+  return matching ? {
+    kind: matching.outcome,
+    installedVersion,
+    targetVersion: target.targetVersion,
+    cache: matching,
+    context: "fresh",
+    reason: matching.reason,
+  } : readinessUnavailableStatus({
+    installedVersion,
+    targetVersion: target.targetVersion,
+    stale: Boolean(readiness),
+  });
 }
 
 export function unavailableReleaseStatus({ installedVersion, cache }) {
@@ -402,7 +486,7 @@ export function formatReleaseStatus({
 }) {
   const cached = statusFromCache(installedVersion, cache);
   const targetVersion = cached?.targetVersion ?? null;
-  const matching = targetVersion ? matchingUpgradeReadiness(readiness, { targetVersion, selections }) : null;
+  const matching = targetVersion ? locallyMatchingUpgradeReadiness(readiness, { targetVersion, selections }) : null;
   const state = offline
     ? "offline — startup network and assessment work suppressed"
     : targetVersion

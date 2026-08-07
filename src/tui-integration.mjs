@@ -11,12 +11,13 @@ import {
   porcupiOffline,
   readReleaseStatusCache,
   readUpgradeReadinessCache,
-  readinessStatus,
   readinessUnavailableStatus,
   releaseInstallCommand,
   releaseStatusColor,
   renderReleaseStatusRow,
+  revalidatedReadinessStatus,
   unavailableReleaseStatus,
+  validateUpgradeReadinessTarget,
 } from "./release-status.mjs";
 import { readSelections } from "./resource-intent.mjs";
 
@@ -48,7 +49,7 @@ function statusRow(status, width) {
 function runTargetReadinessProcess(targetVersion, signal) {
   const testPackage = process.env.NODE_ENV === "test" ? process.env.PORCUPI_TEST_READINESS_PACKAGE : undefined;
   const packageTarget = testPackage ?? `porcupi@${targetVersion}`;
-  const args = [
+  const npmArgs = [
     "exec",
     "--yes",
     ...(testPackage ? ["--offline"] : []),
@@ -63,14 +64,32 @@ function runTargetReadinessProcess(targetVersion, signal) {
     for (const name of Object.keys(environment)) {
       if (name.startsWith("PI_FIXTURE_TUI")) delete environment[name];
     }
-    const child = spawn("npm", args, { env: environment, stdio: "ignore" });
+    const child = spawn("nice", ["-n", "10", "npm", ...npmArgs], {
+      env: environment,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let output = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      output = `${output}${chunk}`.slice(-4_096);
+    });
     const abort = () => child.kill("SIGTERM");
     signal?.addEventListener("abort", abort, { once: true });
     child.once("error", reject);
     child.once("exit", (code, exitSignal) => {
       signal?.removeEventListener("abort", abort);
-      if (exitSignal || code !== 0) reject(new Error("Background Upgrade Readiness process did not complete"));
-      else resolve();
+      if (exitSignal || code !== 0) {
+        reject(new Error("Background Upgrade Readiness process did not complete"));
+        return;
+      }
+      try {
+        const line = output.trim().split("\n").at(-1);
+        const target = validateUpgradeReadinessTarget(JSON.parse(line));
+        if (target.targetVersion !== targetVersion) throw new Error("Target release changed");
+        resolve(target);
+      } catch {
+        reject(new Error("Background Upgrade Readiness process returned malformed target evidence"));
+      }
     });
     if (signal?.aborted) abort();
   });
@@ -194,35 +213,32 @@ export default async function porcupiTuiIntegration(pi) {
         requestRender();
         return;
       }
-      const cachedReadiness = readinessStatus({
+      const cachedStatus = cachedReleaseStatus({
         installedVersion,
-        targetVersion: result.targetVersion,
+        cache,
         readiness,
         selections,
       });
-      if (new Set(["ready", "blocked"]).has(cachedReadiness.kind)) {
-        status = cachedReadiness;
-        requestRender();
-        return;
-      }
       if (readinessDisabled) {
-        status = readinessUnavailableStatus({
-          installedVersion,
-          targetVersion: result.targetVersion,
-          stale: Boolean(readiness),
-          disabled: true,
-        });
+        status = new Set(["ready", "blocked"]).has(cachedStatus.kind)
+          ? cachedStatus
+          : readinessUnavailableStatus({
+            installedVersion,
+            targetVersion: result.targetVersion,
+            stale: Boolean(readiness),
+            disabled: true,
+          });
         requestRender();
         return;
       }
       status = checkingCompatibilityStatus({ installedVersion, targetVersion: result.targetVersion });
       requestRender();
-      await runTargetReadinessProcess(result.targetVersion, controller.signal);
+      const target = await runTargetReadinessProcess(result.targetVersion, controller.signal);
       if (generation !== currentGeneration) return;
       readiness = readUpgradeReadinessCache(paths);
-      status = readinessStatus({
+      status = revalidatedReadinessStatus({
         installedVersion,
-        targetVersion: result.targetVersion,
+        target,
         readiness,
         selections,
       });

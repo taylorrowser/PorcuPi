@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 
 import { assessBackgroundUpgradeReadiness, installManagedPi } from "../src/install.mjs";
+import { upgradeReadinessTarget } from "../src/release-status.mjs";
 
 try {
   const args = process.argv.slice(2);
   if (args.length === 1 && args[0] === "--porcupi-background-upgrade-readiness") {
-    await assessBackgroundUpgradeReadiness();
+    const cache = await assessBackgroundUpgradeReadiness();
+    process.stdout.write(`${JSON.stringify(upgradeReadinessTarget(cache))}\n`);
   } else {
     if (args.length !== 0) throw new Error("Usage: porcupi");
     await installManagedPi();

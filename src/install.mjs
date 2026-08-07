@@ -1011,6 +1011,15 @@ function readinessBlockerReason(error) {
   return reason.length <= 240 ? reason : `${reason.slice(0, 237)}...`;
 }
 
+function requireUpgradeMigration(existing) {
+  const migration = upgradeMigrationContracts.get(migrationContractKey(existing.installedVersion, porcupiVersion));
+  if (!migration) fail(`No versioned state migration supports PorcuPi ${existing.installedVersion} → ${porcupiVersion}`);
+  if (existing.active.activation.schemaVersion !== migration.sourceStateSchema) {
+    fail(`Upgrade requires PorcuPi ${existing.installedVersion} state schema ${migration.sourceStateSchema}`);
+  }
+  return migration;
+}
+
 export async function assessBackgroundUpgradeReadiness({
   environment = process.env,
   platform = process.platform,
@@ -1026,6 +1035,7 @@ export async function assessBackgroundUpgradeReadiness({
     if (compareReleaseVersions(porcupiVersion, existing.installedVersion) <= 0) {
       fail(`Background Upgrade Readiness requires a newer exact target than installed PorcuPi ${existing.installedVersion}`);
     }
+    requireUpgradeMigration(existing);
     const lock = loadBaseLock();
     const selections = readSelections(paths.root);
     const identity = createUpgradeReadinessIdentity({
@@ -1056,11 +1066,7 @@ export async function assessBackgroundUpgradeReadiness({
 }
 
 async function upgradeManagedPi({ paths, launcher, existing, lock, input, output, environment }) {
-  const migration = upgradeMigrationContracts.get(migrationContractKey(existing.installedVersion, porcupiVersion));
-  if (!migration) fail(`No versioned state migration supports PorcuPi ${existing.installedVersion} → ${porcupiVersion}`);
-  if (existing.active.activation.schemaVersion !== migration.sourceStateSchema) {
-    fail(`Upgrade requires PorcuPi ${existing.installedVersion} state schema ${migration.sourceStateSchema}`);
-  }
+  const migration = requireUpgradeMigration(existing);
   verifyPublishedComposition(paths, existing.active.activation.active.compositionId);
   if (existing.active.activation.previous) verifyPublishedComposition(paths, existing.active.activation.previous.compositionId);
   const piLauncherReceipt = verifyOptionalPiLauncher(paths, environment);

@@ -108,9 +108,11 @@ function createPiBase(root, { version = "0.81.1", buildFails = false } = {}) {
   writeFileSync(
     join(source, "scripts", "build.mjs"),
     `import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { getPriority } from "node:os";
 import { join } from "node:path";
 const output = join(process.cwd(), "packages", "coding-agent", "dist");
 if (process.env.PI_FIXTURE_BUILD_LOG) appendFileSync(process.env.PI_FIXTURE_BUILD_LOG, "build\\n");
+if (process.env.PI_FIXTURE_BUILD_PRIORITY_LOG) appendFileSync(process.env.PI_FIXTURE_BUILD_PRIORITY_LOG, String(getPriority()) + "\\n");
 mkdirSync(output, { recursive: true });
 if (process.env.PI_FIXTURE_LEXICAL_PREFIX_PATHS) {
   mkdirSync(join(output, "prefix"), { recursive: true });
@@ -408,7 +410,17 @@ function createReleaseFixture(root, base, expectedVersion = "0.81.1", { historic
   return release;
 }
 
-function setReleaseFixtureVersion(release, version) {
+function setReleaseFixtureVersion(release, version, { supportedUpgradeFrom } = {}) {
+  if (supportedUpgradeFrom) {
+    const installerPath = join(release, "src", "install.mjs");
+    const installer = readFileSync(installerPath, "utf8");
+    const contractStart = "const upgradeMigrationContracts = new Map([\n";
+    assert.ok(installer.includes(contractStart));
+    writeFileSync(installerPath, installer.replace(
+      contractStart,
+      `${contractStart}  [migrationContractKey("${supportedUpgradeFrom}", "${version}"), Object.freeze({ sourceStateSchema: 1, targetStateSchema: 1 })],\n`,
+    ));
+  }
   const manifestPath = join(release, "package.json");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   const previousReleaseRecord = `release/v${manifest.version}.json`;
@@ -1088,11 +1100,13 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
   const targetRoot = join(root, "target");
   mkdirSync(targetRoot);
   const targetRelease = createReleaseFixture(targetRoot, base);
-  setReleaseFixtureVersion(targetRelease, "0.3.0");
+  setReleaseFixtureVersion(targetRelease, "0.3.0", { supportedUpgradeFrom: "0.2.0" });
   const targetArtifact = packRelease(targetRelease, targetRoot);
   const server = serveReleaseStatus(root);
   const buildLog = join(root, "readiness-builds.log");
+  const buildPriorityLog = join(root, "readiness-build-priorities.log");
   writeFileSync(buildLog, "");
+  writeFileSync(buildPriorityLog, "");
   const currentFramesPath = join(root, "readiness-current.jsonl");
   const current = runManagedTui(home, currentFramesPath, {
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
@@ -1105,6 +1119,23 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
   assert.equal(readFileSync(buildLog, "utf8"), "", "no heavy readiness work may run without a newer release");
   server.setVersion("0.3.0");
   const managedRoot = dataRoot(home);
+  const unsupportedRoot = join(root, "unsupported-target");
+  mkdirSync(unsupportedRoot);
+  const unsupportedRelease = createReleaseFixture(unsupportedRoot, base);
+  setReleaseFixtureVersion(unsupportedRelease, "0.3.0");
+  const unsupportedArtifact = packRelease(unsupportedRelease, unsupportedRoot);
+  const unsupportedFramesPath = join(root, "readiness-unsupported.jsonl");
+  const unsupported = runManagedTui(home, unsupportedFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_TEST_READINESS_PACKAGE: unsupportedArtifact,
+    PI_FIXTURE_BUILD_LOG: buildLog,
+    PI_FIXTURE_TUI_WAIT_MS: "1000",
+  });
+  assert.equal(unsupported.status, 0, unsupported.stderr || unsupported.stdout);
+  assert.ok(readFrames(unsupportedFramesPath).some((frame) => /readiness unavailable/i.test(releaseStatusLine(frame))));
+  assert.equal(readFileSync(buildLog, "utf8"), "", "an unsupported upgrade route must not run heavy readiness work");
+  assert.equal(existsSync(join(managedRoot, "state", "upgrade-readiness.json")), false);
+
   const authoritativePaths = [
     join(managedRoot, "state", "activation.json"),
     join(managedRoot, "state", "launcher.json"),
@@ -1144,6 +1175,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
+    PI_FIXTURE_BUILD_PRIORITY_LOG: buildPriorityLog,
     PI_FIXTURE_TUI_WAIT_MS: "3000",
   });
   assert.equal(first.status, 0, first.stderr || first.stdout);
@@ -1152,6 +1184,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
   assert.ok(firstRows.some((row) => /checking compatibility/i.test(row)));
   assert.ok(firstRows.some((row) => /PorcuPi 0\.3\.0.*ready/i.test(row)), JSON.stringify(firstRows));
   assert.equal(readFileSync(buildLog, "utf8"), "build\n");
+  assert.ok(Number(readFileSync(buildPriorityLog, "utf8").trim()) > 0, "background assessment must inherit reduced process priority");
   assert.deepEqual(authoritativePaths.map((path) => readFileSync(path)), authoritativeBefore);
 
   const status = runPorcuPiProcess(home, ["status"]);
@@ -1159,6 +1192,54 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
   assert.match(status.stdout, /Upgrade Readiness: ready/);
   assert.match(status.stdout, /Target Pi Base: v0\.81\.1/);
   assert.match(status.stdout, /Input identity: [a-f0-9]{64}/);
+
+  const readinessPath = join(managedRoot, "state", "upgrade-readiness.json");
+  const readinessBytes = readFileSync(readinessPath);
+  const validReadiness = JSON.parse(readinessBytes.toString("utf8"));
+  const fixtureSource = { locator: "example.com/owner/source", commit: validReadiness.identity.piBase.commit };
+  const fixturePatch = {
+    locator: fixtureSource.locator,
+    seriesId: "series-a",
+    commit: fixtureSource.commit,
+    path: "patches/a.patch",
+    sha256: "0".repeat(64),
+  };
+  const malformedIdentities = [
+    { ...validReadiness.identity, piBase: { ...validReadiness.identity.piBase, version: "bad\u0000version" } },
+    { ...validReadiness.identity, architecture: "x64\nforeign" },
+    { ...validReadiness.identity, sourceCommits: [{ ...fixtureSource, locator: "" }] },
+    { ...validReadiness.identity, sourceCommits: [fixtureSource, fixtureSource] },
+    {
+      ...validReadiness.identity,
+      sourceCommits: [
+        { ...fixtureSource, locator: "z.example/owner/source" },
+        { ...fixtureSource, locator: "a.example/owner/source" },
+      ],
+    },
+    { ...validReadiness.identity, sourceCommits: [fixtureSource], patches: [{ ...fixturePatch, path: "../escape.patch" }] },
+    { ...validReadiness.identity, sourceCommits: [fixtureSource], patches: [{ ...fixturePatch, seriesId: "series\u0000a" }] },
+    { ...validReadiness.identity, sourceCommits: [fixtureSource], patches: [fixturePatch, fixturePatch] },
+    {
+      ...validReadiness.identity,
+      sourceCommits: [fixtureSource],
+      patches: [
+        { ...fixturePatch, seriesId: "series-z", path: "patches/z.patch" },
+        { ...fixturePatch, seriesId: "series-a", path: "patches/a.patch" },
+      ],
+    },
+  ];
+  for (const identity of malformedIdentities) {
+    const malformed = {
+      ...validReadiness,
+      identity,
+      identitySha256: createHash("sha256").update(canonicalJson(identity)).digest("hex"),
+    };
+    writeFileSync(readinessPath, `${JSON.stringify(malformed, null, 2)}\n`);
+    const verified = runPorcuPiProcess(home, ["verify"]);
+    assert.notEqual(verified.status, 0);
+    assert.match(`${verified.stdout}${verified.stderr}`, /Malformed PorcuPi Upgrade Readiness cache/);
+  }
+  writeFileSync(readinessPath, readinessBytes);
 
   const repository = createApplicablePatchRepository(join(root, "readiness-source"), [[
     "patches/readiness.patch",
@@ -1206,6 +1287,38 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
   assert.match(releaseStatusLine(readFrames(cachedFramesPath)[0]), /PorcuPi 0\.3\.0.*ready/i);
   assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\n", "a matching cache must skip heavy readiness work");
 
+  const writeChangedReadinessDimension = (changeIdentity) => {
+    const value = JSON.parse(readFileSync(readinessPath, "utf8"));
+    value.identity = changeIdentity(value.identity);
+    value.identitySha256 = createHash("sha256").update(canonicalJson(value.identity)).digest("hex");
+    writeFileSync(readinessPath, `${JSON.stringify(value, null, 2)}\n`);
+  };
+  writeChangedReadinessDimension((identity) => ({
+    ...identity,
+    piBase: { ...identity.piBase, version: "v9.9.9" },
+  }));
+  const changedPiBase = runManagedTui(home, join(root, "readiness-changed-pi-base.jsonl"), {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
+    PI_FIXTURE_BUILD_LOG: buildLog,
+    PI_FIXTURE_TUI_WAIT_MS: "3000",
+  });
+  assert.equal(changedPiBase.status, 0, changedPiBase.stderr || changedPiBase.stdout);
+  assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\nbuild\n", "changed target Pi Base evidence must invalidate readiness");
+
+  writeChangedReadinessDimension((identity) => ({
+    ...identity,
+    checkerContractSha256: "0".repeat(64),
+  }));
+  const changedChecker = runManagedTui(home, join(root, "readiness-changed-checker.jsonl"), {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
+    PI_FIXTURE_BUILD_LOG: buildLog,
+    PI_FIXTURE_TUI_WAIT_MS: "3000",
+  });
+  assert.equal(changedChecker.status, 0, changedChecker.stderr || changedChecker.stdout);
+  assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\nbuild\nbuild\n", "changed checker contract evidence must invalidate readiness");
+
   const requestCount = readFileSync(server.requestLog, "utf8").trim().split("\n").filter(Boolean).length;
   assert.ok(requestCount > requestsBeforeCachedLaunch.toString().trim().split("\n").filter(Boolean).length);
   const offlineFramesPath = join(root, "readiness-offline.jsonl");
@@ -1217,7 +1330,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
   assert.equal(offline.status, 0, offline.stderr || offline.stdout);
   assert.match(releaseStatusLine(readFrames(offlineFramesPath)[0]), /PorcuPi 0\.3\.0.*ready/i);
   assert.equal(readFileSync(server.requestLog, "utf8").trim().split("\n").filter(Boolean).length, requestCount);
-  assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\n");
+  assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\nbuild\nbuild\n");
 
   const failureSource = createApplicablePatchRepository(join(root, "failure-readiness-source"), [[
     "patches/add-marker.patch",
@@ -1241,7 +1354,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
   mkdirSync(failingTargetRoot);
   const failingBase = createPiBase(failingTargetRoot, { buildFails: true });
   const failingRelease = createReleaseFixture(failingTargetRoot, failingBase);
-  setReleaseFixtureVersion(failingRelease, "0.3.0");
+  setReleaseFixtureVersion(failingRelease, "0.3.0", { supportedUpgradeFrom: "0.2.0" });
   const failingArtifact = packRelease(failingRelease, failingTargetRoot);
   const failedFramesPath = join(root, "readiness-build-failed.jsonl");
   const failed = runManagedTui(home, failedFramesPath, {
@@ -1252,7 +1365,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
   });
   assert.equal(failed.status, 0, failed.stderr || failed.stdout);
   assert.ok(readFrames(failedFramesPath).some((frame) => /readiness unavailable/i.test(releaseStatusLine(frame))));
-  assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\n");
+  assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\nbuild\nbuild\n");
   const staleStatus = runPorcuPiProcess(home, ["status"]);
   assert.equal(staleStatus.status, 0, staleStatus.stderr || staleStatus.stdout);
   assert.match(staleStatus.stdout, /Upgrade Readiness: unavailable — cached evidence is stale/);
@@ -1290,7 +1403,7 @@ test("background Upgrade Readiness caches an exact selected blocker without life
   const targetLock = JSON.parse(readFileSync(targetLockPath, "utf8"));
   targetLock.tag = "v0.82.0";
   writeFileSync(targetLockPath, `${JSON.stringify(targetLock, null, 2)}\n`);
-  setReleaseFixtureVersion(targetRelease, "0.3.0");
+  setReleaseFixtureVersion(targetRelease, "0.3.0", { supportedUpgradeFrom: "0.2.0" });
   const targetRecordPath = join(targetRelease, "release", "v0.3.0.json");
   const targetRecord = JSON.parse(readFileSync(targetRecordPath, "utf8"));
   targetRecord.piBase = { repository: targetLock.repository, tag: targetLock.tag, commit: targetLock.commit };

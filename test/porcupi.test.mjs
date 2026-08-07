@@ -21,7 +21,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test, { after } from "node:test";
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -1136,7 +1136,7 @@ test("Managed Pi surfaces relevant Tracked Branch updates without adopting them"
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_BACKGROUND_READINESS: "0",
     PI_FIXTURE_TUI_WAIT_MS: "2500",
-    PI_FIXTURE_TUI_WIDTH: "120",
+    PI_FIXTURE_TUI_WIDTH: "240",
   });
   assert.equal(launched.status, 0, launched.stderr || launched.stdout);
   const rows = readFrames(frameLog).map(releaseStatusLine);
@@ -1147,6 +1147,11 @@ test("Managed Pi surfaces relevant Tracked Branch updates without adopting them"
       && /npx --yes porcupi@0\.3\.0/.test(row)),
     JSON.stringify(rows),
   );
+  assert.ok(
+    rows.some((row) => /Patch Series: manage, then apply/i.test(row)),
+    `availability guidance must not claim a Patch Series is pending before acceptance: ${JSON.stringify(rows)}`,
+  );
+  assert.ok(rows.every((row) => !/Patch(?: Series)? pending/i.test(row)), JSON.stringify(rows));
 
   const narrowFrames = join(root, "tracked-status-narrow.jsonl");
   const narrow = runManagedTui(home, narrowFrames, {
@@ -1167,7 +1172,7 @@ test("Managed Pi surfaces relevant Tracked Branch updates without adopting them"
   assert.match(status.stdout, /Tracked Branch updates: 1/);
   assert.match(status.stdout, new RegExp(candidateCommit));
   assert.match(status.stdout, /Next source command: porcupi manage/);
-  assert.match(status.stdout, /changed Patch Series remain pending.*porcupi apply/i);
+  assert.match(status.stdout, /accepted, changed Patch Series become pending.*porcupi apply/i);
   assert.deepEqual(readFileSync(join(managedRoot, "state", "activation.json")), activationBefore);
   assert.deepEqual(readFileSync(join(managedRoot, "state", "selections.json")), selectionsBefore);
 
@@ -1274,6 +1279,180 @@ test("Managed Pi surfaces relevant Tracked Branch updates without adopting them"
   assert.equal(readFileSync(server.requestLog, "utf8"), releaseRequests);
   assert.deepEqual(readFileSync(join(managedRoot, "state", "activation.json")), aggregateActivation);
   assert.deepEqual(readFileSync(join(managedRoot, "state", "selections.json")), aggregateSelections);
+});
+
+test("Tracked Branch cache identity includes the installed release and exact Pi Base", async () => {
+  const root = temporaryRoot();
+  const oldHome = join(root, "old-home");
+  const targetHome = join(root, "target-home");
+  mkdirSync(oldHome);
+  mkdirSync(targetHome);
+
+  const oldBase = createPiBase(join(root, "old-base"));
+  mkdirSync(join(root, "old-release"));
+  const oldRelease = createReleaseFixture(join(root, "old-release"), oldBase);
+  assert.equal(runInstaller(oldRelease, oldHome).status, 0);
+
+  const targetBaseRoot = join(root, "target-base");
+  mkdirSync(targetBaseRoot);
+  const targetBase = createPiBase(targetBaseRoot, { version: "0.82.0" });
+  git(targetBase.source, "tag", "v0.82.0");
+  mkdirSync(join(root, "target-release"));
+  const targetRelease = createReleaseFixture(join(root, "target-release"), targetBase, "0.82.0");
+  const targetLockPath = join(targetRelease, "upstream", "pi-base.json");
+  const targetLock = JSON.parse(readFileSync(targetLockPath, "utf8"));
+  targetLock.tag = "v0.82.0";
+  writeFileSync(targetLockPath, `${JSON.stringify(targetLock, null, 2)}\n`);
+  setReleaseFixtureVersion(targetRelease, "0.3.0");
+  const targetRecordPath = join(targetRelease, "release", "v0.3.0.json");
+  const targetRecord = JSON.parse(readFileSync(targetRecordPath, "utf8"));
+  targetRecord.piBase = { repository: targetLock.repository, tag: targetLock.tag, commit: targetLock.commit };
+  writeFileSync(targetRecordPath, `${JSON.stringify(targetRecord, null, 2)}\n`);
+  assert.equal(runInstaller(targetRelease, targetHome).status, 0);
+
+  const repository = createApplicablePatchRepository(join(root, "release-bound-source"), [[
+    "patches/release-bound.patch",
+    textPatch("series.txt", "base", "release-bound-one"),
+  ]]);
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    supportedPiBaseCommits: [oldBase.commit, targetBase.commit],
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Support both installed Pi Bases");
+  const acceptedCommit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+
+  for (const home of [oldHome, targetHome]) {
+    const added = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+    assert.equal(added.status, 0, added.stderr || added.stdout);
+  }
+
+  writeFileSync(join(repository.source, "patches", "release-bound.patch"), textPatch("series.txt", "base", "release-bound-two"));
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    supportedPiBaseCommits: [oldBase.commit],
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Publish candidate for only the old Pi Base");
+  const candidateCommit = publishRepositoryHead(root, repository);
+
+  const server = serveReleaseStatus(root);
+  const oldFrames = join(root, "old-release-source-status.jsonl");
+  const checked = runManagedTui(oldHome, oldFrames, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_BACKGROUND_READINESS: "0",
+    PI_FIXTURE_TUI_WAIT_MS: "2500",
+  });
+  assert.equal(checked.status, 0, checked.stderr || checked.stdout);
+  const oldStatus = runPorcuPiProcess(oldHome, ["status"]);
+  assert.match(oldStatus.stdout, /Tracked Branch updates: 1/);
+  assert.match(oldStatus.stdout, new RegExp(candidateCommit));
+
+  const oldCachePath = join(dataRoot(oldHome), "state", "source-updates.json");
+  const targetCachePath = join(dataRoot(targetHome), "state", "source-updates.json");
+  writeFileSync(targetCachePath, readFileSync(oldCachePath));
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(dataRoot(oldHome), "state", "selections.json"), "utf8")),
+    JSON.parse(readFileSync(join(dataRoot(targetHome), "state", "selections.json"), "utf8")),
+    "the exact Selection Intent must be unchanged across the installed release/Pi Base boundary",
+  );
+  assert.equal(JSON.parse(readFileSync(join(dataRoot(targetHome), "state", "selections.json"), "utf8")).sources[0].commit, acceptedCommit);
+
+  const targetStatus = runPorcuPiProcess(targetHome, ["status"], { PI_OFFLINE: "1" });
+  assert.equal(targetStatus.status, 0, targetStatus.stderr || targetStatus.stdout);
+  assert.match(targetStatus.stdout, /Installed release: 0\.3\.0/);
+  assert.match(targetStatus.stdout, /Installed Pi Base: v0\.82\.0/);
+  assert.match(targetStatus.stdout, /Tracked Branch updates: 0/);
+  assert.doesNotMatch(targetStatus.stdout, new RegExp(candidateCommit));
+});
+
+test("overlapping Tracked Branch coordinators preserve independent successful candidates", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+
+  for (const name of ["first", "second"]) {
+    const sourceRoot = join(root, `${name}-coordinator-source`);
+    const repository = createApplicablePatchRepository(sourceRoot, [[
+      `patches/${name}.patch`,
+      textPatch("series.txt", "base", name),
+    ]]);
+    const locator = await serveGitRepository(sourceRoot, repository);
+    const added = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+    assert.equal(added.status, 0, added.stderr || added.stdout);
+  }
+
+  const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
+  assert.equal(selections.sources.length, 2);
+  const [first, second] = selections.sources;
+  const firstCandidate = "e".repeat(40);
+  const secondCandidate = "f".repeat(40);
+  const harness = join(root, "source-coordinator-harness.mjs");
+  writeFileSync(harness, `import { setTimeout as delay } from "node:timers/promises";
+const worker = process.argv[2] === "--porcupi-background-tracked-branch";
+if (worker) {
+  const locator = process.argv[3];
+  const result = JSON.parse(process.env.PORCUPI_TEST_SOURCE_WORKERS)[locator];
+  await delay(result.delay);
+  if (result.outcome === "failed") process.exit(23);
+  process.stdout.write(JSON.stringify({ outcome: "candidate", locator, ...result.candidate }) + "\\n");
+} else {
+  const { checkTrackedBranchAvailability } = await import(${JSON.stringify(pathToFileURL(join(repositoryRoot, "src", "source-update-status.mjs")).href)});
+  await checkTrackedBranchAvailability();
+}
+`);
+  const candidate = (source, candidateCommit) => ({
+    trackedBranch: source.trackedBranch,
+    acceptedCommit: source.commit,
+    candidateCommit,
+    changedArtifactCount: 1,
+    changedPatchSeriesCount: 1,
+  });
+  const environment = (workers) => ({
+    ...process.env,
+    HOME: home,
+    XDG_DATA_HOME: join(home, ".local", "share"),
+    NODE_ENV: "test",
+    PORCUPI_TEST_SOURCE_WORKERS: JSON.stringify(workers),
+  });
+  const firstCoordinator = spawn(process.execPath, [harness], {
+    env: environment({
+      [first.locator]: { outcome: "candidate", delay: 0, candidate: candidate(first, firstCandidate) },
+      [second.locator]: { outcome: "failed", delay: 500 },
+    }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  childProcesses.push(firstCoordinator);
+  await delay(100);
+  const secondCoordinator = spawn(process.execPath, [harness], {
+    env: environment({
+      [first.locator]: { outcome: "failed", delay: 500 },
+      [second.locator]: { outcome: "candidate", delay: 0, candidate: candidate(second, secondCandidate) },
+    }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  childProcesses.push(secondCoordinator);
+  const wait = (child) => new Promise((resolvePromise, rejectPromise) => {
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", rejectPromise);
+    child.once("exit", (code, signal) => {
+      if (code === 0 && !signal) resolvePromise();
+      else rejectPromise(new Error(`coordinator failed (${code ?? signal}): ${stderr}`));
+    });
+  });
+  await Promise.all([wait(firstCoordinator), wait(secondCoordinator)]);
+
+  const status = runPorcuPiProcess(home, ["status"]);
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  assert.match(status.stdout, /Tracked Branch updates: 2/);
+  assert.match(status.stdout, new RegExp(firstCandidate));
+  assert.match(status.stdout, new RegExp(secondCandidate));
 });
 
 test("Managed Pi caches exact-input background Upgrade Readiness through the target public process", async () => {

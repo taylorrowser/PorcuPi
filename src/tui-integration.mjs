@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { defaultDataRoot, managedLayout } from "./runtime.mjs";
+import { defaultDataRoot, managedLayout, readActiveComposition } from "./runtime.mjs";
 import {
   backgroundReadinessDisabled,
   cachedReleaseStatus,
@@ -244,18 +244,20 @@ export default async function porcupiTuiIntegration(pi) {
     let readiness = null;
     let sourceCache = null;
     let selections = { schemaVersion: 2, sources: [] };
+    let active = null;
     let cacheIsTrusted = true;
     try {
       cache = readReleaseStatusCache(paths);
       readiness = readUpgradeReadinessCache(paths);
       sourceCache = readSourceUpdateCache(paths);
       selections = readSelections(paths.root);
+      active = readActiveComposition(paths.root);
     } catch {
       cacheIsTrusted = false;
     }
     const offline = porcupiOffline();
     const readinessDisabled = backgroundReadinessDisabled();
-    let sourceUpdates = cacheIsTrusted ? matchingSourceUpdates(sourceCache, selections) : [];
+    let sourceUpdates = cacheIsTrusted ? matchingSourceUpdates(sourceCache, selections, active.receipt) : [];
     let sourceChecking = cacheIsTrusted
       && event.reason === "startup"
       && !offline
@@ -286,7 +288,7 @@ export default async function porcupiTuiIntegration(pi) {
       void runTrackedBranchProcess(controller.signal).then(() => {
         if (generation !== currentGeneration) return;
         sourceCache = readSourceUpdateCache(paths);
-        sourceUpdates = matchingSourceUpdates(sourceCache, selections);
+        sourceUpdates = matchingSourceUpdates(sourceCache, selections, active.receipt);
         sourceChecking = false;
         requestRender();
       }).catch(() => {

@@ -65,6 +65,8 @@ function statusRow(status, width, { sourceUpdates = [], sourceChecking = false }
       if (fitsRow(actions, width)) return actions;
       const commands = `outside: ${command}; porcupi manage`;
       if (fitsRow(commands, width)) return commands;
+      const compactCommands = `${command}; porcupi manage`;
+      if (fitsRow(compactCommands, width)) return compactCommands;
       if (fitsRow(command, width)) return command;
       return truncateRow(command, width);
     }

@@ -1148,6 +1148,20 @@ test("Managed Pi surfaces relevant Tracked Branch updates without adopting them"
     JSON.stringify(rows),
   );
 
+  const narrowFrames = join(root, "tracked-status-narrow.jsonl");
+  const narrow = runManagedTui(home, narrowFrames, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_BACKGROUND_READINESS: "0",
+    PI_FIXTURE_TUI_WAIT_MS: "2500",
+    PI_FIXTURE_TUI_WIDTH: "40",
+  });
+  assert.equal(narrow.status, 0, narrow.stderr || narrow.stdout);
+  const narrowRows = readFrames(narrowFrames).map(releaseStatusLine);
+  assert.ok(
+    narrowRows.some((row) => /npx --yes porcupi@0\.3\.0/.test(row) && /porcupi manage/.test(row)),
+    JSON.stringify(narrowRows),
+  );
+
   const status = runPorcuPiProcess(home, ["status"]);
   assert.equal(status.status, 0, status.stderr || status.stdout);
   assert.match(status.stdout, /Tracked Branch updates: 1/);
@@ -1285,7 +1299,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "500",
+    PI_FIXTURE_TUI_WAIT_MS: "2000",
   });
   assert.equal(current.status, 0, current.stderr || current.stdout);
   assert.ok(readFrames(currentFramesPath).some((frame) => /current/i.test(releaseStatusLine(frame))));
@@ -1302,7 +1316,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_TEST_READINESS_PACKAGE: unsupportedArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "1000",
+    PI_FIXTURE_TUI_WAIT_MS: "3000",
   });
   assert.equal(unsupported.status, 0, unsupported.stderr || unsupported.stdout);
   const unsupportedRows = readFrames(unsupportedFramesPath).map(releaseStatusLine);
@@ -1340,7 +1354,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "500",
+    PI_FIXTURE_TUI_WAIT_MS: "3000",
   });
   assert.equal(contended.status, 0, contended.stderr || contended.stdout);
   assert.ok(readFrames(contendedFramesPath).some((frame) => /unavailable/i.test(releaseStatusLine(frame))));
@@ -1354,7 +1368,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
     PI_FIXTURE_BUILD_PRIORITY_LOG: buildPriorityLog,
-    PI_FIXTURE_TUI_WAIT_MS: "3000",
+    PI_FIXTURE_TUI_WAIT_MS: "6000",
   });
   assert.equal(first.status, 0, first.stderr || first.stdout);
   const firstRows = readFrames(firstFramesPath).map(releaseStatusLine);
@@ -1435,7 +1449,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
     PORCUPI_BACKGROUND_READINESS: "0",
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "500",
+    PI_FIXTURE_TUI_WAIT_MS: "2000",
   });
   assert.equal(disabled.status, 0, disabled.stderr || disabled.stdout);
   const disabledRows = readFrames(disabledFramesPath).map(releaseStatusLine);
@@ -1450,7 +1464,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "3000",
+    PI_FIXTURE_TUI_WAIT_MS: "6000",
   });
   assert.equal(refreshed.status, 0, refreshed.stderr || refreshed.stdout);
   assert.ok(readFrames(refreshedFramesPath).some((frame) => /PorcuPi 0\.3\.0.*ready/i.test(releaseStatusLine(frame))));
@@ -1483,7 +1497,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "3000",
+    PI_FIXTURE_TUI_WAIT_MS: "6000",
   });
   assert.equal(changedPiBase.status, 0, changedPiBase.stderr || changedPiBase.stdout);
   assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\nbuild\n", "changed target Pi Base evidence must invalidate readiness");
@@ -1496,7 +1510,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "3000",
+    PI_FIXTURE_TUI_WAIT_MS: "6000",
   });
   assert.equal(changedChecker.status, 0, changedChecker.stderr || changedChecker.stdout);
   assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\nbuild\nbuild\n", "changed checker contract evidence must invalidate readiness");
@@ -1543,7 +1557,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_TEST_READINESS_PACKAGE: failingArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "4000",
+    PI_FIXTURE_TUI_WAIT_MS: "8000",
   });
   assert.equal(failed.status, 0, failed.stderr || failed.stdout);
   const failedRows = readFrames(failedFramesPath).map(releaseStatusLine);

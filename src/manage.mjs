@@ -628,7 +628,7 @@ async function manageResourcesLocked({ input, output, environment, dataRoot, cwd
   const candidateRecords = resolveTrackedCandidates(selections, active);
   const reviewable = candidateRecords.filter((record) => record.candidate);
   const changed = reviewable.filter((record) => record.candidate.reviews.some((review) => review.changed));
-  if (candidateRecords.length > 1 && reviewable.length > 0) {
+  if (candidateRecords.length > 1) {
     const selected = await runSourceCandidateChooser({ records: candidateRecords, active, input, output });
     if (selected === null) {
       disposeTrackedCandidates(candidateRecords);

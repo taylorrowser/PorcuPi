@@ -110,7 +110,7 @@ if (process.env.PI_FIXTURE_LEXICAL_PREFIX_PATHS) {
 }
 const cli = join(output, "cli.js");
 writeFileSync(cli, \`#!/usr/bin/env node
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 const args = process.argv.slice(2);
 if (process.env.PI_FIXTURE_CHECK_FAIL === args[0]) process.exitCode = 44;
@@ -126,10 +126,33 @@ else if (args[0] === "install" || args[0] === "remove") {
   const scope = local ? "project" : "global";
   if (process.env.PI_FIXTURE_PACKAGE_LOG) appendFileSync(process.env.PI_FIXTURE_PACKAGE_LOG, JSON.stringify(args) + "\\\\n");
   if (local && process.env.PI_FIXTURE_PROJECT_TRUST_LOG) appendFileSync(process.env.PI_FIXTURE_PROJECT_TRUST_LOG, "Pi decided project trust\\\\n");
-  if (local && process.env.PI_FIXTURE_PROJECT_TRUST === "deny") {
+  const failOnce = (statePath) => {
+    if (!statePath || existsSync(statePath)) return false;
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFileSync(statePath, "failed\\\\n");
+    return true;
+  };
+  const failAttempts = (statePath, limitValue) => {
+    const limit = Number(limitValue);
+    if (!statePath || !Number.isInteger(limit) || limit < 1) return false;
+    const count = existsSync(statePath) ? Number(readFileSync(statePath, "utf8")) : 0;
+    if (count >= limit) return false;
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFileSync(statePath, String(count + 1));
+    return true;
+  };
+  const trustSource = process.env.PI_FIXTURE_PROJECT_TRUST_DENY_SOURCE;
+  const trustDenied = local && process.env.PI_FIXTURE_PROJECT_TRUST === "deny" && (!trustSource || source.includes(trustSource));
+  const failOnceScope = args[0] === "install"
+    && scope === process.env.PI_FIXTURE_PACKAGE_FAIL_ONCE_SCOPE
+    && failOnce(process.env.PI_FIXTURE_PACKAGE_FAIL_ONCE_STATE);
+  const failSourceAttempts = args[0] === "install"
+    && source.includes(process.env.PI_FIXTURE_PACKAGE_FAIL_ATTEMPTS_SOURCE || "\0")
+    && failAttempts(process.env.PI_FIXTURE_PACKAGE_FAIL_ATTEMPTS_STATE, process.env.PI_FIXTURE_PACKAGE_FAIL_ATTEMPTS);
+  if (trustDenied) {
     console.error("Project is not trusted");
     process.exitCode = 32;
-  } else if (args[0] === "install" && (process.env.PI_FIXTURE_PACKAGE_FAIL || scope === process.env.PI_FIXTURE_PACKAGE_FAIL_SCOPE || source.includes(process.env.PI_FIXTURE_PACKAGE_FAIL_SOURCE || "\0"))) {
+  } else if (args[0] === "install" && (process.env.PI_FIXTURE_PACKAGE_FAIL || scope === process.env.PI_FIXTURE_PACKAGE_FAIL_SCOPE || source.includes(process.env.PI_FIXTURE_PACKAGE_FAIL_SOURCE || "\0") || failOnceScope || failSourceAttempts)) {
     console.error("fixture Pi package install failed");
     process.exitCode = 31;
   } else {
@@ -147,7 +170,21 @@ else if (args[0] === "install" || args[0] === "remove") {
     settings.packages = packages;
     mkdirSync(dirname(settingsPath), { recursive: true });
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\\\\n");
-    console.log((args[0] === "remove" ? "Removed " : "Installed ") + source);
+    if (process.env.PI_FIXTURE_PACKAGE_SNAPSHOT_ROOT) {
+      mkdirSync(process.env.PI_FIXTURE_PACKAGE_SNAPSHOT_ROOT, { recursive: true });
+      const snapshotPath = join(process.env.PI_FIXTURE_PACKAGE_SNAPSHOT_ROOT, scope + ".txt");
+      if (args[0] === "remove") rmSync(snapshotPath, { force: true });
+      else writeFileSync(snapshotPath, source + "\\\\n");
+    }
+    const failAfterSource = process.env.PI_FIXTURE_PACKAGE_FAIL_AFTER_SNAPSHOT_SOURCE;
+    const failAfterSnapshot = args[0] === "install"
+      && scope === process.env.PI_FIXTURE_PACKAGE_FAIL_AFTER_SNAPSHOT_SCOPE
+      && (!failAfterSource || source.includes(failAfterSource))
+      && failOnce(process.env.PI_FIXTURE_PACKAGE_FAIL_AFTER_SNAPSHOT_STATE);
+    if (failAfterSnapshot) {
+      console.error("fixture Pi package install failed after changing its source snapshot");
+      process.exitCode = 33;
+    } else console.log((args[0] === "remove" ? "Removed " : "Installed ") + source);
   }
 } else {
   if (process.env.PI_FIXTURE_LAUNCH_LOG) appendFileSync(process.env.PI_FIXTURE_LAUNCH_LOG, JSON.stringify(args) + "\\\\n");
@@ -4134,7 +4171,8 @@ test("a manage package failure restores both scopes and leaves Selection Intent 
 
   const manage = runPorcuPi(home, ["manage"], "6e206e0d", {
     PI_FIXTURE_PACKAGE_LOG: packageLog,
-    PI_FIXTURE_PACKAGE_FAIL_SCOPE: "project",
+    PI_FIXTURE_PACKAGE_FAIL_ONCE_SCOPE: "project",
+    PI_FIXTURE_PACKAGE_FAIL_ONCE_STATE: join(root, "manage-package-failure"),
     PTY_WAIT_FOR: "1 of 3 — Keep or remove",
   }, project);
 
@@ -5272,6 +5310,54 @@ test("multiple Tracked Branch Patch updates remain independently reviewable and 
   assert.equal(readFileSync(join(payload, "source-b.txt"), "utf8"), "candidate-b\n");
 });
 
+test("multiple blocked Tracked Branches remain visible together without mutation", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+
+  const sourceRootA = join(root, "blocked-source-a");
+  const sourceRootB = join(root, "blocked-source-b");
+  const serverRootA = join(root, "blocked-server-a");
+  const serverRootB = join(root, "blocked-server-b");
+  for (const path of [sourceRootA, sourceRootB, serverRootA, serverRootB]) mkdirSync(path);
+  const repositoryA = createResourceRepository(sourceRootA);
+  const repositoryB = createResourceRepository(sourceRootB);
+  const locatorA = await serveGitRepository(serverRootA, repositoryA);
+  const locatorB = await serveGitRepository(serverRootB, repositoryB);
+  assert.equal(runPorcuPi(home, ["add", `${locatorA}@main`], "616e6e0d").status, 0);
+  assert.equal(runPorcuPi(home, ["add", `${locatorB}@main`], "616e6e0d").status, 0);
+
+  const managedRoot = dataRoot(home);
+  const settingsPath = join(home, ".pi", "agent", "settings.json");
+  const selectionsPath = join(managedRoot, "state", "selections.json");
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const settingsBefore = readFileSync(settingsPath);
+  const selectionsBefore = readFileSync(selectionsPath);
+  const activationBefore = readFileSync(activationPath);
+
+  for (const [serverRoot, repository] of [[serverRootA, repositoryA], [serverRootB, repositoryB]]) {
+    rmSync(join(repository.source, "skills", "fixture-skill", "SKILL.md"));
+    git(repository.source, "add", "--all");
+    git(repository.source, "commit", "-m", "Remove selected Skill");
+    publishRepositoryHead(serverRoot, repository);
+  }
+
+  const blocked = runPorcuPi(home, ["manage"], "1b", {
+    PTY_WAIT_FOR: "Choose one Source Repository update",
+  });
+  assert.equal(blocked.status, 0, blocked.stderr || blocked.stdout);
+  assert.match(blocked.stdout, new RegExp(`127\\.0\\.0\\.1:${new URL(locatorA).port}/owner/resources`));
+  assert.match(blocked.stdout, new RegExp(`127\\.0\\.0\\.1:${new URL(locatorB).port}/owner/resources`));
+  assert.equal((blocked.stdout.match(/\[blocked\]/g) ?? []).length >= 2, true);
+  assert.match(blocked.stdout, /Source update selection cancelled/);
+  assert.deepEqual(readFileSync(settingsPath), settingsBefore);
+  assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+});
+
 test("mixed-scope source reconciliation rolls back package and aggregate intent on failure or trust denial", async () => {
   const root = temporaryRoot();
   const home = join(root, "home");
@@ -5290,9 +5376,11 @@ test("mixed-scope source reconciliation rolls back package and aggregate intent 
   repository.commit = git(repository.source, "rev-parse", "HEAD");
   const locator = await serveGitRepository(root, repository);
   const packageLog = join(root, "package.log");
+  const packageSnapshots = join(root, "package-snapshots");
   const trustLog = join(root, "trust.log");
   const added = runPorcuPi(home, ["add", `${locator}@main`], "616e206e0d", {
     PI_FIXTURE_PACKAGE_LOG: packageLog,
+    PI_FIXTURE_PACKAGE_SNAPSHOT_ROOT: packageSnapshots,
   }, project);
   assert.equal(added.status, 0, added.stderr || added.stdout);
 
@@ -5305,6 +5393,8 @@ test("mixed-scope source reconciliation rolls back package and aggregate intent 
   const activationBefore = readFileSync(activationPath);
   const globalBefore = readFileSync(globalSettingsPath);
   const projectBefore = readFileSync(projectSettingsPath);
+  const globalPackageBefore = readFileSync(join(packageSnapshots, "global.txt"));
+  const projectPackageBefore = readFileSync(join(packageSnapshots, "project.txt"));
   const acceptedCommit = JSON.parse(selectionsBefore).sources[0].commit;
 
   writeFileSync(join(repository.source, "extensions", "fixture.ts"), "export default function candidateFixture() {}\n");
@@ -5313,22 +5403,44 @@ test("mixed-scope source reconciliation rolls back package and aggregate intent 
   git(repository.source, "add", ".");
   git(repository.source, "commit", "-m", "Advance mixed scopes");
   const candidateCommit = publishRepositoryHead(root, repository);
+  const packageCallsBeforeFailure = readFileSync(packageLog, "utf8").trim().split("\n").length;
 
   const packageFailure = runPorcuPi(home, ["manage"], "6e6e0d", {
     PI_FIXTURE_PACKAGE_LOG: packageLog,
-    PI_FIXTURE_PACKAGE_FAIL_SCOPE: "project",
+    PI_FIXTURE_PACKAGE_SNAPSHOT_ROOT: packageSnapshots,
+    PI_FIXTURE_PACKAGE_FAIL_AFTER_SNAPSHOT_SCOPE: "project",
+    PI_FIXTURE_PACKAGE_FAIL_AFTER_SNAPSHOT_SOURCE: candidateCommit,
+    PI_FIXTURE_PACKAGE_FAIL_AFTER_SNAPSHOT_STATE: join(root, "mixed-package-failure"),
+    PI_FIXTURE_PACKAGE_FAIL_ATTEMPTS_SOURCE: acceptedCommit,
+    PI_FIXTURE_PACKAGE_FAIL_ATTEMPTS: "4",
+    PI_FIXTURE_PACKAGE_FAIL_ATTEMPTS_STATE: join(root, "package-compensation-failures"),
     PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
   }, project);
   assert.notEqual(packageFailure.status, 0);
-  assert.match(`${packageFailure.stdout}${packageFailure.stderr}`, /prior project.*checkout.*could not be restored/);
+  assert.match(`${packageFailure.stdout}${packageFailure.stderr}`, /fixture Pi package install failed after changing its source snapshot/);
   assert.deepEqual(readFileSync(globalSettingsPath), globalBefore);
   assert.deepEqual(readFileSync(projectSettingsPath), projectBefore);
+  assert.deepEqual(readFileSync(join(packageSnapshots, "global.txt")), globalPackageBefore);
+  assert.deepEqual(readFileSync(join(packageSnapshots, "project.txt")), projectPackageBefore);
   assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
   assert.deepEqual(readFileSync(activationPath), activationBefore);
+  const compensationCalls = readFileSync(packageLog, "utf8").trim().split("\n").map(JSON.parse).slice(packageCallsBeforeFailure);
+  assert.deepEqual(compensationCalls.map((args) => [args[0], args[1].endsWith(candidateCommit), args.includes("-l")]), [
+    ["install", true, false],
+    ["install", true, true],
+    ["install", false, false],
+    ["install", false, true],
+    ["install", false, false],
+    ["install", false, true],
+    ["install", false, false],
+    ["install", false, true],
+  ]);
 
   const trustDenial = runPorcuPi(home, ["manage"], "6e6e0d", {
     PI_FIXTURE_PACKAGE_LOG: packageLog,
+    PI_FIXTURE_PACKAGE_SNAPSHOT_ROOT: packageSnapshots,
     PI_FIXTURE_PROJECT_TRUST: "deny",
+    PI_FIXTURE_PROJECT_TRUST_DENY_SOURCE: candidateCommit,
     PI_FIXTURE_PROJECT_TRUST_LOG: trustLog,
     PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
   }, project);
@@ -5337,11 +5449,14 @@ test("mixed-scope source reconciliation rolls back package and aggregate intent 
   assert.match(readFileSync(trustLog, "utf8"), /Pi decided project trust/);
   assert.deepEqual(readFileSync(globalSettingsPath), globalBefore);
   assert.deepEqual(readFileSync(projectSettingsPath), projectBefore);
+  assert.deepEqual(readFileSync(join(packageSnapshots, "global.txt")), globalPackageBefore);
+  assert.deepEqual(readFileSync(join(packageSnapshots, "project.txt")), projectPackageBefore);
   assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
   assert.deepEqual(readFileSync(activationPath), activationBefore);
 
   const accepted = runPorcuPi(home, ["manage"], "6e6e0d", {
     PI_FIXTURE_PACKAGE_LOG: packageLog,
+    PI_FIXTURE_PACKAGE_SNAPSHOT_ROOT: packageSnapshots,
     PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
   }, project);
   assert.equal(accepted.status, 0, accepted.stderr || accepted.stdout);
@@ -5365,7 +5480,7 @@ test("mixed-scope source reconciliation rolls back package and aggregate intent 
   assert.deepEqual(readFileSync(activationPath), activationBefore);
 });
 
-test("source update locking contends with the shared lifecycle", async () => {
+test("source mutation through manage and add contends with the shared lifecycle", async () => {
   const root = temporaryRoot();
   const home = join(root, "home");
   mkdirSync(home);
@@ -5395,5 +5510,28 @@ test("source update locking contends with the shared lifecycle", async () => {
   await new Promise((resolvePromise, rejectPromise) => {
     child.once("error", rejectPromise);
     child.once("exit", resolvePromise);
+  });
+
+  const addChild = spawn(join(home, ".local", "bin", "porcupi"), ["add"], {
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      NODE_ENV: "test",
+      PORCUPI_TEST_HOLD_LOCK_MS: "1500",
+    },
+  });
+  childProcesses.push(addChild);
+  for (let attempt = 0; attempt < 50 && !existsSync(lifecycleLock); attempt += 1) await delay(20);
+  assert.equal(existsSync(lifecycleLock), true, "add lifecycle lock was not acquired");
+
+  const addContention = runPorcuPiProcess(home, ["apply"]);
+  assert.notEqual(addContention.status, 0);
+  assert.match(`${addContention.stdout}${addContention.stderr}`, /lifecycle operation is already in progress: add/);
+
+  await new Promise((resolvePromise, rejectPromise) => {
+    addChild.once("error", rejectPromise);
+    addChild.once("exit", resolvePromise);
   });
 });

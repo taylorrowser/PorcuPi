@@ -81,7 +81,7 @@ Uninstall removes only receipt-proven PorcuPi launchers, runtime, state, and Com
 
 ## Lifecycle and recovery boundaries
 
-Install, source review and management, apply, rollback, cleanup, optional command ownership, and uninstall share one lifecycle lock. Source review holds the lock through final exact-commit revalidation and any Pi package reconciliation, so another lifecycle mutation fails closed instead of racing accepted intent. Ordinary launch does not take that lock. If a mutating command reports a live owner, let that operation complete instead of deleting lock or state files manually.
+Install, add, source review and management, apply, rollback, cleanup, optional command ownership, and uninstall share one lifecycle lock. Add and source review hold the lock from their initial state read through final exact-commit revalidation and any Pi package reconciliation, so another lifecycle mutation fails closed instead of racing accepted intent. Ordinary launch does not take that lock. If a mutating command reports a live owner, let that operation complete instead of deleting lock or state files manually.
 
 For a refused launch:
 

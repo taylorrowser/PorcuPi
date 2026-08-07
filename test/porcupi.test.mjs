@@ -130,14 +130,19 @@ if (process.env.PI_FIXTURE_FORWARD_LOG) {
   if (extensionIndex < 0 || !args[extensionIndex + 1]) throw new Error("Managed Pi TUI Integration was not loaded");
   const extension = await import(args[extensionIndex + 1]);
   const handlers = new Map();
-  let component;
   let renderCount = 0;
   let renderReason = "update";
   let sessionReason;
   const frameLog = process.env.PI_FIXTURE_TUI_FRAME_LOG;
   const width = Number(process.env.PI_FIXTURE_TUI_WIDTH || 80);
+  const widgetContainer = {
+    children: [],
+    addChild(child) { this.children.push(child); },
+    clear() { this.children = []; },
+  };
   const render = () => {
     if (!frameLog) return;
+    const component = widgetContainer.children.find((child) => typeof child.render === "function");
     const lines = component ? ["", ...component.render(width)] : [""];
     appendFileSync(frameLog, JSON.stringify({ reason: renderReason, sessionReason, renderCount: ++renderCount, width, lines }) + "\\\\n");
   };
@@ -150,9 +155,12 @@ if (process.env.PI_FIXTURE_FORWARD_LOG) {
       theme,
       setWidget(id, value) {
         if (id !== "porcupi-release-status") throw new Error("Unexpected Managed Pi TUI widget identity: " + id);
-        component = typeof value === "function"
+        const component = typeof value === "function"
           ? value(tui, theme)
           : { render: () => value, invalidate() {} };
+        widgetContainer.clear();
+        widgetContainer.addChild({});
+        widgetContainer.addChild(component);
         tui.requestRender();
       },
     },
@@ -170,21 +178,27 @@ if (process.env.PI_FIXTURE_FORWARD_LOG) {
   startupTui.children.push({});
   startupTui.requestRender();
   if (startupRenderCount !== 1) throw new Error("Managed Pi TUI Integration blocked Pi's project-trust UI");
-  tui.children.push({}, {}, {}, {}, {});
+  tui.children.push({}, {}, {}, {}, widgetContainer);
   renderReason = "pre-bind";
   tui.requestRender();
   const sessionReasons = (process.env.PI_FIXTURE_TUI_SESSION_REASONS || "startup").split(",");
   for (let index = 0; index < sessionReasons.length; index += 1) {
-    if (index > 0) {
-      for (const handler of handlers.get("session_shutdown") || []) await handler({ reason: sessionReasons[index] }, ctx);
-    }
     sessionReason = sessionReasons[index];
+    if (index > 0) {
+      if (sessionReason === "reload") {
+        widgetContainer.clear();
+        widgetContainer.addChild({});
+        renderReason = "reload-reset";
+        tui.requestRender();
+      }
+      for (const handler of handlers.get("session_shutdown") || []) await handler({ reason: sessionReason }, ctx);
+    }
     renderReason = "session-start";
     for (const handler of handlers.get("session_start") || []) await handler({ reason: sessionReason }, ctx);
     renderReason = "update";
     await new Promise((resolve) => setTimeout(resolve, Number(process.env.PI_FIXTURE_TUI_WAIT_MS || 250)));
   }
-  component?.invalidate();
+  widgetContainer.children.find((child) => typeof child.invalidate === "function")?.invalidate();
   renderReason = "theme-invalidation";
   tui.requestRender();
   renderReason = "repeated";
@@ -972,6 +986,9 @@ test("Managed Pi renders bounded release availability in one runtime-owned TUI r
   assert.equal(available.status, 0, available.stderr || available.stdout);
   const availableFrames = readFrames(frameLog);
   assert.match(releaseStatusLine(availableFrames[0]), /checking release availability/i);
+  const reloadResetFrame = availableFrames.find((frame) => frame.reason === "reload-reset");
+  assert.ok(reloadResetFrame, "the pinned Pi reload fixture must render after clearing Extension widgets");
+  assert.match(releaseStatusLine(reloadResetFrame), /PorcuPi 0\.3\.0 available/);
   assert.ok(availableFrames.some((frame) => /PorcuPi 0\.3\.0 available/.test(releaseStatusLine(frame))));
   assert.ok(availableFrames.some((frame) => /npx --yes porcupi@0\.3\.0/.test(releaseStatusLine(frame))));
   const transitionReasons = new Set(["new", "resume", "fork", "reload"]);

@@ -45,32 +45,56 @@ async function managedTuiClass() {
   return module.TUI;
 }
 
-function deferTuiRendering(TUI) {
+function preserveStatusRow(TUI) {
   const prototype = TUI.prototype;
   const existing = prototype[renderGateIdentity];
-  if (existing) return existing.release;
+  if (existing) return existing;
 
   const original = prototype.requestRender;
-  const gate = { released: false, release: undefined };
-  const deferredRequestRender = function deferredRequestRender(...args) {
-    const isInteractiveManagedPi = Array.isArray(this.children) && this.children.length >= 5;
-    if (!gate.released && isInteractiveManagedPi) return;
+  const gate = {
+    component: undefined,
+    container: undefined,
+    released: false,
+    tui: undefined,
+    setComponent: undefined,
+    release: undefined,
+  };
+  const guardedRequestRender = function guardedRequestRender(...args) {
+    const isInteractiveManagedPi = this === gate.tui
+      || (gate.tui === undefined && Array.isArray(this.children) && this.children.length >= 5);
+    if (!gate.released && isInteractiveManagedPi) {
+      if (!gate.component) return;
+      if (!gate.container?.children?.includes(gate.component)) {
+        const container = this.children.find((child) => Array.isArray(child.children) && child.children.includes(gate.component));
+        if (container) {
+          gate.container = container;
+        } else if (typeof gate.container?.addChild === "function") {
+          gate.container.addChild(gate.component);
+        } else {
+          return;
+        }
+      }
+    }
     return original.apply(this, args);
+  };
+  gate.setComponent = (tui, component) => {
+    gate.tui = tui;
+    gate.component = component;
   };
   gate.release = () => {
     if (gate.released) return;
     gate.released = true;
-    if (prototype.requestRender === deferredRequestRender) prototype.requestRender = original;
+    if (prototype.requestRender === guardedRequestRender) prototype.requestRender = original;
     if (prototype[renderGateIdentity] === gate) delete prototype[renderGateIdentity];
   };
   Object.defineProperty(prototype, renderGateIdentity, { configurable: true, value: gate });
-  prototype.requestRender = deferredRequestRender;
-  return gate.release;
+  prototype.requestRender = guardedRequestRender;
+  return gate;
 }
 
 export default async function porcupiTuiIntegration(pi) {
   const TUI = await managedTuiClass();
-  let releaseTuiRendering = deferTuiRendering(TUI);
+  const statusRowGuard = preserveStatusRow(TUI);
   let generation = 0;
   let controller;
 
@@ -97,14 +121,15 @@ export default async function porcupiTuiIntegration(pi) {
     let requestRender = () => {};
 
     ctx.ui.setWidget(widgetIdentity, (tui, theme) => {
-      releaseTuiRendering();
       requestRender = () => tui.requestRender();
-      return {
+      const component = {
         render(width) {
           return [theme.fg(releaseStatusColor(status), statusRow(status, width))];
         },
         invalidate() {},
       };
+      statusRowGuard.setComponent(tui, component);
+      return component;
     });
 
     if (event.reason !== "startup" || offline || !cacheIsTrusted) return;
@@ -129,6 +154,6 @@ export default async function porcupiTuiIntegration(pi) {
     generation += 1;
     controller?.abort();
     controller = undefined;
-    if (event.reason !== "quit") releaseTuiRendering = deferTuiRendering(TUI);
+    if (event.reason === "quit") statusRowGuard.release();
   });
 }

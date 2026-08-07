@@ -101,6 +101,8 @@ porcupi manage
 
 `manage` uses the same three-page selection, scope, and review pattern across all retained Source Repositories. It offers a Tracked Branch candidate only when selected structural content or bounded package inputs change, while `[u]` permits explicit review of the latest exact commit when that inventory is unchanged. Final acceptance re-resolves the exact reviewed branch head. Confirmed changes preserve unrelated Pi settings and never rebuild or activate Managed Pi; accepted Patch snapshots remain pending until `porcupi apply`.
 
+Each online Managed Pi TUI startup checks retained Tracked Branches asynchronously with bounded concurrency and quiet failure. Relevant compatible Inter-release Source Updates appear in the fixed PorcuPi row and are expanded by the network-free, side-effect-free `porcupi status` command. Pinned refs, unproven migrated branch identity, and irrelevant movement stay quiet. Offline mode retains matching cached status. Availability never advances a snapshot: run guided `porcupi manage` to review one exact candidate, then `porcupi apply` to activate any changed Patch Series.
+
 ## Apply selected Patches
 
 Run the guided apply flow after reviewing Patch Selection Intent:

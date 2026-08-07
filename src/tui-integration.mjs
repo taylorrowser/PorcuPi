@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { defaultDataRoot, managedLayout } from "./runtime.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { defaultDataRoot, managedLayout, readActiveComposition } from "./runtime.mjs";
 import {
   backgroundReadinessDisabled,
   cachedReleaseStatus,
@@ -20,6 +20,7 @@ import {
   validateUpgradeReadinessTarget,
 } from "./release-status.mjs";
 import { readSelections } from "./resource-intent.mjs";
+import { matchingSourceUpdates, readSourceUpdateCache, renderSourceUpdateRow } from "./source-update-status.mjs";
 
 const widgetIdentity = "porcupi-release-status";
 const renderGateIdentity = Symbol.for("porcupi.release-status.initial-render-gate");
@@ -32,12 +33,62 @@ function truncateRow(value, width) {
   return `${characters.slice(0, width - 3).join("")}...`;
 }
 
-function statusRow(status, width) {
+function fitsRow(value, width) {
+  return [...value].length <= width;
+}
+
+function combinedReleaseState(status) {
+  if (status.kind === "checking-readiness") return "checking compatibility";
+  if (status.kind === "ready") return status.context === "offline" ? "cached ready (offline)" : "ready";
+  if (status.kind === "blocked") return status.context === "offline" ? "blocked (cached offline)" : "blocked";
+  if (status.kind === "available" || status.kind === "readiness-unavailable") return "readiness unavailable";
+  if (status.kind === "offline") return "release offline";
+  if (status.kind === "checking") return "checking release availability";
+  if (status.kind === "current") return "current";
+  return "release status unavailable";
+}
+
+function statusRow(status, width, { sourceUpdates = [], sourceChecking = false } = {}) {
   const full = renderReleaseStatusRow(status);
-  if ([...full].length <= width || !status.targetVersion) return truncateRow(full, width);
+  const sourceRow = renderSourceUpdateRow(sourceUpdates, { checking: sourceChecking });
+  if (sourceRow) {
+    const sourceSummary = sourceRow.replace(/^PorcuPi: /, "");
+    const combined = `${full}; ${sourceSummary}`;
+    if (fitsRow(combined, width)) return combined;
+
+    const sourceCompact = `${sourceUpdates.length} Tracked Branch update${sourceUpdates.length === 1 ? "" : "s"}: porcupi manage`;
+    if (status.targetVersion) {
+      const command = releaseInstallCommand(status.targetVersion);
+      const stateAndActions = `${combinedReleaseState(status)}; outside: ${command}; ${sourceCompact}`;
+      if (fitsRow(stateAndActions, width)) return stateAndActions;
+      const actions = `outside: ${command}; ${sourceCompact}`;
+      if (fitsRow(actions, width)) return actions;
+      const commands = `outside: ${command}; porcupi manage`;
+      if (fitsRow(commands, width)) return commands;
+      const compactCommands = `${command}; porcupi manage`;
+      if (fitsRow(compactCommands, width)) return compactCommands;
+      if (fitsRow(command, width)) return command;
+      return truncateRow(command, width);
+    }
+
+    const compactCombined = `${renderReleaseStatusRow(status, { compact: true })}; ${sourceCompact}`;
+    if (fitsRow(compactCombined, width)) return compactCombined;
+    const stateAndSource = `${combinedReleaseState(status)}; ${sourceCompact}`;
+    if (fitsRow(stateAndSource, width)) return stateAndSource;
+    if (fitsRow(sourceRow, width)) return sourceRow;
+    if (fitsRow(sourceCompact, width)) return sourceCompact;
+    if (fitsRow("porcupi manage", width)) return "porcupi manage";
+    return truncateRow("porcupi manage", width);
+  }
+  if (sourceChecking) {
+    if (status.kind === "checking") return truncateRow("PorcuPi: checking release availability and Tracked Branches...", width);
+    const checking = `${full}; checking Tracked Branches...`;
+    if (fitsRow(checking, width)) return checking;
+  }
+  if (fitsRow(full, width) || !status.targetVersion) return truncateRow(full, width);
 
   const compact = renderReleaseStatusRow(status, { compact: true });
-  if ([...compact].length <= width) return compact;
+  if (fitsRow(compact, width)) return compact;
   if (status.reason) {
     const reasonWidth = width - ([...compact].length - [...status.reason].length);
     if (reasonWidth > 3) return compact.replace(status.reason, truncateRow(status.reason, reasonWidth));
@@ -45,9 +96,28 @@ function statusRow(status, width) {
 
   const command = releaseInstallCommand(status.targetVersion);
   const externalGuidance = `${command} (outside session)`;
-  if ([...externalGuidance].length <= width) return externalGuidance;
-  if ([...command].length <= width) return command;
+  if (fitsRow(externalGuidance, width)) return externalGuidance;
+  if (fitsRow(command, width)) return command;
   return truncateRow(command, width);
+}
+
+function runTrackedBranchProcess(signal) {
+  const cliPath = join(dirname(fileURLToPath(import.meta.url)), "cli.mjs");
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cliPath, "--porcupi-background-tracked-branches"], {
+      env: process.env,
+      stdio: "ignore",
+    });
+    const abort = () => child.kill("SIGTERM");
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    child.once("error", reject);
+    child.once("exit", (code, exitSignal) => {
+      signal?.removeEventListener("abort", abort);
+      if (exitSignal || code !== 0) reject(new Error("Background Tracked Branch availability did not complete"));
+      else resolve();
+    });
+  });
 }
 
 function runTargetReadinessProcess(targetVersion, signal) {
@@ -172,17 +242,26 @@ export default async function porcupiTuiIntegration(pi) {
     const paths = managedLayout(defaultDataRoot());
     let cache = null;
     let readiness = null;
+    let sourceCache = null;
     let selections = { schemaVersion: 2, sources: [] };
+    let active = null;
     let cacheIsTrusted = true;
     try {
       cache = readReleaseStatusCache(paths);
       readiness = readUpgradeReadinessCache(paths);
+      sourceCache = readSourceUpdateCache(paths);
       selections = readSelections(paths.root);
+      active = readActiveComposition(paths.root);
     } catch {
       cacheIsTrusted = false;
     }
     const offline = porcupiOffline();
     const readinessDisabled = backgroundReadinessDisabled();
+    let sourceUpdates = cacheIsTrusted ? matchingSourceUpdates(sourceCache, selections, installedVersion, active.receipt) : [];
+    let sourceChecking = cacheIsTrusted
+      && event.reason === "startup"
+      && !offline
+      && selections.sources.some((source) => source.trackedBranch);
     let status = !cacheIsTrusted
       ? unavailableReleaseStatus({ installedVersion, cache: null })
       : event.reason === "startup" || offline
@@ -194,7 +273,8 @@ export default async function porcupiTuiIntegration(pi) {
       requestRender = () => tui.requestRender();
       const component = {
         render(width) {
-          return [theme.fg(releaseStatusColor(status), statusRow(status, width))];
+          const color = sourceUpdates.length > 0 ? "warning" : releaseStatusColor(status);
+          return [theme.fg(color, statusRow(status, width, { sourceUpdates, sourceChecking }))];
         },
         invalidate() {},
       };
@@ -204,6 +284,19 @@ export default async function porcupiTuiIntegration(pi) {
 
     if (event.reason !== "startup" || offline || !cacheIsTrusted) return;
     controller = new AbortController();
+    if (sourceChecking) {
+      void runTrackedBranchProcess(controller.signal).then(() => {
+        if (generation !== currentGeneration) return;
+        sourceCache = readSourceUpdateCache(paths);
+        sourceUpdates = matchingSourceUpdates(sourceCache, selections, installedVersion, active.receipt);
+        sourceChecking = false;
+        requestRender();
+      }).catch(() => {
+        if (generation !== currentGeneration || controller?.signal.aborted) return;
+        sourceChecking = false;
+        requestRender();
+      });
+    }
     void checkReleaseAvailability({
       paths,
       installedVersion,

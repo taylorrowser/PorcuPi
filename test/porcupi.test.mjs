@@ -838,12 +838,13 @@ http.server.ThreadingHTTPServer(("127.0.0.1", ${port}), Handler).serve_forever()
 }
 
 function runManagedTui(home, frameLog, extraEnvironment = {}, args = []) {
+  const fixtureWait = Number(extraEnvironment.PI_FIXTURE_TUI_WAIT_MS || 250);
   return spawnSync(
     "python3",
     [join(repositoryRoot, "test", "support", "pty-driver.py"), "", join(home, ".local", "bin", "porcupi"), ...args],
     {
       encoding: "utf8",
-      timeout: 10_000,
+      timeout: Math.max(10_000, fixtureWait + 5_000),
       env: {
         ...process.env,
         HOME: home,
@@ -855,6 +856,43 @@ function runManagedTui(home, frameLog, extraEnvironment = {}, args = []) {
       },
     },
   );
+}
+
+function startTrackedBranchCheck(home, extraEnvironment = {}) {
+  const child = spawn(join(home, ".local", "bin", "porcupi"), ["--porcupi-background-tracked-branches"], {
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      NODE_ENV: "test",
+      ...extraEnvironment,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  childProcesses.push(child);
+  return child;
+}
+
+function waitForChild(child) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolvePromise({ code: child.exitCode, signal: child.signalCode, stderr });
+      return;
+    }
+    child.once("error", rejectPromise);
+    child.once("exit", (code, signal) => resolvePromise({ code, signal, stderr }));
+  });
+}
+
+async function waitForFile(path) {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
+    if (existsSync(path)) return;
+    await delay(20);
+  }
+  throw new Error(`Timed out waiting for fixture file: ${path}`);
 }
 
 function readFrames(path) {
@@ -1089,6 +1127,550 @@ test("Managed Pi renders bounded release availability in one runtime-owned TUI r
   assert.deepEqual(readFileSync(sessionPath), sessionBefore);
 });
 
+test("Managed Pi surfaces relevant Tracked Branch updates without adopting them", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  const installed = runInstaller(release, home);
+  assert.equal(installed.status, 0, installed.stderr || installed.stdout);
+  const server = serveReleaseStatus(root);
+
+  const repository = createApplicablePatchRepository(join(root, "tracked-status-source"), [[
+    "patches/status.patch",
+    textPatch("series.txt", "base", "status-one"),
+  ]]);
+  const locator = await serveGitRepository(root, repository);
+  const added = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+  assert.equal(added.status, 0, added.stderr || added.stdout);
+
+  writeFileSync(join(repository.source, "README.md"), "Irrelevant branch movement.\n");
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Publish irrelevant documentation");
+  publishRepositoryHead(root, repository);
+  const irrelevantFrames = join(root, "tracked-status-irrelevant.jsonl");
+  const irrelevant = runManagedTui(home, irrelevantFrames, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_BACKGROUND_READINESS: "0",
+    PI_FIXTURE_TUI_WAIT_MS: "2500",
+  });
+  assert.equal(irrelevant.status, 0, irrelevant.stderr || irrelevant.stdout);
+  assert.ok(readFrames(irrelevantFrames).every((frame) => !/Tracked Branch update(?!s: 0)/i.test(releaseStatusLine(frame))));
+  const irrelevantStatus = runPorcuPiProcess(home, ["status"]);
+  assert.match(irrelevantStatus.stdout, /Tracked Branch updates: 0/);
+
+  writeFileSync(join(repository.source, "patches", "status.patch"), textPatch("series.txt", "base", "status-two"));
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Publish selected Patch Series update");
+  const candidateCommit = publishRepositoryHead(root, repository);
+  server.setVersion("0.3.0");
+
+  const managedRoot = dataRoot(home);
+  const activationBefore = readFileSync(join(managedRoot, "state", "activation.json"));
+  const selectionsBefore = readFileSync(join(managedRoot, "state", "selections.json"));
+  const frameLog = join(root, "tracked-status-frames.jsonl");
+  const launched = runManagedTui(home, frameLog, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_BACKGROUND_READINESS: "0",
+    PI_FIXTURE_TUI_WAIT_MS: "2500",
+    PI_FIXTURE_TUI_WIDTH: "240",
+  });
+  assert.equal(launched.status, 0, launched.stderr || launched.stdout);
+  const rows = readFrames(frameLog).map(releaseStatusLine);
+  assert.ok(
+    rows.some((row) => /1 Tracked Branch update/i.test(row)
+      && /porcupi manage/.test(row)
+      && /readiness unavailable/i.test(row)
+      && /npx --yes porcupi@0\.3\.0/.test(row)),
+    JSON.stringify(rows),
+  );
+  assert.ok(
+    rows.some((row) => /Patch Series: manage, then apply/i.test(row)),
+    `availability guidance must not claim a Patch Series is pending before acceptance: ${JSON.stringify(rows)}`,
+  );
+  assert.ok(rows.every((row) => !/Patch(?: Series)? pending/i.test(row)), JSON.stringify(rows));
+
+  const narrowFrames = join(root, "tracked-status-narrow.jsonl");
+  const narrow = runManagedTui(home, narrowFrames, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_BACKGROUND_READINESS: "0",
+    PI_FIXTURE_TUI_WAIT_MS: "2500",
+    PI_FIXTURE_TUI_WIDTH: "40",
+  });
+  assert.equal(narrow.status, 0, narrow.stderr || narrow.stdout);
+  const narrowRows = readFrames(narrowFrames).map(releaseStatusLine);
+  assert.ok(
+    narrowRows.some((row) => /npx --yes porcupi@0\.3\.0/.test(row) && /porcupi manage/.test(row)),
+    JSON.stringify(narrowRows),
+  );
+
+  const status = runPorcuPiProcess(home, ["status"]);
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  assert.match(status.stdout, /Tracked Branch updates: 1/);
+  assert.match(status.stdout, new RegExp(candidateCommit));
+  assert.match(status.stdout, /Next source command: porcupi manage/);
+  assert.match(status.stdout, /accepted, changed Patch Series become pending.*porcupi apply/i);
+  assert.deepEqual(readFileSync(join(managedRoot, "state", "activation.json")), activationBefore);
+  assert.deepEqual(readFileSync(join(managedRoot, "state", "selections.json")), selectionsBefore);
+
+  const pinnedRoot = join(root, "pinned-status");
+  const pinnedRepository = createApplicablePatchRepository(pinnedRoot, [[
+    "patches/pinned.patch",
+    textPatch("series.txt", "base", "pinned-one"),
+  ]]);
+  const pinnedLocator = await serveGitRepository(pinnedRoot, pinnedRepository);
+  const pinned = runPorcuPi(home, ["add", `${pinnedLocator}@${pinnedRepository.commit}`], "616e6e0d");
+  assert.equal(pinned.status, 0, pinned.stderr || pinned.stdout);
+
+  const secondRoot = join(root, "second-status");
+  const secondRepository = createApplicablePatchRepository(secondRoot, [[
+    "patches/second.patch",
+    textPatch("series.txt", "base", "second-one"),
+  ]]);
+  const secondLocator = await serveGitRepository(secondRoot, secondRepository);
+  const secondAdded = runPorcuPi(home, ["add", `${secondLocator}@main`], "616e6e0d");
+  assert.equal(secondAdded.status, 0, secondAdded.stderr || secondAdded.stdout);
+
+  const failedRoot = join(root, "failed-status");
+  const failedRepository = createApplicablePatchRepository(failedRoot, [[
+    "patches/failed.patch",
+    textPatch("series.txt", "base", "failed-one"),
+  ]]);
+  const failedLocator = await serveGitRepository(failedRoot, failedRepository);
+  const failedDaemon = childProcesses.at(-1);
+  const failedAdded = runPorcuPi(home, ["add", `${failedLocator}@main`], "616e6e0d");
+  assert.equal(failedAdded.status, 0, failedAdded.stderr || failedAdded.stdout);
+
+  writeFileSync(join(pinnedRepository.source, "patches", "pinned.patch"), textPatch("series.txt", "base", "pinned-two"));
+  git(pinnedRepository.source, "add", ".");
+  git(pinnedRepository.source, "commit", "-m", "Move pinned source repository");
+  publishRepositoryHead(pinnedRoot, pinnedRepository);
+  writeFileSync(join(secondRepository.source, "patches", "second.patch"), textPatch("series.txt", "base", "second-two"));
+  git(secondRepository.source, "add", ".");
+  git(secondRepository.source, "commit", "-m", "Publish second selected update");
+  const secondCandidate = publishRepositoryHead(secondRoot, secondRepository);
+  writeFileSync(join(failedRepository.source, "patches", "failed.patch"), textPatch("series.txt", "base", "failed-two"));
+  git(failedRepository.source, "add", ".");
+  git(failedRepository.source, "commit", "-m", "Publish temporarily unavailable update");
+  const failedCandidate = publishRepositoryHead(failedRoot, failedRepository);
+  failedDaemon.kill("SIGTERM");
+  await new Promise((resolvePromise) => failedDaemon.once("close", resolvePromise));
+
+  const aggregateActivation = readFileSync(join(managedRoot, "state", "activation.json"));
+  const aggregateSelections = readFileSync(join(managedRoot, "state", "selections.json"));
+  const manyFrames = join(root, "tracked-status-many.jsonl");
+  const many = runManagedTui(home, manyFrames, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_BACKGROUND_READINESS: "0",
+    PI_FIXTURE_TUI_WAIT_MS: "3000",
+  });
+  assert.equal(many.status, 0, many.stderr || many.stdout);
+  assert.ok(readFrames(manyFrames).some((frame) => /2 Tracked Branch updates/i.test(releaseStatusLine(frame))));
+  const manyStatus = runPorcuPiProcess(home, ["status"]);
+  assert.match(manyStatus.stdout, /Tracked Branch updates: 2/);
+  assert.match(manyStatus.stdout, new RegExp(candidateCommit));
+  assert.match(manyStatus.stdout, new RegExp(secondCandidate));
+  assert.doesNotMatch(manyStatus.stdout, new RegExp(failedCandidate));
+  assert.doesNotMatch(manyStatus.stdout, new RegExp(pinnedLocator));
+
+  const restartedDaemon = spawn(failedDaemon.spawnargs[0], failedDaemon.spawnargs.slice(1), { stdio: "ignore" });
+  childProcesses.push(restartedDaemon);
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (spawnSync("git", ["ls-remote", failedLocator], { stdio: "ignore" }).status === 0) break;
+    await delay(20);
+  }
+  const resolvedFrames = join(root, "tracked-status-resolved.jsonl");
+  const resolvedCandidate = runManagedTui(home, resolvedFrames, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_BACKGROUND_READINESS: "0",
+    PI_FIXTURE_TUI_WAIT_MS: "3000",
+  });
+  assert.equal(resolvedCandidate.status, 0, resolvedCandidate.stderr || resolvedCandidate.stdout);
+  assert.ok(readFrames(resolvedFrames).some((frame) => /3 Tracked Branch updates/i.test(releaseStatusLine(frame))));
+  const resolvedStatus = runPorcuPiProcess(home, ["status"]);
+  assert.match(resolvedStatus.stdout, /Tracked Branch updates: 3/);
+  assert.match(resolvedStatus.stdout, new RegExp(failedCandidate));
+
+  const sourceCachePath = join(managedRoot, "state", "source-updates.json");
+  const cachedSourceStatus = readFileSync(sourceCachePath);
+  const sideEffectFreeStatus = runPorcuPiProcess(home, ["status"]);
+  assert.equal(sideEffectFreeStatus.status, 0, sideEffectFreeStatus.stderr || sideEffectFreeStatus.stdout);
+  assert.deepEqual(readFileSync(sourceCachePath), cachedSourceStatus);
+  const verified = runPorcuPiProcess(home, ["verify"]);
+  assert.equal(verified.status, 0, verified.stderr || verified.stdout);
+  const malformedSourceCache = { ...JSON.parse(cachedSourceStatus), unowned: true };
+  writeFileSync(sourceCachePath, `${JSON.stringify(malformedSourceCache, null, 2)}\n`);
+  const malformedVerified = runPorcuPiProcess(home, ["verify"]);
+  assert.notEqual(malformedVerified.status, 0);
+  assert.match(`${malformedVerified.stdout}${malformedVerified.stderr}`, /Malformed PorcuPi Tracked Branch availability cache/);
+  writeFileSync(sourceCachePath, cachedSourceStatus);
+  const releaseRequests = readFileSync(server.requestLog, "utf8");
+  const offlineFrames = join(root, "tracked-status-offline.jsonl");
+  const offline = runManagedTui(home, offlineFrames, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_BACKGROUND_READINESS: "0",
+  }, ["--offline"]);
+  assert.equal(offline.status, 0, offline.stderr || offline.stdout);
+  assert.ok(readFrames(offlineFrames).every((frame) => /3 Tracked Branch updates/i.test(releaseStatusLine(frame))));
+  assert.deepEqual(readFileSync(sourceCachePath), cachedSourceStatus);
+  assert.equal(readFileSync(server.requestLog, "utf8"), releaseRequests);
+  assert.deepEqual(readFileSync(join(managedRoot, "state", "activation.json")), aggregateActivation);
+  assert.deepEqual(readFileSync(join(managedRoot, "state", "selections.json")), aggregateSelections);
+});
+
+test("Managed Pi bounds Tracked Branch startup checks to three workers and five seconds", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+
+  const repository = createApplicablePatchRepository(join(root, "bounded-source"), [[
+    "patches/bounded.patch",
+    textPatch("series.txt", "base", "bounded"),
+  ]]);
+  const locator = await serveGitRepository(root, repository);
+  const added = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+  assert.equal(added.status, 0, added.stderr || added.stdout);
+
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
+  const template = selections.sources[0];
+  selections.sources = ["one", "two", "three", "four"].map((name) => {
+    const host = `${name}.example.test`;
+    return {
+      ...structuredClone(template),
+      locator: `${host}/owner/resources`,
+      packageSource: `git:https://${host}/owner/resources.git@${template.commit}`,
+    };
+  });
+  writeFileSync(selectionsPath, `${JSON.stringify(selections, null, 2)}\n`);
+
+  const wrapperRoot = join(root, "bounded-git");
+  mkdirSync(wrapperRoot);
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const startLog = join(root, "bounded-git-starts.log");
+  const wrapper = join(wrapperRoot, "git");
+  writeFileSync(wrapper, `#!/bin/sh
+case " $* " in
+  *" clone "*)
+    python3 -c 'import time; print(int(time.time() * 1000))' >> "$PORCUPI_TEST_GIT_START_LOG"
+    case "$*" in
+      *"four.example.test"*) exit 1 ;;
+      *) sleep 30 ;;
+    esac
+    ;;
+esac
+exec ${JSON.stringify(realGit)} "$@"
+`);
+  chmodSync(wrapper, 0o755);
+
+  const server = serveReleaseStatus(root);
+  const framesPath = join(root, "bounded-source-frames.jsonl");
+  const startedAt = Date.now();
+  const checked = runManagedTui(home, framesPath, {
+    PATH: `${wrapperRoot}:${process.env.PATH}`,
+    PORCUPI_TEST_GIT_START_LOG: startLog,
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_BACKGROUND_READINESS: "0",
+    PI_FIXTURE_TUI_WAIT_MS: "6500",
+  });
+  const elapsed = Date.now() - startedAt;
+  assert.equal(checked.status, 0, checked.stderr || checked.stdout);
+
+  const starts = readFileSync(startLog, "utf8").trim().split("\n").map(Number).sort((left, right) => left - right);
+  assert.equal(starts.length, 4, `expected one bounded worker per Tracked Branch: ${starts}`);
+  assert.ok(starts[2] - starts[0] < 1_000, `the first three workers did not start concurrently: ${starts}`);
+  assert.ok(starts[3] - starts[0] >= 4_000, `a fourth worker started before a five-second slot was released: ${starts}`);
+  assert.ok(starts[3] - starts[0] < 7_000, `a timed-out worker did not release its slot near five seconds: ${starts}`);
+  assert.ok(elapsed < 10_000, `bounded startup work exceeded the fixture deadline: ${elapsed}ms`);
+  const rows = readFrames(framesPath).map(releaseStatusLine);
+  assert.ok(rows.some((row) => /checking.*Tracked Branches/i.test(row)), JSON.stringify(rows));
+  assert.ok(rows.some((row) => /current/i.test(row) && !/Tracked Branches/i.test(row)), JSON.stringify(rows));
+});
+
+test("Tracked Branch cache identity includes the installed release and exact Pi Base", async () => {
+  const root = temporaryRoot();
+  const oldHome = join(root, "old-home");
+  const targetHome = join(root, "target-home");
+  mkdirSync(oldHome);
+  mkdirSync(targetHome);
+
+  const oldBase = createPiBase(join(root, "old-base"));
+  mkdirSync(join(root, "old-release"));
+  const oldRelease = createReleaseFixture(join(root, "old-release"), oldBase);
+  assert.equal(runInstaller(oldRelease, oldHome).status, 0);
+
+  const targetBaseRoot = join(root, "target-base");
+  mkdirSync(targetBaseRoot);
+  const targetBase = createPiBase(targetBaseRoot, { version: "0.82.0" });
+  git(targetBase.source, "tag", "v0.82.0");
+  mkdirSync(join(root, "target-release"));
+  const targetRelease = createReleaseFixture(join(root, "target-release"), targetBase, "0.82.0");
+  const targetLockPath = join(targetRelease, "upstream", "pi-base.json");
+  const targetLock = JSON.parse(readFileSync(targetLockPath, "utf8"));
+  targetLock.tag = "v0.82.0";
+  writeFileSync(targetLockPath, `${JSON.stringify(targetLock, null, 2)}\n`);
+  setReleaseFixtureVersion(targetRelease, "0.3.0");
+  const targetRecordPath = join(targetRelease, "release", "v0.3.0.json");
+  const targetRecord = JSON.parse(readFileSync(targetRecordPath, "utf8"));
+  targetRecord.piBase = { repository: targetLock.repository, tag: targetLock.tag, commit: targetLock.commit };
+  writeFileSync(targetRecordPath, `${JSON.stringify(targetRecord, null, 2)}\n`);
+  assert.equal(runInstaller(targetRelease, targetHome).status, 0);
+
+  const repository = createApplicablePatchRepository(join(root, "release-bound-source"), [[
+    "patches/release-bound.patch",
+    textPatch("series.txt", "base", "release-bound-one"),
+  ]]);
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    supportedPiBaseCommits: [oldBase.commit, targetBase.commit],
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Support both installed Pi Bases");
+  const acceptedCommit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+
+  for (const home of [oldHome, targetHome]) {
+    const added = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+    assert.equal(added.status, 0, added.stderr || added.stdout);
+  }
+
+  writeFileSync(join(repository.source, "patches", "release-bound.patch"), textPatch("series.txt", "base", "release-bound-two"));
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    supportedPiBaseCommits: [oldBase.commit],
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Publish candidate for only the old Pi Base");
+  const candidateCommit = publishRepositoryHead(root, repository);
+
+  const server = serveReleaseStatus(root);
+  const oldFrames = join(root, "old-release-source-status.jsonl");
+  const checked = runManagedTui(oldHome, oldFrames, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_BACKGROUND_READINESS: "0",
+    PI_FIXTURE_TUI_WAIT_MS: "2500",
+  });
+  assert.equal(checked.status, 0, checked.stderr || checked.stdout);
+  const oldStatus = runPorcuPiProcess(oldHome, ["status"]);
+  assert.match(oldStatus.stdout, /Tracked Branch updates: 1/);
+  assert.match(oldStatus.stdout, new RegExp(candidateCommit));
+
+  rebindActiveReceipt(oldHome, (receipt) => {
+    receipt.porcupiVersion = "0.1.0";
+  });
+  const rolledBackStatus = runPorcuPiProcess(oldHome, ["status"]);
+  assert.equal(rolledBackStatus.status, 0, rolledBackStatus.stderr || rolledBackStatus.stdout);
+  assert.match(rolledBackStatus.stdout, /Installed release: 0\.2\.0/);
+  assert.match(rolledBackStatus.stdout, /Tracked Branch updates: 1/);
+  assert.match(rolledBackStatus.stdout, new RegExp(candidateCommit));
+
+  const oldCachePath = join(dataRoot(oldHome), "state", "source-updates.json");
+  const targetCachePath = join(dataRoot(targetHome), "state", "source-updates.json");
+  writeFileSync(targetCachePath, readFileSync(oldCachePath));
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(dataRoot(oldHome), "state", "selections.json"), "utf8")),
+    JSON.parse(readFileSync(join(dataRoot(targetHome), "state", "selections.json"), "utf8")),
+    "the exact Selection Intent must be unchanged across the installed release/Pi Base boundary",
+  );
+  assert.equal(JSON.parse(readFileSync(join(dataRoot(targetHome), "state", "selections.json"), "utf8")).sources[0].commit, acceptedCommit);
+
+  const targetStatus = runPorcuPiProcess(targetHome, ["status"], { PI_OFFLINE: "1" });
+  assert.equal(targetStatus.status, 0, targetStatus.stderr || targetStatus.stdout);
+  assert.match(targetStatus.stdout, /Installed release: 0\.3\.0/);
+  assert.match(targetStatus.stdout, /Installed Pi Base: v0\.82\.0/);
+  assert.match(targetStatus.stdout, /Tracked Branch updates: 0/);
+  assert.doesNotMatch(targetStatus.stdout, new RegExp(candidateCommit));
+});
+
+test("overlapping installed Tracked Branch checks preserve independent newest evidence", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+
+  const repositories = [];
+  for (const name of ["first", "second"]) {
+    const sourceRoot = join(root, `${name}-coordinator-source`);
+    const repository = createApplicablePatchRepository(sourceRoot, [[
+      `patches/${name}.patch`,
+      textPatch("series.txt", "base", name),
+    ]]);
+    const locator = await serveGitRepository(sourceRoot, repository);
+    const added = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+    assert.equal(added.status, 0, added.stderr || added.stdout);
+    repositories.push({ name, sourceRoot, repository, locator });
+  }
+  const [firstRepository, secondRepository] = repositories;
+  const publishPatch = (record, value, message) => {
+    writeFileSync(
+      join(record.repository.source, "patches", `${record.name}.patch`),
+      textPatch("series.txt", "base", value),
+    );
+    git(record.repository.source, "add", ".");
+    git(record.repository.source, "commit", "-m", message);
+    return publishRepositoryHead(record.sourceRoot, record.repository);
+  };
+  const firstCandidate = publishPatch(firstRepository, "first-candidate", "Publish first candidate");
+  const secondCandidate = publishPatch(secondRepository, "second-candidate", "Publish second candidate");
+
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const selectiveRoot = join(root, "selective-git");
+  mkdirSync(selectiveRoot);
+  const selectiveGit = join(selectiveRoot, "git");
+  writeFileSync(selectiveGit, `#!/bin/sh
+case " $* " in
+  *" clone "*"$PORCUPI_TEST_GIT_FAIL_MATCH"*)
+    python3 -c 'import os,time; time.sleep(float(os.environ.get("PORCUPI_TEST_GIT_FAIL_DELAY", "0")))'
+    exit 1
+    ;;
+esac
+exec ${JSON.stringify(realGit)} "$@"
+`);
+  chmodSync(selectiveGit, 0o755);
+  const selectiveEnvironment = (failedLocator, delaySeconds = "0") => ({
+    PATH: `${selectiveRoot}:${process.env.PATH}`,
+    PORCUPI_TEST_GIT_FAIL_MATCH: failedLocator,
+    PORCUPI_TEST_GIT_FAIL_DELAY: delaySeconds,
+  });
+
+  const firstCheck = startTrackedBranchCheck(home, selectiveEnvironment(secondRepository.locator, "0.5"));
+  await delay(100);
+  const secondCheck = startTrackedBranchCheck(home, selectiveEnvironment(firstRepository.locator, "0.5"));
+  const [firstResult, secondResult] = await Promise.all([waitForChild(firstCheck), waitForChild(secondCheck)]);
+  assert.equal(firstResult.code, 0, firstResult.stderr);
+  assert.equal(secondResult.code, 0, secondResult.stderr);
+
+  let status = runPorcuPiProcess(home, ["status"]);
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  assert.match(status.stdout, /Tracked Branch updates: 2/);
+  assert.match(status.stdout, new RegExp(firstCandidate));
+  assert.match(status.stdout, new RegExp(secondCandidate));
+
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
+  const changedSelections = structuredClone(selections);
+  changedSelections.sources.push({
+    ...structuredClone(changedSelections.sources[1]),
+    locator: "failed.example.test/owner/source",
+    packageSource: `git:https://failed.example.test/owner/source.git@${changedSelections.sources[1].commit}`,
+  });
+  writeFileSync(selectionsPath, `${JSON.stringify(changedSelections, null, 2)}\n`);
+  const failedInputCheck = startTrackedBranchCheck(home, selectiveEnvironment(""));
+  const failedInputResult = await waitForChild(failedInputCheck);
+  assert.equal(failedInputResult.code, 0, failedInputResult.stderr);
+  writeFileSync(selectionsPath, `${JSON.stringify(selections, null, 2)}\n`);
+  status = runPorcuPiProcess(home, ["status"]);
+  assert.match(status.stdout, /Tracked Branch updates: 2/);
+  assert.match(status.stdout, new RegExp(firstCandidate));
+  assert.match(status.stdout, new RegExp(secondCandidate));
+
+  const delayedRoot = join(root, "delayed-git");
+  mkdirSync(delayedRoot);
+  const delayedGit = join(delayedRoot, "git");
+  writeFileSync(delayedGit, `#!/bin/sh
+case " $* " in
+  *" clone "*"$PORCUPI_TEST_GIT_DELAY_MATCH"*)
+    if mkdir "$PORCUPI_TEST_GIT_DELAY_MARKER.claim" 2>/dev/null; then
+      ${JSON.stringify(realGit)} "$@"
+      result=$?
+      if [ "$result" -eq 0 ]; then
+        : > "$PORCUPI_TEST_GIT_DELAY_MARKER"
+        python3 -c 'import os,time; time.sleep(float(os.environ["PORCUPI_TEST_GIT_DELAY_SECONDS"]))'
+      fi
+      exit "$result"
+    fi
+    ;;
+  *" clone "*"$PORCUPI_TEST_GIT_FAIL_MATCH"*) exit 1 ;;
+esac
+exec ${JSON.stringify(realGit)} "$@"
+`);
+  chmodSync(delayedGit, 0o755);
+  const delayedEnvironment = (marker) => ({
+    PATH: `${delayedRoot}:${process.env.PATH}`,
+    PORCUPI_TEST_GIT_DELAY_MATCH: firstRepository.locator,
+    PORCUPI_TEST_GIT_DELAY_MARKER: marker,
+    PORCUPI_TEST_GIT_DELAY_SECONDS: "0.7",
+    PORCUPI_TEST_GIT_FAIL_MATCH: secondRepository.locator,
+  });
+
+  const staleCandidate = publishPatch(firstRepository, "first-stale", "Publish stale first candidate");
+  const staleMarker = join(root, "stale-candidate-cloned");
+  const staleCheck = startTrackedBranchCheck(home, delayedEnvironment(staleMarker));
+  await waitForFile(staleMarker);
+  const newestCandidate = publishPatch(firstRepository, "first-newest", "Publish newest first candidate");
+  const newestCheck = startTrackedBranchCheck(home, selectiveEnvironment(secondRepository.locator));
+  const newestResult = await waitForChild(newestCheck);
+  const staleResult = await waitForChild(staleCheck);
+  assert.equal(newestResult.code, 0, newestResult.stderr);
+  assert.equal(staleResult.code, 0, staleResult.stderr);
+
+  status = runPorcuPiProcess(home, ["status"]);
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  assert.match(status.stdout, new RegExp(newestCandidate));
+  assert.doesNotMatch(status.stdout, new RegExp(staleCandidate));
+
+  const removedCandidate = publishPatch(firstRepository, "first-removed-stale", "Publish candidate that will become irrelevant");
+  const removedMarker = join(root, "removed-candidate-cloned");
+  const removedStaleCheck = startTrackedBranchCheck(home, delayedEnvironment(removedMarker));
+  await waitForFile(removedMarker);
+  publishPatch(firstRepository, "first", "Restore accepted selected content");
+  const removingCheck = startTrackedBranchCheck(home, selectiveEnvironment(secondRepository.locator));
+  const removingResult = await waitForChild(removingCheck);
+  const removedStaleResult = await waitForChild(removedStaleCheck);
+  assert.equal(removingResult.code, 0, removingResult.stderr);
+  assert.equal(removedStaleResult.code, 0, removedStaleResult.stderr);
+
+  status = runPorcuPiProcess(home, ["status"]);
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  assert.match(status.stdout, /Tracked Branch updates: 1/);
+  assert.match(status.stdout, new RegExp(secondCandidate));
+  assert.doesNotMatch(status.stdout, new RegExp(removedCandidate));
+  assert.doesNotMatch(status.stdout, new RegExp(newestCandidate));
+});
+
+test("uninstall excludes late Tracked Branch cache publication through its guided lifetime", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+
+  const sourceRoot = join(root, "uninstall-source");
+  const repository = createApplicablePatchRepository(sourceRoot, [[
+    "patches/uninstall.patch",
+    textPatch("series.txt", "base", "uninstall-one"),
+  ]]);
+  const locator = await serveGitRepository(sourceRoot, repository);
+  const added = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+  assert.equal(added.status, 0, added.stderr || added.stdout);
+  writeFileSync(join(repository.source, "patches", "uninstall.patch"), textPatch("series.txt", "base", "uninstall-two"));
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Publish candidate during uninstall");
+  publishRepositoryHead(sourceRoot, repository);
+
+  const checkStatus = join(root, "late-check-status.txt");
+  const beforeInput = join(root, "check-during-uninstall.sh");
+  writeFileSync(beforeInput, `#!/bin/sh
+${JSON.stringify(join(home, ".local", "bin", "porcupi"))} --porcupi-background-tracked-branches
+printf '%s\\n' "$?" > ${JSON.stringify(checkStatus)}
+`);
+  chmodSync(beforeInput, 0o755);
+
+  const removed = runPorcuPi(home, ["uninstall"], "0d0d0d", {
+    PTY_BEFORE_INPUT_COMMAND: beforeInput,
+  });
+  assert.equal(removed.status, 0, removed.stderr || removed.stdout);
+  assert.notEqual(readFileSync(checkStatus, "utf8").trim(), "0", "a late cache check entered guided uninstall");
+  assert.equal(existsSync(dataRoot(home)), false);
+});
+
 test("Managed Pi caches exact-input background Upgrade Readiness through the target public process", async () => {
   const root = temporaryRoot();
   const home = join(root, "home");
@@ -1112,7 +1694,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "500",
+    PI_FIXTURE_TUI_WAIT_MS: "2000",
   });
   assert.equal(current.status, 0, current.stderr || current.stdout);
   assert.ok(readFrames(currentFramesPath).some((frame) => /current/i.test(releaseStatusLine(frame))));
@@ -1129,7 +1711,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_TEST_READINESS_PACKAGE: unsupportedArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "1000",
+    PI_FIXTURE_TUI_WAIT_MS: "3000",
   });
   assert.equal(unsupported.status, 0, unsupported.stderr || unsupported.stdout);
   const unsupportedRows = readFrames(unsupportedFramesPath).map(releaseStatusLine);
@@ -1167,7 +1749,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "500",
+    PI_FIXTURE_TUI_WAIT_MS: "3000",
   });
   assert.equal(contended.status, 0, contended.stderr || contended.stdout);
   assert.ok(readFrames(contendedFramesPath).some((frame) => /unavailable/i.test(releaseStatusLine(frame))));
@@ -1181,7 +1763,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
     PI_FIXTURE_BUILD_PRIORITY_LOG: buildPriorityLog,
-    PI_FIXTURE_TUI_WAIT_MS: "3000",
+    PI_FIXTURE_TUI_WAIT_MS: "6000",
   });
   assert.equal(first.status, 0, first.stderr || first.stdout);
   const firstRows = readFrames(firstFramesPath).map(releaseStatusLine);
@@ -1262,7 +1844,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
     PORCUPI_BACKGROUND_READINESS: "0",
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "500",
+    PI_FIXTURE_TUI_WAIT_MS: "2000",
   });
   assert.equal(disabled.status, 0, disabled.stderr || disabled.stdout);
   const disabledRows = readFrames(disabledFramesPath).map(releaseStatusLine);
@@ -1277,7 +1859,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "3000",
+    PI_FIXTURE_TUI_WAIT_MS: "6000",
   });
   assert.equal(refreshed.status, 0, refreshed.stderr || refreshed.stdout);
   assert.ok(readFrames(refreshedFramesPath).some((frame) => /PorcuPi 0\.3\.0.*ready/i.test(releaseStatusLine(frame))));
@@ -1310,7 +1892,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "3000",
+    PI_FIXTURE_TUI_WAIT_MS: "6000",
   });
   assert.equal(changedPiBase.status, 0, changedPiBase.stderr || changedPiBase.stdout);
   assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\nbuild\n", "changed target Pi Base evidence must invalidate readiness");
@@ -1323,7 +1905,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "3000",
+    PI_FIXTURE_TUI_WAIT_MS: "6000",
   });
   assert.equal(changedChecker.status, 0, changedChecker.stderr || changedChecker.stdout);
   assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\nbuild\nbuild\n", "changed checker contract evidence must invalidate readiness");
@@ -1370,7 +1952,7 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_TEST_READINESS_PACKAGE: failingArtifact,
     PI_FIXTURE_BUILD_LOG: buildLog,
-    PI_FIXTURE_TUI_WAIT_MS: "4000",
+    PI_FIXTURE_TUI_WAIT_MS: "8000",
   });
   assert.equal(failed.status, 0, failed.stderr || failed.stdout);
   const failedRows = readFrames(failedFramesPath).map(releaseStatusLine);

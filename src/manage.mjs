@@ -459,6 +459,25 @@ function resolveTrackedCandidate(previous, active) {
   }
 }
 
+/** Read-only Tracked Branch candidate detection shared by manage and startup status. */
+export function inspectTrackedSourceAvailability(previous, active) {
+  const candidate = resolveTrackedCandidate(previous, active);
+  if (!candidate) return null;
+  try {
+    const changed = candidate.reviews.filter((review) => review.changed);
+    if (changed.length === 0) return null;
+    return {
+      trackedBranch: previous.trackedBranch,
+      acceptedCommit: previous.commit,
+      candidateCommit: candidate.candidateSource.commit,
+      changedArtifactCount: changed.length,
+      changedPatchSeriesCount: changed.filter((review) => isPatchSeries(review.selected)).length,
+    };
+  } finally {
+    disposeTrackedCandidate(candidate);
+  }
+}
+
 function resolveTrackedCandidates(selections, active) {
   return selections.sources.filter((source) => source.trackedBranch).flatMap((previous) => {
     try {

@@ -255,7 +255,7 @@ export async function withSourceUpdateCachePublicationLock(paths, callback) {
   }
   if (!held) fail("Timed out coordinating PorcuPi Tracked Branch cache publication");
   try {
-    return callback();
+    return await callback();
   } finally {
     const current = readJson(held.lock, "PorcuPi Tracked Branch cache publication lock");
     if (canonicalJson(current) !== canonicalJson(held.owner)) fail(`PorcuPi Tracked Branch cache publication lock changed while held: ${held.lock}`);

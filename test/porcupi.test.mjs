@@ -1455,6 +1455,30 @@ if (worker) {
   assert.match(status.stdout, new RegExp(secondCandidate));
 });
 
+test("Tracked Branch cache publication lock covers asynchronous callback lifetime", async () => {
+  const root = temporaryRoot();
+  const paths = { root: join(root, "managed") };
+  const lockPath = `${paths.root}.source-update-cache-lock`;
+  const { withSourceUpdateCachePublicationLock } = await import(pathToFileURL(join(repositoryRoot, "src", "source-update-status.mjs")).href);
+  let releaseCallback;
+  const callbackMayFinish = new Promise((resolvePromise) => { releaseCallback = resolvePromise; });
+  let callbackStarted;
+  const callbackDidStart = new Promise((resolvePromise) => { callbackStarted = resolvePromise; });
+
+  const operation = withSourceUpdateCachePublicationLock(paths, async () => {
+    callbackStarted();
+    await callbackMayFinish;
+    assert.equal(existsSync(lockPath), true, "publication lock was released before its asynchronous callback completed");
+    return "completed";
+  });
+  await callbackDidStart;
+  await delay(0);
+  assert.equal(existsSync(lockPath), true, "publication lock must remain held while its callback is pending");
+  releaseCallback();
+  assert.equal(await operation, "completed");
+  assert.equal(existsSync(lockPath), false, "publication lock must be removed after its callback completes");
+});
+
 test("Managed Pi caches exact-input background Upgrade Readiness through the target public process", async () => {
   const root = temporaryRoot();
   const home = join(root, "home");

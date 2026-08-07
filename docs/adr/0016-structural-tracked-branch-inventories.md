@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for filtered and coalesced Tracked Branch candidates in issue #51. This completes the candidate-identity part deferred by ADR 0015; background availability and status work remains deferred.
+Accepted for filtered and coalesced Tracked Branch candidates in issue #51. Issue #52 adds independent multi-source transaction coordination in ADR 0017 without changing this fingerprint contract. This completes the candidate-identity part deferred by ADR 0015; background availability and status work remains deferred.
 
 ## Context
 

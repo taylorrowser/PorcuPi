@@ -5175,3 +5175,225 @@ test("re-adding a Source Repository reviews and replaces its commit and complete
   assert.match(lifecycleCalls[3][1], new RegExp(`@${repository.commit}$`));
   assert.deepEqual(lifecycleCalls[4], ["remove", settings.packages[0].source]);
 });
+
+test("multiple Tracked Branch Patch updates remain independently reviewable and apply as one latest snapshot", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+
+  const sourceRootA = join(root, "source-a");
+  const sourceRootB = join(root, "source-b");
+  const serverRootA = join(root, "server-a");
+  const serverRootB = join(root, "server-b");
+  for (const path of [sourceRootA, sourceRootB, serverRootA, serverRootB]) mkdirSync(path);
+  const repositoryA = createApplicablePatchRepository(sourceRootA, [[
+    "patches/source-a.patch",
+    newFilePatch("source-a.txt", "accepted-a"),
+  ]]);
+  const repositoryB = createApplicablePatchRepository(sourceRootB, [[
+    "patches/source-b.patch",
+    newFilePatch("source-b.txt", "accepted-b"),
+  ]]);
+  const locatorA = await serveGitRepository(serverRootA, repositoryA);
+  const locatorB = await serveGitRepository(serverRootB, repositoryB);
+  assert.equal(runPorcuPi(home, ["add", `${locatorA}@main`], "206e6e0d").status, 0);
+  assert.equal(runPorcuPi(home, ["add", `${locatorB}@main`], "206e6e0d").status, 0);
+  const initialApply = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(initialApply.status, 0, initialApply.stderr || initialApply.stdout);
+
+  const managedRoot = dataRoot(home);
+  const selectionsPath = join(managedRoot, "state", "selections.json");
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const accepted = JSON.parse(readFileSync(selectionsPath, "utf8"));
+  const acceptedByLocator = new Map(accepted.sources.map((source) => [source.locator, source.commit]));
+  const activeBefore = readFileSync(activationPath);
+
+  writeFileSync(join(repositoryA.source, "patches", "source-a.patch"), newFilePatch("source-a.txt", "candidate-a"));
+  git(repositoryA.source, "add", ".");
+  git(repositoryA.source, "commit", "-m", "Advance source A");
+  const candidateA = publishRepositoryHead(serverRootA, repositoryA);
+  writeFileSync(join(repositoryB.source, "patches", "source-b.patch"), newFilePatch("source-b.txt", "candidate-b"));
+  git(repositoryB.source, "add", ".");
+  git(repositoryB.source, "commit", "-m", "Advance source B");
+  const candidateB = publishRepositoryHead(serverRootB, repositoryB);
+
+  const orderedLocators = [...acceptedByLocator.keys()].sort();
+  const reviewedLocator = orderedLocators[1];
+  const reviewedCommit = reviewedLocator === accepted.sources.find((source) => source.locator.includes(new URL(locatorA).port)).locator
+    ? candidateA
+    : candidateB;
+  const otherLocator = orderedLocators[0];
+  const cancelled = runPorcuPi(home, ["manage"], "1b", {
+    PTY_WAIT_FOR: "Choose one Source Repository update",
+  });
+  assert.equal(cancelled.status, 0, cancelled.stderr || cancelled.stdout);
+  assert.match(cancelled.stdout, /Source update selection cancelled/);
+  assert.deepEqual(readFileSync(selectionsPath), Buffer.from(`${JSON.stringify(accepted, null, 2)}\n`));
+  assert.deepEqual(readFileSync(activationPath), activeBefore);
+
+  const firstUpdate = runPorcuPi(home, ["manage"], "6a0d6e6e0d", {
+    PTY_WAIT_FOR: "Choose one Source Repository update",
+  });
+  assert.equal(firstUpdate.status, 0, firstUpdate.stderr || firstUpdate.stdout);
+  assert.match(firstUpdate.stdout, new RegExp(`Accepted Tracked Branch candidate ${reviewedCommit}`));
+  let selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
+  assert.equal(selections.sources.find((source) => source.locator === reviewedLocator).commit, reviewedCommit);
+  assert.equal(selections.sources.find((source) => source.locator === otherLocator).commit, acceptedByLocator.get(otherLocator));
+  assert.deepEqual(readFileSync(activationPath), activeBefore);
+
+  const secondUpdate = runPorcuPi(home, ["manage"], "6e6e0d", {
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+  });
+  assert.equal(secondUpdate.status, 0, secondUpdate.stderr || secondUpdate.stdout);
+  selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
+  assert.deepEqual(new Map(selections.sources.map((source) => [source.locator, source.commit])), new Map([
+    [accepted.sources.find((source) => source.locator.includes(new URL(locatorA).port)).locator, candidateA],
+    [accepted.sources.find((source) => source.locator.includes(new URL(locatorB).port)).locator, candidateB],
+  ]));
+  assert.deepEqual(readFileSync(activationPath), activeBefore);
+
+  const latestIntent = readFileSync(selectionsPath);
+  const failedApply = runPorcuPi(home, ["apply"], "0d", {
+    PORCUPI_TEST_FAILURE: "apply-activation-write",
+    PTY_WAIT_FOR: "Apply selected Patches",
+  });
+  assert.notEqual(failedApply.status, 0);
+  assert.deepEqual(readFileSync(selectionsPath), latestIntent);
+  assert.deepEqual(readFileSync(activationPath), activeBefore);
+
+  const applied = runPorcuPi(home, ["apply"], "0d", { PTY_WAIT_FOR: "Apply selected Patches" });
+  assert.equal(applied.status, 0, applied.stderr || applied.stdout);
+  const activation = JSON.parse(readFileSync(activationPath, "utf8"));
+  const payload = join(managedRoot, "compositions", activation.active.compositionId, "payload");
+  assert.equal(readFileSync(join(payload, "source-a.txt"), "utf8"), "candidate-a\n");
+  assert.equal(readFileSync(join(payload, "source-b.txt"), "utf8"), "candidate-b\n");
+});
+
+test("mixed-scope source reconciliation rolls back package and aggregate intent on failure or trust denial", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  const project = join(root, "project");
+  mkdirSync(home);
+  mkdirSync(project);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+
+  const repository = createResourceRepository(root);
+  mkdirSync(join(repository.source, "patches"));
+  writeFileSync(join(repository.source, "patches", "mixed.patch"), newFilePatch("mixed-scope.txt", "accepted"));
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Add mixed-scope Patch");
+  repository.commit = git(repository.source, "rev-parse", "HEAD");
+  const locator = await serveGitRepository(root, repository);
+  const packageLog = join(root, "package.log");
+  const trustLog = join(root, "trust.log");
+  const added = runPorcuPi(home, ["add", `${locator}@main`], "616e206e0d", {
+    PI_FIXTURE_PACKAGE_LOG: packageLog,
+  }, project);
+  assert.equal(added.status, 0, added.stderr || added.stdout);
+
+  const managedRoot = dataRoot(home);
+  const selectionsPath = join(managedRoot, "state", "selections.json");
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const globalSettingsPath = join(home, ".pi", "agent", "settings.json");
+  const projectSettingsPath = join(project, ".pi", "settings.json");
+  const selectionsBefore = readFileSync(selectionsPath);
+  const activationBefore = readFileSync(activationPath);
+  const globalBefore = readFileSync(globalSettingsPath);
+  const projectBefore = readFileSync(projectSettingsPath);
+  const acceptedCommit = JSON.parse(selectionsBefore).sources[0].commit;
+
+  writeFileSync(join(repository.source, "extensions", "fixture.ts"), "export default function candidateFixture() {}\n");
+  writeFileSync(join(repository.source, "prompts", "fixture.md"), "Candidate global prompt.\n");
+  writeFileSync(join(repository.source, "patches", "mixed.patch"), newFilePatch("mixed-scope.txt", "candidate"));
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Advance mixed scopes");
+  const candidateCommit = publishRepositoryHead(root, repository);
+
+  const packageFailure = runPorcuPi(home, ["manage"], "6e6e0d", {
+    PI_FIXTURE_PACKAGE_LOG: packageLog,
+    PI_FIXTURE_PACKAGE_FAIL_SCOPE: "project",
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+  }, project);
+  assert.notEqual(packageFailure.status, 0);
+  assert.match(`${packageFailure.stdout}${packageFailure.stderr}`, /prior project.*checkout.*could not be restored/);
+  assert.deepEqual(readFileSync(globalSettingsPath), globalBefore);
+  assert.deepEqual(readFileSync(projectSettingsPath), projectBefore);
+  assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+
+  const trustDenial = runPorcuPi(home, ["manage"], "6e6e0d", {
+    PI_FIXTURE_PACKAGE_LOG: packageLog,
+    PI_FIXTURE_PROJECT_TRUST: "deny",
+    PI_FIXTURE_PROJECT_TRUST_LOG: trustLog,
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+  }, project);
+  assert.notEqual(trustDenial.status, 0);
+  assert.match(trustDenial.stdout, /Project is not trusted/);
+  assert.match(readFileSync(trustLog, "utf8"), /Pi decided project trust/);
+  assert.deepEqual(readFileSync(globalSettingsPath), globalBefore);
+  assert.deepEqual(readFileSync(projectSettingsPath), projectBefore);
+  assert.deepEqual(readFileSync(selectionsPath), selectionsBefore);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+
+  const accepted = runPorcuPi(home, ["manage"], "6e6e0d", {
+    PI_FIXTURE_PACKAGE_LOG: packageLog,
+    PTY_WAIT_FOR: "1 of 3 — Review Tracked Branch candidate",
+  }, project);
+  assert.equal(accepted.status, 0, accepted.stderr || accepted.stdout);
+  const selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
+  const source = selections.sources[0];
+  assert.equal(source.commit, candidateCommit);
+  assert.notEqual(source.commit, acceptedCommit);
+  assert.deepEqual(source.artifacts.filter((artifact) => artifact.kind !== "PatchSeries").map((artifact) => ({
+    kind: artifact.kind,
+    scope: artifact.scope,
+    ...(artifact.projectRoot ? { projectRoot: artifact.projectRoot } : {}),
+  })), [
+    { kind: "Extension", scope: "project", projectRoot: realpathSync(project) },
+    { kind: "Prompt", scope: "global" },
+    { kind: "Skill", scope: "global" },
+    { kind: "Theme", scope: "global" },
+  ]);
+  assert.match(JSON.parse(readFileSync(globalSettingsPath, "utf8")).packages[0].source, new RegExp(`@${candidateCommit}$`));
+  assert.match(JSON.parse(readFileSync(projectSettingsPath, "utf8")).packages[0].source, new RegExp(`@${candidateCommit}$`));
+  assert.match(accepted.stdout, /Patch Selection Intent is pending `porcupi apply`/);
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+});
+
+test("source update locking contends with the shared lifecycle", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+
+  const child = spawn(join(home, ".local", "bin", "porcupi"), ["manage"], {
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      NODE_ENV: "test",
+      PORCUPI_TEST_HOLD_LOCK_MS: "1500",
+    },
+  });
+  childProcesses.push(child);
+  const lifecycleLock = `${dataRoot(home)}.lifecycle-lock`;
+  for (let attempt = 0; attempt < 50 && !existsSync(lifecycleLock); attempt += 1) await delay(20);
+  assert.equal(existsSync(lifecycleLock), true, "source update lifecycle lock was not acquired");
+
+  const contention = runPorcuPiProcess(home, ["apply"]);
+  assert.notEqual(contention.status, 0);
+  assert.match(`${contention.stdout}${contention.stderr}`, /lifecycle operation is already in progress: manage/);
+
+  await new Promise((resolvePromise, rejectPromise) => {
+    child.once("error", rejectPromise);
+    child.once("exit", resolvePromise);
+  });
+});

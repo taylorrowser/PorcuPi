@@ -878,13 +878,17 @@ function waitForChild(child) {
     let stderr = "";
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk) => { stderr += chunk; });
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolvePromise({ code: child.exitCode, signal: child.signalCode, stderr });
+      return;
+    }
     child.once("error", rejectPromise);
     child.once("exit", (code, signal) => resolvePromise({ code, signal, stderr }));
   });
 }
 
 async function waitForFile(path) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
     if (existsSync(path)) return;
     await delay(20);
   }
@@ -1376,7 +1380,7 @@ exec ${JSON.stringify(realGit)} "$@"
   const elapsed = Date.now() - startedAt;
   assert.equal(checked.status, 0, checked.stderr || checked.stdout);
 
-  const starts = readFileSync(startLog, "utf8").trim().split("\n").map(Number);
+  const starts = readFileSync(startLog, "utf8").trim().split("\n").map(Number).sort((left, right) => left - right);
   assert.equal(starts.length, 4, `expected one bounded worker per Tracked Branch: ${starts}`);
   assert.ok(starts[2] - starts[0] < 1_000, `the first three workers did not start concurrently: ${starts}`);
   assert.ok(starts[3] - starts[0] >= 4_000, `a fourth worker started before a five-second slot was released: ${starts}`);

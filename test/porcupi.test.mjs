@@ -21,7 +21,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import test, { after } from "node:test";
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -838,12 +838,13 @@ http.server.ThreadingHTTPServer(("127.0.0.1", ${port}), Handler).serve_forever()
 }
 
 function runManagedTui(home, frameLog, extraEnvironment = {}, args = []) {
+  const fixtureWait = Number(extraEnvironment.PI_FIXTURE_TUI_WAIT_MS || 250);
   return spawnSync(
     "python3",
     [join(repositoryRoot, "test", "support", "pty-driver.py"), "", join(home, ".local", "bin", "porcupi"), ...args],
     {
       encoding: "utf8",
-      timeout: 10_000,
+      timeout: Math.max(10_000, fixtureWait + 5_000),
       env: {
         ...process.env,
         HOME: home,
@@ -855,6 +856,39 @@ function runManagedTui(home, frameLog, extraEnvironment = {}, args = []) {
       },
     },
   );
+}
+
+function startTrackedBranchCheck(home, extraEnvironment = {}) {
+  const child = spawn(join(home, ".local", "bin", "porcupi"), ["--porcupi-background-tracked-branches"], {
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      NODE_ENV: "test",
+      ...extraEnvironment,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  childProcesses.push(child);
+  return child;
+}
+
+function waitForChild(child) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", rejectPromise);
+    child.once("exit", (code, signal) => resolvePromise({ code, signal, stderr }));
+  });
+}
+
+async function waitForFile(path) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (existsSync(path)) return;
+    await delay(20);
+  }
+  throw new Error(`Timed out waiting for fixture file: ${path}`);
 }
 
 function readFrames(path) {
@@ -1281,6 +1315,78 @@ test("Managed Pi surfaces relevant Tracked Branch updates without adopting them"
   assert.deepEqual(readFileSync(join(managedRoot, "state", "selections.json")), aggregateSelections);
 });
 
+test("Managed Pi bounds Tracked Branch startup checks to three workers and five seconds", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
+
+  const repository = createApplicablePatchRepository(join(root, "bounded-source"), [[
+    "patches/bounded.patch",
+    textPatch("series.txt", "base", "bounded"),
+  ]]);
+  const locator = await serveGitRepository(root, repository);
+  const added = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+  assert.equal(added.status, 0, added.stderr || added.stdout);
+
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
+  const template = selections.sources[0];
+  selections.sources = ["one", "two", "three", "four"].map((name) => {
+    const host = `${name}.example.test`;
+    return {
+      ...structuredClone(template),
+      locator: `${host}/owner/resources`,
+      packageSource: `git:https://${host}/owner/resources.git@${template.commit}`,
+    };
+  });
+  writeFileSync(selectionsPath, `${JSON.stringify(selections, null, 2)}\n`);
+
+  const wrapperRoot = join(root, "bounded-git");
+  mkdirSync(wrapperRoot);
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const startLog = join(root, "bounded-git-starts.log");
+  const wrapper = join(wrapperRoot, "git");
+  writeFileSync(wrapper, `#!/bin/sh
+case " $* " in
+  *" clone "*)
+    python3 -c 'import time; print(int(time.time() * 1000))' >> "$PORCUPI_TEST_GIT_START_LOG"
+    case "$*" in
+      *"four.example.test"*) exit 1 ;;
+      *) sleep 30 ;;
+    esac
+    ;;
+esac
+exec ${JSON.stringify(realGit)} "$@"
+`);
+  chmodSync(wrapper, 0o755);
+
+  const server = serveReleaseStatus(root);
+  const framesPath = join(root, "bounded-source-frames.jsonl");
+  const startedAt = Date.now();
+  const checked = runManagedTui(home, framesPath, {
+    PATH: `${wrapperRoot}:${process.env.PATH}`,
+    PORCUPI_TEST_GIT_START_LOG: startLog,
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_BACKGROUND_READINESS: "0",
+    PI_FIXTURE_TUI_WAIT_MS: "6500",
+  });
+  const elapsed = Date.now() - startedAt;
+  assert.equal(checked.status, 0, checked.stderr || checked.stdout);
+
+  const starts = readFileSync(startLog, "utf8").trim().split("\n").map(Number);
+  assert.equal(starts.length, 4, `expected one bounded worker per Tracked Branch: ${starts}`);
+  assert.ok(starts[2] - starts[0] < 1_000, `the first three workers did not start concurrently: ${starts}`);
+  assert.ok(starts[3] - starts[0] >= 4_000, `a fourth worker started before a five-second slot was released: ${starts}`);
+  assert.ok(starts[3] - starts[0] < 7_000, `a timed-out worker did not release its slot near five seconds: ${starts}`);
+  assert.ok(elapsed < 10_000, `bounded startup work exceeded the fixture deadline: ${elapsed}ms`);
+  const rows = readFrames(framesPath).map(releaseStatusLine);
+  assert.ok(rows.some((row) => /checking.*Tracked Branches/i.test(row)), JSON.stringify(rows));
+  assert.ok(rows.some((row) => /current/i.test(row) && !/Tracked Branches/i.test(row)), JSON.stringify(rows));
+});
+
 test("Tracked Branch cache identity includes the installed release and exact Pi Base", async () => {
   const root = temporaryRoot();
   const oldHome = join(root, "old-home");
@@ -1376,7 +1482,7 @@ test("Tracked Branch cache identity includes the installed release and exact Pi 
   assert.doesNotMatch(targetStatus.stdout, new RegExp(candidateCommit));
 });
 
-test("overlapping Tracked Branch coordinators preserve independent newest evidence with lexical locators", async () => {
+test("overlapping installed Tracked Branch checks preserve independent newest evidence", async () => {
   const root = temporaryRoot();
   const home = join(root, "home");
   mkdirSync(home);
@@ -1384,6 +1490,7 @@ test("overlapping Tracked Branch coordinators preserve independent newest eviden
   const release = createReleaseFixture(root, base);
   assert.equal(runInstaller(release, home).status, 0);
 
+  const repositories = [];
   for (const name of ["first", "second"]) {
     const sourceRoot = join(root, `${name}-coordinator-source`);
     const repository = createApplicablePatchRepository(sourceRoot, [[
@@ -1393,79 +1500,47 @@ test("overlapping Tracked Branch coordinators preserve independent newest eviden
     const locator = await serveGitRepository(sourceRoot, repository);
     const added = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
     assert.equal(added.status, 0, added.stderr || added.stdout);
+    repositories.push({ name, sourceRoot, repository, locator });
   }
-
-  const selectionsPath = join(dataRoot(home), "state", "selections.json");
-  const selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
-  assert.equal(selections.sources.length, 2);
-  const [first, second] = selections.sources;
-  first.locator = "example.com/owner/Z";
-  first.packageSource = `git:https://example.com/owner/Z.git@${first.commit}`;
-  second.locator = "example.com/owner/a";
-  second.packageSource = `git:https://example.com/owner/a.git@${second.commit}`;
-  writeFileSync(selectionsPath, `${JSON.stringify(selections, null, 2)}\n`);
-  const firstCandidate = "e".repeat(40);
-  const secondCandidate = "f".repeat(40);
-  const harness = join(root, "source-coordinator-harness.mjs");
-  writeFileSync(harness, `import { setTimeout as delay } from "node:timers/promises";
-const worker = process.argv[2] === "--porcupi-background-tracked-branch";
-if (worker) {
-  const locator = process.argv[3];
-  const result = JSON.parse(process.env.PORCUPI_TEST_SOURCE_WORKERS)[locator];
-  await delay(result.delay);
-  if (result.outcome === "failed") process.exit(23);
-  const output = result.outcome === "none"
-    ? { outcome: "none", locator }
-    : { outcome: "candidate", locator, ...result.candidate };
-  process.stdout.write(JSON.stringify(output) + "\\n");
-} else {
-  const { checkTrackedBranchAvailability } = await import(${JSON.stringify(pathToFileURL(join(repositoryRoot, "src", "source-update-status.mjs")).href)});
-  await checkTrackedBranchAvailability();
-}
-`);
-  const candidate = (source, candidateCommit) => ({
-    trackedBranch: source.trackedBranch,
-    acceptedCommit: source.commit,
-    candidateCommit,
-    changedArtifactCount: 1,
-    changedPatchSeriesCount: 1,
-  });
-  const environment = (workers) => ({
-    ...process.env,
-    HOME: home,
-    XDG_DATA_HOME: join(home, ".local", "share"),
-    NODE_ENV: "test",
-    PORCUPI_TEST_SOURCE_WORKERS: JSON.stringify(workers),
-  });
-  const startCoordinator = (workers) => {
-    const child = spawn(process.execPath, [harness], {
-      env: environment(workers),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    childProcesses.push(child);
-    return child;
+  const [firstRepository, secondRepository] = repositories;
+  const publishPatch = (record, value, message) => {
+    writeFileSync(
+      join(record.repository.source, "patches", `${record.name}.patch`),
+      textPatch("series.txt", "base", value),
+    );
+    git(record.repository.source, "add", ".");
+    git(record.repository.source, "commit", "-m", message);
+    return publishRepositoryHead(record.sourceRoot, record.repository);
   };
-  const wait = (child) => new Promise((resolvePromise, rejectPromise) => {
-    let stderr = "";
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.once("error", rejectPromise);
-    child.once("exit", (code, signal) => {
-      if (code === 0 && !signal) resolvePromise();
-      else rejectPromise(new Error(`coordinator failed (${code ?? signal}): ${stderr}`));
-    });
+  const firstCandidate = publishPatch(firstRepository, "first-candidate", "Publish first candidate");
+  const secondCandidate = publishPatch(secondRepository, "second-candidate", "Publish second candidate");
+
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const selectiveRoot = join(root, "selective-git");
+  mkdirSync(selectiveRoot);
+  const selectiveGit = join(selectiveRoot, "git");
+  writeFileSync(selectiveGit, `#!/bin/sh
+case " $* " in
+  *" clone "*"$PORCUPI_TEST_GIT_FAIL_MATCH"*)
+    python3 -c 'import os,time; time.sleep(float(os.environ.get("PORCUPI_TEST_GIT_FAIL_DELAY", "0")))'
+    exit 1
+    ;;
+esac
+exec ${JSON.stringify(realGit)} "$@"
+`);
+  chmodSync(selectiveGit, 0o755);
+  const selectiveEnvironment = (failedLocator, delaySeconds = "0") => ({
+    PATH: `${selectiveRoot}:${process.env.PATH}`,
+    PORCUPI_TEST_GIT_FAIL_MATCH: failedLocator,
+    PORCUPI_TEST_GIT_FAIL_DELAY: delaySeconds,
   });
 
-  const firstCoordinator = startCoordinator({
-    [first.locator]: { outcome: "candidate", delay: 0, candidate: candidate(first, firstCandidate) },
-    [second.locator]: { outcome: "failed", delay: 500 },
-  });
+  const firstCheck = startTrackedBranchCheck(home, selectiveEnvironment(secondRepository.locator, "0.5"));
   await delay(100);
-  const secondCoordinator = startCoordinator({
-    [first.locator]: { outcome: "failed", delay: 500 },
-    [second.locator]: { outcome: "candidate", delay: 0, candidate: candidate(second, secondCandidate) },
-  });
-  await Promise.all([wait(firstCoordinator), wait(secondCoordinator)]);
+  const secondCheck = startTrackedBranchCheck(home, selectiveEnvironment(firstRepository.locator, "0.5"));
+  const [firstResult, secondResult] = await Promise.all([waitForChild(firstCheck), waitForChild(secondCheck)]);
+  assert.equal(firstResult.code, 0, firstResult.stderr);
+  assert.equal(secondResult.code, 0, secondResult.stderr);
 
   let status = runPorcuPiProcess(home, ["status"]);
   assert.equal(status.status, 0, status.stderr || status.stdout);
@@ -1473,55 +1548,79 @@ if (worker) {
   assert.match(status.stdout, new RegExp(firstCandidate));
   assert.match(status.stdout, new RegExp(secondCandidate));
 
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
   const changedSelections = structuredClone(selections);
   changedSelections.sources.push({
-    ...structuredClone(second),
-    locator: "example.com/owner/b",
-    packageSource: `git:https://example.com/owner/b.git@${second.commit}`,
+    ...structuredClone(changedSelections.sources[1]),
+    locator: "failed.example.test/owner/source",
+    packageSource: `git:https://failed.example.test/owner/source.git@${changedSelections.sources[1].commit}`,
   });
   writeFileSync(selectionsPath, `${JSON.stringify(changedSelections, null, 2)}\n`);
-  const failedChangedCoordinator = startCoordinator({
-    [first.locator]: { outcome: "failed", delay: 0 },
-    [second.locator]: { outcome: "failed", delay: 0 },
-    "example.com/owner/b": { outcome: "failed", delay: 0 },
-  });
-  await wait(failedChangedCoordinator);
+  const failedInputCheck = startTrackedBranchCheck(home, selectiveEnvironment(""));
+  const failedInputResult = await waitForChild(failedInputCheck);
+  assert.equal(failedInputResult.code, 0, failedInputResult.stderr);
   writeFileSync(selectionsPath, `${JSON.stringify(selections, null, 2)}\n`);
   status = runPorcuPiProcess(home, ["status"]);
-  assert.equal(status.status, 0, status.stderr || status.stdout);
   assert.match(status.stdout, /Tracked Branch updates: 2/);
   assert.match(status.stdout, new RegExp(firstCandidate));
   assert.match(status.stdout, new RegExp(secondCandidate));
 
-  const staleCandidate = "1".repeat(40);
-  const newestCandidate = "2".repeat(40);
-  const staleCoordinator = startCoordinator({
-    [first.locator]: { outcome: "candidate", delay: 700, candidate: candidate(first, staleCandidate) },
-    [second.locator]: { outcome: "failed", delay: 700 },
+  const delayedRoot = join(root, "delayed-git");
+  mkdirSync(delayedRoot);
+  const delayedGit = join(delayedRoot, "git");
+  writeFileSync(delayedGit, `#!/bin/sh
+case " $* " in
+  *" clone "*"$PORCUPI_TEST_GIT_DELAY_MATCH"*)
+    if mkdir "$PORCUPI_TEST_GIT_DELAY_MARKER.claim" 2>/dev/null; then
+      ${JSON.stringify(realGit)} "$@"
+      result=$?
+      if [ "$result" -eq 0 ]; then
+        : > "$PORCUPI_TEST_GIT_DELAY_MARKER"
+        python3 -c 'import os,time; time.sleep(float(os.environ["PORCUPI_TEST_GIT_DELAY_SECONDS"]))'
+      fi
+      exit "$result"
+    fi
+    ;;
+  *" clone "*"$PORCUPI_TEST_GIT_FAIL_MATCH"*) exit 1 ;;
+esac
+exec ${JSON.stringify(realGit)} "$@"
+`);
+  chmodSync(delayedGit, 0o755);
+  const delayedEnvironment = (marker) => ({
+    PATH: `${delayedRoot}:${process.env.PATH}`,
+    PORCUPI_TEST_GIT_DELAY_MATCH: firstRepository.locator,
+    PORCUPI_TEST_GIT_DELAY_MARKER: marker,
+    PORCUPI_TEST_GIT_DELAY_SECONDS: "0.7",
+    PORCUPI_TEST_GIT_FAIL_MATCH: secondRepository.locator,
   });
-  await delay(100);
-  const newestCoordinator = startCoordinator({
-    [first.locator]: { outcome: "candidate", delay: 0, candidate: candidate(first, newestCandidate) },
-    [second.locator]: { outcome: "failed", delay: 50 },
-  });
-  await Promise.all([wait(staleCoordinator), wait(newestCoordinator)]);
+
+  const staleCandidate = publishPatch(firstRepository, "first-stale", "Publish stale first candidate");
+  const staleMarker = join(root, "stale-candidate-cloned");
+  const staleCheck = startTrackedBranchCheck(home, delayedEnvironment(staleMarker));
+  await waitForFile(staleMarker);
+  const newestCandidate = publishPatch(firstRepository, "first-newest", "Publish newest first candidate");
+  const newestCheck = startTrackedBranchCheck(home, selectiveEnvironment(secondRepository.locator));
+  const newestResult = await waitForChild(newestCheck);
+  const staleResult = await waitForChild(staleCheck);
+  assert.equal(newestResult.code, 0, newestResult.stderr);
+  assert.equal(staleResult.code, 0, staleResult.stderr);
 
   status = runPorcuPiProcess(home, ["status"]);
   assert.equal(status.status, 0, status.stderr || status.stdout);
   assert.match(status.stdout, new RegExp(newestCandidate));
   assert.doesNotMatch(status.stdout, new RegExp(staleCandidate));
 
-  const removedCandidate = "3".repeat(40);
-  const removedStaleCoordinator = startCoordinator({
-    [first.locator]: { outcome: "candidate", delay: 700, candidate: candidate(first, removedCandidate) },
-    [second.locator]: { outcome: "failed", delay: 700 },
-  });
-  await delay(100);
-  const removingCoordinator = startCoordinator({
-    [first.locator]: { outcome: "none", delay: 0 },
-    [second.locator]: { outcome: "failed", delay: 50 },
-  });
-  await Promise.all([wait(removedStaleCoordinator), wait(removingCoordinator)]);
+  const removedCandidate = publishPatch(firstRepository, "first-removed-stale", "Publish candidate that will become irrelevant");
+  const removedMarker = join(root, "removed-candidate-cloned");
+  const removedStaleCheck = startTrackedBranchCheck(home, delayedEnvironment(removedMarker));
+  await waitForFile(removedMarker);
+  publishPatch(firstRepository, "first", "Restore accepted selected content");
+  const removingCheck = startTrackedBranchCheck(home, selectiveEnvironment(secondRepository.locator));
+  const removingResult = await waitForChild(removingCheck);
+  const removedStaleResult = await waitForChild(removedStaleCheck);
+  assert.equal(removingResult.code, 0, removingResult.stderr);
+  assert.equal(removedStaleResult.code, 0, removedStaleResult.stderr);
 
   status = runPorcuPiProcess(home, ["status"]);
   assert.equal(status.status, 0, status.stderr || status.stdout);
@@ -1531,28 +1630,41 @@ if (worker) {
   assert.doesNotMatch(status.stdout, new RegExp(newestCandidate));
 });
 
-test("Tracked Branch cache publication lock covers asynchronous callback lifetime", async () => {
+test("uninstall excludes late Tracked Branch cache publication through its guided lifetime", async () => {
   const root = temporaryRoot();
-  const paths = { root: join(root, "managed") };
-  const lockPath = `${paths.root}.source-update-cache-lock`;
-  const { withSourceUpdateCachePublicationLock } = await import(pathToFileURL(join(repositoryRoot, "src", "source-update-status.mjs")).href);
-  let releaseCallback;
-  const callbackMayFinish = new Promise((resolvePromise) => { releaseCallback = resolvePromise; });
-  let callbackStarted;
-  const callbackDidStart = new Promise((resolvePromise) => { callbackStarted = resolvePromise; });
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  assert.equal(runInstaller(release, home).status, 0);
 
-  const operation = withSourceUpdateCachePublicationLock(paths, async () => {
-    callbackStarted();
-    await callbackMayFinish;
-    assert.equal(existsSync(lockPath), true, "publication lock was released before its asynchronous callback completed");
-    return "completed";
+  const sourceRoot = join(root, "uninstall-source");
+  const repository = createApplicablePatchRepository(sourceRoot, [[
+    "patches/uninstall.patch",
+    textPatch("series.txt", "base", "uninstall-one"),
+  ]]);
+  const locator = await serveGitRepository(sourceRoot, repository);
+  const added = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+  assert.equal(added.status, 0, added.stderr || added.stdout);
+  writeFileSync(join(repository.source, "patches", "uninstall.patch"), textPatch("series.txt", "base", "uninstall-two"));
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Publish candidate during uninstall");
+  publishRepositoryHead(sourceRoot, repository);
+
+  const checkStatus = join(root, "late-check-status.txt");
+  const beforeInput = join(root, "check-during-uninstall.sh");
+  writeFileSync(beforeInput, `#!/bin/sh
+${JSON.stringify(join(home, ".local", "bin", "porcupi"))} --porcupi-background-tracked-branches
+printf '%s\\n' "$?" > ${JSON.stringify(checkStatus)}
+`);
+  chmodSync(beforeInput, 0o755);
+
+  const removed = runPorcuPi(home, ["uninstall"], "0d0d0d", {
+    PTY_BEFORE_INPUT_COMMAND: beforeInput,
   });
-  await callbackDidStart;
-  await delay(0);
-  assert.equal(existsSync(lockPath), true, "publication lock must remain held while its callback is pending");
-  releaseCallback();
-  assert.equal(await operation, "completed");
-  assert.equal(existsSync(lockPath), false, "publication lock must be removed after its callback completes");
+  assert.equal(removed.status, 0, removed.stderr || removed.stdout);
+  assert.notEqual(readFileSync(checkStatus, "utf8").trim(), "0", "a late cache check entered guided uninstall");
+  assert.equal(existsSync(dataRoot(home)), false);
 });
 
 test("Managed Pi caches exact-input background Upgrade Readiness through the target public process", async () => {

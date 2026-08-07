@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { cpSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import {
   atomicWrite,
@@ -517,46 +518,63 @@ function restorePiSettings(snapshot) {
   else rmSync(snapshot.path, { force: true });
 }
 
-async function recoverPackageTransaction({ contexts, executable, environment, reconcile }) {
-  for (const record of contexts) {
-    for (const operation of record.operations.filter((candidate) => candidate.previousArtifacts.length === 0 && candidate.nextArtifacts.length > 0)) {
+async function runPackageCompensations({ operations, executable, environment, command, required = false }) {
+  let pending = operations;
+  let attempt = 0;
+  do {
+    if (attempt > 0 && process.env.NODE_ENV !== "test") {
+      await delay(Math.min(250 * (2 ** (attempt - 1)), 5_000));
+    }
+    const failed = [];
+    for (const { operation, context } of pending) {
+      const packageSource = command === "install"
+        ? operation.change.previous.packageSource
+        : operation.change.source.packageSource;
       try {
-        await runManagedPi(
-          executable,
-          packageArgs("remove", operation.change.source.packageSource, record.context),
-          environment,
-          record.context,
-        );
+        await runManagedPi(executable, packageArgs(command, packageSource, context), environment, context);
       } catch {
-        // A denied/failed new-scope install may leave no checkout for Pi to remove.
+        failed.push({ operation, context });
       }
     }
-  }
+    pending = failed;
+    attempt += 1;
+  } while (required && pending.length > 0);
+}
+
+async function recoverPackageTransaction({ contexts, executable, environment, attempted }) {
+  const attemptedOperations = contexts.flatMap((record) => record.operations
+    .filter((operation) => attempted.has(operation))
+    .map((operation) => ({ operation, context: record.context })));
+  const removals = attemptedOperations.filter(({ operation }) => (
+    operation.previousArtifacts.length === 0 && operation.nextArtifacts.length > 0
+  ));
+  const reinstalls = attemptedOperations.filter(({ operation }) => operation.previousArtifacts.length > 0);
+
+  await runPackageCompensations({
+    operations: removals,
+    executable,
+    environment,
+    command: "remove",
+  });
   for (const record of contexts) restorePiSettings(record.snapshot);
-  for (const record of contexts) {
-    for (const operation of record.operations.filter((candidate) => reconcile.has(candidate))) {
-      try {
-        await runManagedPi(
-          executable,
-          packageArgs("install", operation.change.previous.packageSource, record.context),
-          environment,
-          record.context,
-        );
-      } catch {
-        fail(`Pi package update failed and the prior ${contextLabel(record.context)} checkout for ${operation.change.source.locator} could not be restored`);
-      }
-    }
-  }
+  await runPackageCompensations({
+    operations: reinstalls,
+    executable,
+    environment,
+    command: "install",
+    required: true,
+  });
+  for (const record of contexts) restorePiSettings(record.snapshot);
 }
 
 export async function realizeResourceChanges({ executable, environment, changes, save }) {
   const contexts = preparePackageTransaction(environment, changes);
-  const reconcile = new Set();
-  stagePackageContexts(contexts);
+  const attempted = new Set();
   try {
+    stagePackageContexts(contexts);
     for (const record of contexts) {
       for (const operation of record.operations.filter((candidate) => candidate.nextArtifacts.length > 0)) {
-        if (operation.previousArtifacts.length > 0) reconcile.add(operation);
+        attempted.add(operation);
         await runManagedPi(
           executable,
           packageArgs("install", operation.change.source.packageSource, record.context),
@@ -567,19 +585,19 @@ export async function realizeResourceChanges({ executable, environment, changes,
     }
     for (const record of contexts) {
       for (const operation of record.operations.filter((candidate) => candidate.previousArtifacts.length > 0 && candidate.nextArtifacts.length === 0)) {
+        attempted.add(operation);
         await runManagedPi(
           executable,
           packageArgs("remove", operation.change.previous.packageSource, record.context),
           environment,
           record.context,
         );
-        reconcile.add(operation);
       }
     }
     verifyPackageTransaction(environment, contexts);
     save();
   } catch (error) {
-    await recoverPackageTransaction({ contexts, executable, environment, reconcile });
+    await recoverPackageTransaction({ contexts, executable, environment, attempted });
     throw error;
   }
 }

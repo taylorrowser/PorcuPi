@@ -1,6 +1,7 @@
 import { runGuidedTerminal, truncateForTerminal, windowAround } from "./guided-terminal.mjs";
 import { createInterface } from "node:readline/promises";
 import { defaultDataRoot, fail, readActiveComposition } from "./runtime.mjs";
+import { withLifecycleLock } from "./lifecycle.mjs";
 import {
   branchContainsAcceptedCommit,
   discoverPiArtifacts,
@@ -231,13 +232,13 @@ function runAddWizard({ source, artifacts, diagnostics, currentArtifacts, previo
   });
 }
 
-export async function addResources(requestedSource, {
-  input = process.stdin,
-  output = process.stdout,
-  environment = process.env,
-  dataRoot = defaultDataRoot(environment),
+async function addResourcesLocked(requestedSource, {
+  input,
+  output,
+  environment,
+  dataRoot,
   cwd,
-} = {}) {
+}) {
   const sourceInput = requestedSource || await promptForSource(input, output);
   if (!sourceInput) fail("A Git source is required");
   const active = readActiveComposition(dataRoot);
@@ -313,4 +314,16 @@ export async function addResources(requestedSource, {
   } finally {
     resolved.dispose();
   }
+}
+
+export async function addResources(requestedSource, options = {}) {
+  const environment = options.environment ?? process.env;
+  const dataRoot = options.dataRoot ?? defaultDataRoot(environment);
+  return withLifecycleLock(dataRoot, "add", () => addResourcesLocked(requestedSource, {
+    ...options,
+    input: options.input ?? process.stdin,
+    output: options.output ?? process.stdout,
+    environment,
+    dataRoot,
+  }));
 }

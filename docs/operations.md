@@ -32,7 +32,7 @@ A strict root `porcupi.json` can group one or more ordered tracked regular `patc
 porcupi manage
 ```
 
-Manage reviews every retained Source Repository, removes selections, and moves Pi resources between global and project scope. It preserves unrelated Pi settings. Add and manage save **pending Patch intent** only: they never rebuild or activate Managed Pi.
+Manage reviews every retained Source Repository, removes selections, and moves Pi resources between global and project scope. When several Tracked Branches advance, it shows each source independently and lets you choose one exact candidate to review; accepting one source preserves every other source's latest accepted snapshot. It preserves unrelated Pi settings. Add and manage save **pending Patch intent** only: they never rebuild or activate Managed Pi.
 
 ## Apply pending Patches
 
@@ -81,7 +81,7 @@ Uninstall removes only receipt-proven PorcuPi launchers, runtime, state, and Com
 
 ## Lifecycle and recovery boundaries
 
-Install, apply, rollback, cleanup, optional command ownership, and uninstall share one lifecycle lock. Ordinary launch does not take that lock. If a mutating command reports a live owner, let that operation complete instead of deleting lock or state files manually.
+Install, add, source review and management, apply, rollback, cleanup, optional command ownership, and uninstall share one lifecycle lock. Add and source review hold the lock from their initial state read through final exact-commit revalidation and any Pi package reconciliation, so another lifecycle mutation fails closed instead of racing accepted intent. Ordinary launch does not take that lock. If a mutating command reports a live owner, let that operation complete instead of deleting lock or state files manually.
 
 For a refused launch:
 

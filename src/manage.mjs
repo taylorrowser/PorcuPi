@@ -12,6 +12,7 @@ import {
   saveSelectionSources,
 } from "./resource-intent.mjs";
 import { runGuidedTerminal, truncateForTerminal, windowAround } from "./guided-terminal.mjs";
+import { withLifecycleLock } from "./lifecycle.mjs";
 import {
   branchContainsAcceptedCommit,
   discoverPiArtifacts,
@@ -437,37 +438,110 @@ function resolvedCandidate(previous, resolved, accepted, active) {
   };
 }
 
-function resolveTrackedCandidates(selections, active) {
-  let forceable;
-  for (const previous of selections.sources.filter((source) => source.trackedBranch)) {
-    const resolved = resolveTrackedSourceRepository(previous);
-    if (resolved.commit === previous.commit) {
-      resolved.dispose();
-      continue;
-    }
-    if (!branchContainsAcceptedCommit(resolved.checkout, previous.commit, resolved.commit)) {
-      resolved.dispose();
-      disposeTrackedCandidate(forceable);
-      fail(`Tracked Branch ${previous.trackedBranch} moved non-fast-forward; accepted exact snapshot ${previous.commit} is preserved`);
-    }
-    let accepted;
-    try {
-      accepted = resolveSourceRepository(previous.packageSource);
-      const candidate = resolvedCandidate(previous, resolved, accepted, active);
-      if (candidate.reviews.some((review) => review.changed)) {
-        disposeTrackedCandidate(forceable);
-        return { automatic: candidate };
-      }
-      if (!forceable) forceable = candidate;
-      else disposeTrackedCandidate(candidate);
-    } catch (error) {
-      accepted?.dispose();
-      resolved.dispose();
-      disposeTrackedCandidate(forceable);
-      throw error;
-    }
+function resolveTrackedCandidate(previous, active) {
+  const resolved = resolveTrackedSourceRepository(previous);
+  if (resolved.commit === previous.commit) {
+    resolved.dispose();
+    return null;
   }
-  return { forceable };
+  if (!branchContainsAcceptedCommit(resolved.checkout, previous.commit, resolved.commit)) {
+    resolved.dispose();
+    fail(`Tracked Branch ${previous.trackedBranch} moved non-fast-forward; accepted exact snapshot ${previous.commit} is preserved`);
+  }
+  let accepted;
+  try {
+    accepted = resolveSourceRepository(previous.packageSource);
+    return resolvedCandidate(previous, resolved, accepted, active);
+  } catch (error) {
+    accepted?.dispose();
+    resolved.dispose();
+    throw error;
+  }
+}
+
+function resolveTrackedCandidates(selections, active) {
+  return selections.sources.filter((source) => source.trackedBranch).flatMap((previous) => {
+    try {
+      const candidate = resolveTrackedCandidate(previous, active);
+      return candidate ? [{ previous, candidate }] : [];
+    } catch (error) {
+      return [{ previous, error }];
+    }
+  });
+}
+
+function disposeTrackedCandidates(records, retained) {
+  for (const record of records) {
+    if (record.candidate && record.candidate !== retained) disposeTrackedCandidate(record.candidate);
+  }
+}
+
+function runSourceCandidateChooser({ records, active, input, output }) {
+  let cursor = 0;
+  let selected = null;
+  let reviewPage = 0;
+  let reviewCursor = 0;
+  return runGuidedTerminal({
+    command: "porcupi manage",
+    input,
+    output,
+    createController: ({ finish }) => {
+      const render = () => {
+        output.write("\x1b[2J\x1b[H");
+        if (selected) {
+          renderSourceUpdatePage({
+            previous: selected.previous,
+            candidate: { ...selected.candidate.candidateSource, forced: selected.candidate.forced },
+            reviews: selected.candidate.reviews,
+            active,
+            page: reviewPage,
+            cursor: reviewCursor,
+            output,
+          });
+          return;
+        }
+        output.write("Choose one Source Repository update\n\n");
+        output.write("Each candidate is reviewed and accepted independently as one exact source-wide snapshot.\n");
+        output.write("Accepted pending Patch snapshots from other sources remain intact.\n\n");
+        const visible = windowAround(output, cursor, records.length, 14);
+        for (let index = visible.start; index < visible.end; index += 1) {
+          const record = records[index];
+          const changed = record.candidate?.reviews.some((review) => review.changed);
+          const status = record.error ? "blocked" : changed ? "changed" : "unchanged — explicit review";
+          const commit = record.candidate?.candidateSource.commit ?? "accepted snapshot preserved";
+          output.write(`${truncateForTerminal(output, `${index === cursor ? "›" : " "} [${status}] ${record.previous.locator} · ${commit}`)}\n`);
+          if (index === cursor && record.error) output.write(`${truncateForTerminal(output, `  ${record.error.message}`)}\n`);
+        }
+        output.write("\n[↑/↓ j/k] choose source  [Space/Enter] review selected source  [Esc] cancel\n");
+      };
+      const handleKeypress = (_character, key) => {
+        if (selected) {
+          const navigation = navigateSourceUpdateReview({
+            page: reviewPage,
+            cursor: reviewCursor,
+            reviewCount: selected.candidate.reviews.length,
+            key,
+          });
+          if (navigation.outcome === "cancel") return finish(null);
+          if (navigation.outcome === "accept") return finish(selected);
+          reviewPage = navigation.page;
+          reviewCursor = navigation.cursor;
+          render();
+          return undefined;
+        }
+        if (key.name === "escape" || (key.ctrl && key.name === "c")) return finish(null);
+        if (key.name === "up" || key.name === "k") cursor = Math.max(0, cursor - 1);
+        else if (key.name === "down" || key.name === "j") cursor = Math.min(records.length - 1, cursor + 1);
+        else if ((key.name === "space" || key.name === "return") && records[cursor]?.candidate) {
+          selected = records[cursor];
+          selected.candidate.forced = !selected.candidate.reviews.some((review) => review.changed);
+        }
+        render();
+        return undefined;
+      };
+      return { render, handleKeypress };
+    },
+  });
 }
 
 function revalidateTrackedCandidate(candidate, active) {
@@ -548,19 +622,29 @@ function nextSourcesFromItems(selections, items) {
   });
 }
 
-export async function manageResources({
-  input = process.stdin,
-  output = process.stdout,
-  environment = process.env,
-  dataRoot = defaultDataRoot(environment),
-  cwd,
-} = {}) {
+async function manageResourcesLocked({ input, output, environment, dataRoot, cwd }) {
   const active = readActiveComposition(dataRoot);
   const selections = readSelections(dataRoot);
-  const candidates = resolveTrackedCandidates(selections, active);
-  if (candidates.automatic) {
-    return adoptTrackedCandidate({ candidate: candidates.automatic, selections, active, input, output, environment, dataRoot });
+  const candidateRecords = resolveTrackedCandidates(selections, active);
+  const reviewable = candidateRecords.filter((record) => record.candidate);
+  const changed = reviewable.filter((record) => record.candidate.reviews.some((review) => review.changed));
+  if (candidateRecords.length > 1) {
+    const selected = await runSourceCandidateChooser({ records: candidateRecords, active, input, output });
+    if (selected === null) {
+      disposeTrackedCandidates(candidateRecords);
+      output.write("\nSource update selection cancelled; Selection Intent, Pi package settings/checkouts, pending Patches, and Managed Pi activation are unchanged.\n");
+      return { saved: false, cancelled: true };
+    }
+    disposeTrackedCandidates(candidateRecords, selected.candidate);
+    selected.candidate.preconfirmed = true;
+    return adoptTrackedCandidate({ candidate: selected.candidate, selections, active, input, output, environment, dataRoot });
   }
+  if (changed.length === 1) {
+    disposeTrackedCandidates(candidateRecords, changed[0].candidate);
+    return adoptTrackedCandidate({ candidate: changed[0].candidate, selections, active, input, output, environment, dataRoot });
+  }
+  if (reviewable.length === 0 && candidateRecords.length > 0) throw candidateRecords[0].error;
+  const forceableCandidate = reviewable[0]?.candidate;
   const items = managedSelections(selections);
   if (items.length === 0) {
     output.write("There are no retained Artifact selections to manage. Use `porcupi add [git-source]` first.\n");
@@ -572,16 +656,16 @@ export async function manageResources({
     items,
     project,
     patchPending,
-    forceableCandidate: candidates.forceable,
+    forceableCandidate,
     active,
     input,
     output,
   });
   if (result?.forceLatestAccepted) {
-    candidates.forceable.forced = true;
-    candidates.forceable.preconfirmed = true;
+    forceableCandidate.forced = true;
+    forceableCandidate.preconfirmed = true;
     return adoptTrackedCandidate({
-      candidate: candidates.forceable,
+      candidate: forceableCandidate,
       selections,
       active,
       input,
@@ -590,7 +674,7 @@ export async function manageResources({
       dataRoot,
     });
   }
-  disposeTrackedCandidate(candidates.forceable);
+  disposeTrackedCandidate(forceableCandidate);
   if (result === null) {
     output.write("\nManagement cancelled; saved Selection Intent, Pi configuration, and Managed Pi activation are unchanged.\n");
     return { saved: false, cancelled: true };
@@ -629,4 +713,16 @@ export async function manageResources({
   output.write(`\nSaved ${resourceCount} Pi resource and ${patchCount} Patch Series selection${patchCount === 1 ? "" : "s"}. Pi owns package lifecycle and project trust.\n`);  output.write("Managed Pi activation is unchanged.\n");
   output.write(patchPendingMessage(patchIntentPending(nextSources, active.activation.active.patches)));
   return { saved: true, count: result.length };
+}
+
+export async function manageResources(options = {}) {
+  const environment = options.environment ?? process.env;
+  const dataRoot = options.dataRoot ?? defaultDataRoot(environment);
+  return withLifecycleLock(dataRoot, "manage", () => manageResourcesLocked({
+    ...options,
+    input: options.input ?? process.stdin,
+    output: options.output ?? process.stdout,
+    environment,
+    dataRoot,
+  }));
 }

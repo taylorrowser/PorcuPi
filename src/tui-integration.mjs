@@ -33,25 +33,60 @@ function truncateRow(value, width) {
   return `${characters.slice(0, width - 3).join("")}...`;
 }
 
+function fitsRow(value, width) {
+  return [...value].length <= width;
+}
+
+function combinedReleaseState(status) {
+  if (status.kind === "checking-readiness") return "checking compatibility";
+  if (status.kind === "ready") return status.context === "offline" ? "cached ready (offline)" : "ready";
+  if (status.kind === "blocked") return status.context === "offline" ? "blocked (cached offline)" : "blocked";
+  if (status.kind === "available" || status.kind === "readiness-unavailable") return "readiness unavailable";
+  if (status.kind === "offline") return "release offline";
+  if (status.kind === "checking") return "checking release availability";
+  if (status.kind === "current") return "current";
+  return "release status unavailable";
+}
+
 function statusRow(status, width, { sourceUpdates = [], sourceChecking = false } = {}) {
+  const full = renderReleaseStatusRow(status);
   const sourceRow = renderSourceUpdateRow(sourceUpdates, { checking: sourceChecking });
   if (sourceRow) {
-    if ([...sourceRow].length <= width) return sourceRow;
-    const compact = `${sourceUpdates.length} Tracked Branch update${sourceUpdates.length === 1 ? "" : "s"}: porcupi manage`;
-    if ([...compact].length <= width) return compact;
-    if ("porcupi manage".length <= width) return "porcupi manage";
+    const sourceSummary = sourceRow.replace(/^PorcuPi: /, "");
+    const combined = `${full}; ${sourceSummary}`;
+    if (fitsRow(combined, width)) return combined;
+
+    const sourceCompact = `${sourceUpdates.length} Tracked Branch update${sourceUpdates.length === 1 ? "" : "s"}: porcupi manage`;
+    if (status.targetVersion) {
+      const command = releaseInstallCommand(status.targetVersion);
+      const stateAndActions = `${combinedReleaseState(status)}; outside: ${command}; ${sourceCompact}`;
+      if (fitsRow(stateAndActions, width)) return stateAndActions;
+      const actions = `outside: ${command}; ${sourceCompact}`;
+      if (fitsRow(actions, width)) return actions;
+      const commands = `outside: ${command}; porcupi manage`;
+      if (fitsRow(commands, width)) return commands;
+      if (fitsRow(command, width)) return command;
+      return truncateRow(command, width);
+    }
+
+    const compactCombined = `${renderReleaseStatusRow(status, { compact: true })}; ${sourceCompact}`;
+    if (fitsRow(compactCombined, width)) return compactCombined;
+    const stateAndSource = `${combinedReleaseState(status)}; ${sourceCompact}`;
+    if (fitsRow(stateAndSource, width)) return stateAndSource;
+    if (fitsRow(sourceRow, width)) return sourceRow;
+    if (fitsRow(sourceCompact, width)) return sourceCompact;
+    if (fitsRow("porcupi manage", width)) return "porcupi manage";
     return truncateRow("porcupi manage", width);
   }
-  const full = renderReleaseStatusRow(status);
   if (sourceChecking) {
     if (status.kind === "checking") return truncateRow("PorcuPi: checking release availability and Tracked Branches...", width);
     const checking = `${full}; checking Tracked Branches...`;
-    if ([...checking].length <= width) return checking;
+    if (fitsRow(checking, width)) return checking;
   }
-  if ([...full].length <= width || !status.targetVersion) return truncateRow(full, width);
+  if (fitsRow(full, width) || !status.targetVersion) return truncateRow(full, width);
 
   const compact = renderReleaseStatusRow(status, { compact: true });
-  if ([...compact].length <= width) return compact;
+  if (fitsRow(compact, width)) return compact;
   if (status.reason) {
     const reasonWidth = width - ([...compact].length - [...status.reason].length);
     if (reasonWidth > 3) return compact.replace(status.reason, truncateRow(status.reason, reasonWidth));
@@ -59,8 +94,8 @@ function statusRow(status, width, { sourceUpdates = [], sourceChecking = false }
 
   const command = releaseInstallCommand(status.targetVersion);
   const externalGuidance = `${command} (outside session)`;
-  if ([...externalGuidance].length <= width) return externalGuidance;
-  if ([...command].length <= width) return command;
+  if (fitsRow(externalGuidance, width)) return externalGuidance;
+  if (fitsRow(command, width)) return command;
   return truncateRow(command, width);
 }
 

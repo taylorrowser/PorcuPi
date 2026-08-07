@@ -1126,6 +1126,7 @@ test("Managed Pi surfaces relevant Tracked Branch updates without adopting them"
   git(repository.source, "add", ".");
   git(repository.source, "commit", "-m", "Publish selected Patch Series update");
   const candidateCommit = publishRepositoryHead(root, repository);
+  server.setVersion("0.3.0");
 
   const managedRoot = dataRoot(home);
   const activationBefore = readFileSync(join(managedRoot, "state", "activation.json"));
@@ -1135,10 +1136,17 @@ test("Managed Pi surfaces relevant Tracked Branch updates without adopting them"
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
     PORCUPI_BACKGROUND_READINESS: "0",
     PI_FIXTURE_TUI_WAIT_MS: "2500",
+    PI_FIXTURE_TUI_WIDTH: "120",
   });
   assert.equal(launched.status, 0, launched.stderr || launched.stdout);
   const rows = readFrames(frameLog).map(releaseStatusLine);
-  assert.ok(rows.some((row) => /1 Tracked Branch update/i.test(row) && /porcupi manage/.test(row)), JSON.stringify(rows));
+  assert.ok(
+    rows.some((row) => /1 Tracked Branch update/i.test(row)
+      && /porcupi manage/.test(row)
+      && /readiness unavailable/i.test(row)
+      && /npx --yes porcupi@0\.3\.0/.test(row)),
+    JSON.stringify(rows),
+  );
 
   const status = runPorcuPiProcess(home, ["status"]);
   assert.equal(status.status, 0, status.stderr || status.stdout);

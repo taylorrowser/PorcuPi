@@ -24,6 +24,7 @@ import {
 } from "./lifecycle.mjs";
 import { summarizeRetainedPiResources } from "./resource-intent.mjs";
 import { verifyReleaseStatusState } from "./release-status.mjs";
+import { withSourceUpdateCachePublicationLock } from "./source-update-status.mjs";
 import {
   atomicWrite,
   canonicalJson,
@@ -678,5 +679,8 @@ export async function uninstallManagedPi({
   environment = process.env,
   dataRoot = defaultDataRoot(environment),
 } = {}) {
-  return withLifecycleLock(dataRoot, "uninstall", () => uninstallLocked({ input, output, environment, dataRoot }));
+  return withLifecycleLock(dataRoot, "uninstall", () => withSourceUpdateCachePublicationLock(
+    managedLayout(dataRoot),
+    () => uninstallLocked({ input, output, environment, dataRoot }),
+  ));
 }

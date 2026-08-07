@@ -247,7 +247,7 @@ function tryAcquirePublicationLock(paths) {
   }
 }
 
-async function withPublicationLock(paths, callback) {
+export async function withSourceUpdateCachePublicationLock(paths, callback) {
   let held;
   for (let attempt = 0; attempt < publicationLockAttempts && !held; attempt += 1) {
     held = tryAcquirePublicationLock(paths);
@@ -315,7 +315,7 @@ export async function checkTrackedBranchAvailability({
   const successful = results.filter((result) => result.outcome !== "failed").length;
   if (successful === 0) return { cache: previous, checked: 0 };
   const checkedAt = now().toISOString();
-  return withPublicationLock(paths, () => {
+  return withSourceUpdateCachePublicationLock(paths, () => {
     const currentSelections = readSelections(dataRoot);
     const currentActive = readActiveComposition(dataRoot);
     if (

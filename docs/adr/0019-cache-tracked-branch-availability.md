@@ -22,7 +22,7 @@ The fixed row summarizes one or many matching candidates in place and directs th
 
 Availability checking and display can write only this informational cache and its ephemeral publication lock. They never acquire lifecycle authority, move an accepted source snapshot, reconcile Pi packages, write Pi settings, change Selection Intent or Activation, build a Composition, or apply a Patch Series. Guided management re-resolves, reviews, and revalidates the exact candidate under ADR 0017 before mutation.
 
-The cache participates in full verification, conservative state inventory, and uninstall beside the release-availability and Upgrade Readiness caches.
+The cache participates in full verification, conservative state inventory, and uninstall beside the release-availability and Upgrade Readiness caches. Uninstall holds the publication lock inside its existing lifecycle transaction, preventing a late background cache write and removing that ephemeral lock after the ownership root is gone.
 
 ## Consequences
 

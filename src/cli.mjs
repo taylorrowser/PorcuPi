@@ -53,7 +53,7 @@ try {
   const args = process.argv.slice(2);
   if (args[0] === "status") {
     if (args.length === 2 && new Set(["--help", "-h"]).has(args[1])) {
-      process.stdout.write("Usage: porcupi status\n\nShow cached PorcuPi release availability and exact external upgrade guidance without network or lifecycle mutation.\n");
+      process.stdout.write("Usage: porcupi status\n\nShow cached PorcuPi release availability, Upgrade Readiness evidence, and exact external guidance without network or lifecycle mutation.\n");
     } else {
       if (args.length !== 1) fail("Usage: porcupi status");
       showReleaseStatus();
@@ -83,7 +83,7 @@ try {
       if (args.length !== 1) fail("Usage: porcupi verify");
       const receipt = verifyManagedInstallation();
       process.stdout.write(`Verified Managed Pi Composition ${receipt.compositionId}.\n`);
-      process.stdout.write("Complete payload inventory, runtime and TUI Integration, release-status state, executable, version, public conformance, isolated-home smoke, and launcher ownership checks passed.\n");
+      process.stdout.write("Complete payload inventory, runtime and TUI Integration, release-status and Upgrade Readiness state, executable, version, public conformance, isolated-home smoke, and launcher ownership checks passed.\n");
     } else {
       launching = true;
       await launch(args);

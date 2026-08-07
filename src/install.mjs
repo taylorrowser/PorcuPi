@@ -6,6 +6,7 @@ import {
   linkSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   readlinkSync,
@@ -13,6 +14,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -50,6 +52,7 @@ import {
 } from "./runtime.mjs";
 import {
   buildComposition,
+  compositionRecipe,
   copyCompositionInputs,
   loadBaseLock,
   pathExists,
@@ -62,6 +65,11 @@ import {
 } from "./composition.mjs";
 import { runGuidedTerminal } from "./guided-terminal.mjs";
 import { cleanupRetainedCompositions, durableUnlink, withLifecycleLock } from "./lifecycle.mjs";
+import {
+  createUpgradeReadinessIdentity,
+  readUpgradeReadinessCache,
+  writeUpgradeReadinessCache,
+} from "./release-status.mjs";
 import { reconcilePiOwnershipLocked } from "./pi-ownership.mjs";
 import {
   artifactStructuralIdentity,
@@ -71,6 +79,7 @@ import {
   readSelections,
   stageSelectionIntent,
   summarizeRetainedPiResources,
+  UpgradeReadinessBlocker,
 } from "./resource-intent.mjs";
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
@@ -78,6 +87,12 @@ const migrationContractKey = (sourceVersion, targetVersion) => `${sourceVersion}
 const upgradeMigrationContracts = new Map([
   [migrationContractKey("0.1.0", "0.2.0"), Object.freeze({ sourceStateSchema: 1, targetStateSchema: 1 })],
 ]);
+const upgradeReadinessCheckerContract = Object.freeze({
+  id: "porcupi-upgrade-readiness-v1",
+  compositionRecipe,
+  selectedArtifactContract: "exact-source-discovery-and-pi-base-compatibility-v1",
+  piResourceContract: "exact-filtered-package-settings-v1",
+});
 const noUpgradeRecovery = Object.freeze({ restartRequired: false });
 const restartAfterUpgradeRecovery = Object.freeze({ restartRequired: true });
 
@@ -966,24 +981,99 @@ function validateExistingInstallation(paths, launcher, environment) {
   return { active, installedCli, installedVersion: readInstalledVersion(paths), hasLauncher, hasLauncherReceipt, runtimeReceipt };
 }
 
-async function upgradeManagedPi({ paths, launcher, existing, lock, input, output, environment }) {
+function assertPiResourceReadiness(paths, environment) {
+  const resourceSummary = summarizeRetainedPiResources(paths.root, environment);
+  const changedResource = resourceSummary.resources.find((resource) => !resource.configured);
+  if (changedResource) {
+    const scope = changedResource.scope === "global" ? "global" : `project ${changedResource.projectRoot}`;
+    throw new UpgradeReadinessBlocker(
+      `Upgrade Readiness Check blocked by externally changed Pi ${scope} package configuration for ${changedResource.locator}`,
+    );
+  }
+  return resourceSummary;
+}
+
+function assessUpgradeCandidate({ paths, environment, selections, stageRoot, candidateRoot, lock, resourceSummary }) {
+  const checkedResources = resourceSummary ?? assertPiResourceReadiness(paths, environment);
+  const stagedPatches = stageSelectionIntent({ stageRoot, sources: selections.sources, piBase: lock });
+  const receipt = buildComposition({ candidateRoot, stageRoot, patches: stagedPatches, lock });
+  return { receipt, resourceSummary: checkedResources, stagedPatches };
+}
+
+function readinessBlockerReason(error) {
+  const isBlocker = error instanceof UpgradeReadinessBlocker
+    || (error instanceof Error && error.message.startsWith("Patch preflight blocked by "));
+  if (!isBlocker) return null;
+  const reason = error.message
+    .replace(/^Upgrade Readiness Check blocked by /, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return reason.length <= 240 ? reason : `${reason.slice(0, 237)}...`;
+}
+
+function requireUpgradeMigration(existing) {
   const migration = upgradeMigrationContracts.get(migrationContractKey(existing.installedVersion, porcupiVersion));
   if (!migration) fail(`No versioned state migration supports PorcuPi ${existing.installedVersion} → ${porcupiVersion}`);
   if (existing.active.activation.schemaVersion !== migration.sourceStateSchema) {
     fail(`Upgrade requires PorcuPi ${existing.installedVersion} state schema ${migration.sourceStateSchema}`);
   }
+  return migration;
+}
+
+export async function assessBackgroundUpgradeReadiness({
+  environment = process.env,
+  platform = process.platform,
+  architecture = process.arch,
+} = {}) {
+  verifyHostNode();
+  platformIdentity(platform, architecture);
+  const dataRoot = defaultDataRoot(environment, platform);
+  const paths = managedLayout(dataRoot);
+  const launcher = join(defaultBinDirectory(environment), "porcupi");
+  return withLifecycleLock(dataRoot, "background Upgrade Readiness", async () => {
+    const existing = validateExistingInstallation(paths, launcher, environment);
+    if (compareReleaseVersions(porcupiVersion, existing.installedVersion) <= 0) {
+      fail(`Background Upgrade Readiness requires a newer exact target than installed PorcuPi ${existing.installedVersion}`);
+    }
+    requireUpgradeMigration(existing);
+    const lock = loadBaseLock();
+    const selections = readSelections(paths.root);
+    const identity = createUpgradeReadinessIdentity({
+      targetVersion: porcupiVersion,
+      piBase: lock,
+      selections,
+      checkerContract: upgradeReadinessCheckerContract,
+      platform,
+      architecture,
+    });
+    const cached = readUpgradeReadinessCache(paths);
+    if (cached?.identitySha256 === sha256Bytes(canonicalJson(identity))) return cached;
+
+    const stageRoot = mkdtempSync(join(tmpdir(), "porcupi-readiness-"));
+    const candidateRoot = join(stageRoot, "composition");
+    mkdirSync(candidateRoot, { mode: 0o700 });
+    try {
+      assessUpgradeCandidate({ paths, environment, selections, stageRoot, candidateRoot, lock });
+      return writeUpgradeReadinessCache(paths, { identity, outcome: "ready" });
+    } catch (error) {
+      const reason = readinessBlockerReason(error);
+      if (reason) return writeUpgradeReadinessCache(paths, { identity, outcome: "blocked", reason });
+      throw error;
+    } finally {
+      removePreparedTree(stageRoot);
+    }
+  });
+}
+
+async function upgradeManagedPi({ paths, launcher, existing, lock, input, output, environment }) {
+  const migration = requireUpgradeMigration(existing);
   verifyPublishedComposition(paths, existing.active.activation.active.compositionId);
   if (existing.active.activation.previous) verifyPublishedComposition(paths, existing.active.activation.previous.compositionId);
   const piLauncherReceipt = verifyOptionalPiLauncher(paths, environment);
   const ownedPi = Boolean(piLauncherReceipt);
   const sourceLauncherReceipt = verifyLauncher(paths, environment);
   const selections = readSelections(paths.root);
-  const resourceSummary = summarizeRetainedPiResources(paths.root, environment);
-  const changedResource = resourceSummary.resources.find((resource) => !resource.configured);
-  if (changedResource) {
-    const scope = changedResource.scope === "global" ? "global" : `project ${changedResource.projectRoot}`;
-    fail(`Upgrade Readiness Check blocked by externally changed Pi ${scope} package configuration for ${changedResource.locator}`);
-  }
+  const resourceSummary = assertPiResourceReadiness(paths, environment);
 
   output.write(`Upgrade candidate: installed PorcuPi ${existing.installedVersion}, target PorcuPi ${porcupiVersion}.\n`);
   output.write(`Migration contract: state schema ${migration.sourceStateSchema} → ${migration.targetStateSchema}.\n`);
@@ -1006,9 +1096,15 @@ async function upgradeManagedPi({ paths, launcher, existing, lock, input, output
   writeUpgradeScratchReceipt(stageRoot, stageOwner);
   let transactionCommitted = false;
   try {
-    const stagedPatches = stageSelectionIntent({ stageRoot, sources: selections.sources, piBase: lock });
-    writeUpgradeScratchReceipt(stageRoot, stageOwner);
-    const receipt = buildComposition({ candidateRoot, stageRoot, patches: stagedPatches, lock });
+    const { receipt } = assessUpgradeCandidate({
+      paths,
+      environment,
+      selections,
+      stageRoot,
+      candidateRoot,
+      lock,
+      resourceSummary,
+    });
     writeUpgradeScratchReceipt(stageRoot, stageOwner);
     const stagedLeases = join(stageRoot, "target-leases");
     mkdirSync(stagedLeases, { mode: 0o700 });

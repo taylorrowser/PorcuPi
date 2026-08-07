@@ -1,9 +1,17 @@
 #!/usr/bin/env node
 
-import { installManagedPi } from "../src/install.mjs";
+import { assessBackgroundUpgradeReadiness, installManagedPi } from "../src/install.mjs";
+import { upgradeReadinessTarget } from "../src/release-status.mjs";
 
 try {
-  await installManagedPi();
+  const args = process.argv.slice(2);
+  if (args.length === 1 && args[0] === "--porcupi-background-upgrade-readiness") {
+    const cache = await assessBackgroundUpgradeReadiness();
+    process.stdout.write(`${JSON.stringify(upgradeReadinessTarget(cache))}\n`);
+  } else {
+    if (args.length !== 0) throw new Error("Usage: porcupi");
+    await installManagedPi();
+  }
 } catch (error) {
   process.stdout.write("\x1b[?25h");
   console.error(`porcupi install: ${error instanceof Error ? error.message : String(error)}`);

@@ -111,6 +111,7 @@ export function managedLayout(dataRoot) {
     launcherReceipt: join(root, "state", "launcher.json"),
     runtimeReceipt: join(root, "state", "runtime.json"),
     releaseStatus: join(root, "state", "release-status.json"),
+    upgradeReadiness: join(root, "state", "upgrade-readiness.json"),
     piLauncherReceipt: join(root, "state", "pi-launcher.json"),
     piTransition: join(root, "state", "pi-transition.json"),
   };
@@ -285,7 +286,7 @@ export function run(command, args, { cwd, environment = process.env, capture = f
   return result.stdout?.trim() || "";
 }
 
-function validatePatchIdentities(value, label) {
+export function validatePatchIdentities(value, label) {
   if (!Array.isArray(value)) fail(`Malformed ${label}`);
   let previousSeriesKey;
   const identities = new Set();

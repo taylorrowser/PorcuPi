@@ -257,7 +257,7 @@ export default async function porcupiTuiIntegration(pi) {
     }
     const offline = porcupiOffline();
     const readinessDisabled = backgroundReadinessDisabled();
-    let sourceUpdates = cacheIsTrusted ? matchingSourceUpdates(sourceCache, selections, active.receipt) : [];
+    let sourceUpdates = cacheIsTrusted ? matchingSourceUpdates(sourceCache, selections, installedVersion, active.receipt) : [];
     let sourceChecking = cacheIsTrusted
       && event.reason === "startup"
       && !offline
@@ -288,7 +288,7 @@ export default async function porcupiTuiIntegration(pi) {
       void runTrackedBranchProcess(controller.signal).then(() => {
         if (generation !== currentGeneration) return;
         sourceCache = readSourceUpdateCache(paths);
-        sourceUpdates = matchingSourceUpdates(sourceCache, selections, active.receipt);
+        sourceUpdates = matchingSourceUpdates(sourceCache, selections, installedVersion, active.receipt);
         sourceChecking = false;
         requestRender();
       }).catch(() => {

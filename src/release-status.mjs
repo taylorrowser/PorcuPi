@@ -576,6 +576,6 @@ export function showReleaseStatus({ environment = process.env, dataRoot = defaul
     offline: porcupiOffline(environment),
     readinessDisabled: backgroundReadinessDisabled(environment),
   }));
-  output.write(`${formatSourceUpdates(sourceUpdates, selections, active.receipt)}\n`);
+  output.write(`${formatSourceUpdates(sourceUpdates, selections, metadata.version, active.receipt)}\n`);
   return { installedVersion: metadata.version, cache, readiness, sourceUpdates };
 }

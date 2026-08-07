@@ -1349,6 +1349,15 @@ test("Tracked Branch cache identity includes the installed release and exact Pi 
   assert.match(oldStatus.stdout, /Tracked Branch updates: 1/);
   assert.match(oldStatus.stdout, new RegExp(candidateCommit));
 
+  rebindActiveReceipt(oldHome, (receipt) => {
+    receipt.porcupiVersion = "0.1.0";
+  });
+  const rolledBackStatus = runPorcuPiProcess(oldHome, ["status"]);
+  assert.equal(rolledBackStatus.status, 0, rolledBackStatus.stderr || rolledBackStatus.stdout);
+  assert.match(rolledBackStatus.stdout, /Installed release: 0\.2\.0/);
+  assert.match(rolledBackStatus.stdout, /Tracked Branch updates: 1/);
+  assert.match(rolledBackStatus.stdout, new RegExp(candidateCommit));
+
   const oldCachePath = join(dataRoot(oldHome), "state", "source-updates.json");
   const targetCachePath = join(dataRoot(targetHome), "state", "source-updates.json");
   writeFileSync(targetCachePath, readFileSync(oldCachePath));
@@ -1367,7 +1376,7 @@ test("Tracked Branch cache identity includes the installed release and exact Pi 
   assert.doesNotMatch(targetStatus.stdout, new RegExp(candidateCommit));
 });
 
-test("overlapping Tracked Branch coordinators preserve independent successful candidates", async () => {
+test("overlapping Tracked Branch coordinators preserve independent newest evidence with lexical locators", async () => {
   const root = temporaryRoot();
   const home = join(root, "home");
   mkdirSync(home);
@@ -1386,9 +1395,15 @@ test("overlapping Tracked Branch coordinators preserve independent successful ca
     assert.equal(added.status, 0, added.stderr || added.stdout);
   }
 
-  const selections = JSON.parse(readFileSync(join(dataRoot(home), "state", "selections.json"), "utf8"));
+  const selectionsPath = join(dataRoot(home), "state", "selections.json");
+  const selections = JSON.parse(readFileSync(selectionsPath, "utf8"));
   assert.equal(selections.sources.length, 2);
   const [first, second] = selections.sources;
+  first.locator = "example.com/owner/Z";
+  first.packageSource = `git:https://example.com/owner/Z.git@${first.commit}`;
+  second.locator = "example.com/owner/a";
+  second.packageSource = `git:https://example.com/owner/a.git@${second.commit}`;
+  writeFileSync(selectionsPath, `${JSON.stringify(selections, null, 2)}\n`);
   const firstCandidate = "e".repeat(40);
   const secondCandidate = "f".repeat(40);
   const harness = join(root, "source-coordinator-harness.mjs");
@@ -1399,7 +1414,10 @@ if (worker) {
   const result = JSON.parse(process.env.PORCUPI_TEST_SOURCE_WORKERS)[locator];
   await delay(result.delay);
   if (result.outcome === "failed") process.exit(23);
-  process.stdout.write(JSON.stringify({ outcome: "candidate", locator, ...result.candidate }) + "\\n");
+  const output = result.outcome === "none"
+    ? { outcome: "none", locator }
+    : { outcome: "candidate", locator, ...result.candidate };
+  process.stdout.write(JSON.stringify(output) + "\\n");
 } else {
   const { checkTrackedBranchAvailability } = await import(${JSON.stringify(pathToFileURL(join(repositoryRoot, "src", "source-update-status.mjs")).href)});
   await checkTrackedBranchAvailability();
@@ -1419,23 +1437,14 @@ if (worker) {
     NODE_ENV: "test",
     PORCUPI_TEST_SOURCE_WORKERS: JSON.stringify(workers),
   });
-  const firstCoordinator = spawn(process.execPath, [harness], {
-    env: environment({
-      [first.locator]: { outcome: "candidate", delay: 0, candidate: candidate(first, firstCandidate) },
-      [second.locator]: { outcome: "failed", delay: 500 },
-    }),
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  childProcesses.push(firstCoordinator);
-  await delay(100);
-  const secondCoordinator = spawn(process.execPath, [harness], {
-    env: environment({
-      [first.locator]: { outcome: "failed", delay: 500 },
-      [second.locator]: { outcome: "candidate", delay: 0, candidate: candidate(second, secondCandidate) },
-    }),
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  childProcesses.push(secondCoordinator);
+  const startCoordinator = (workers) => {
+    const child = spawn(process.execPath, [harness], {
+      env: environment(workers),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    childProcesses.push(child);
+    return child;
+  };
   const wait = (child) => new Promise((resolvePromise, rejectPromise) => {
     let stderr = "";
     child.stderr.setEncoding("utf8");
@@ -1446,13 +1455,80 @@ if (worker) {
       else rejectPromise(new Error(`coordinator failed (${code ?? signal}): ${stderr}`));
     });
   });
+
+  const firstCoordinator = startCoordinator({
+    [first.locator]: { outcome: "candidate", delay: 0, candidate: candidate(first, firstCandidate) },
+    [second.locator]: { outcome: "failed", delay: 500 },
+  });
+  await delay(100);
+  const secondCoordinator = startCoordinator({
+    [first.locator]: { outcome: "failed", delay: 500 },
+    [second.locator]: { outcome: "candidate", delay: 0, candidate: candidate(second, secondCandidate) },
+  });
   await Promise.all([wait(firstCoordinator), wait(secondCoordinator)]);
 
-  const status = runPorcuPiProcess(home, ["status"]);
+  let status = runPorcuPiProcess(home, ["status"]);
   assert.equal(status.status, 0, status.stderr || status.stdout);
   assert.match(status.stdout, /Tracked Branch updates: 2/);
   assert.match(status.stdout, new RegExp(firstCandidate));
   assert.match(status.stdout, new RegExp(secondCandidate));
+
+  const changedSelections = structuredClone(selections);
+  changedSelections.sources.push({
+    ...structuredClone(second),
+    locator: "example.com/owner/b",
+    packageSource: `git:https://example.com/owner/b.git@${second.commit}`,
+  });
+  writeFileSync(selectionsPath, `${JSON.stringify(changedSelections, null, 2)}\n`);
+  const failedChangedCoordinator = startCoordinator({
+    [first.locator]: { outcome: "failed", delay: 0 },
+    [second.locator]: { outcome: "failed", delay: 0 },
+    "example.com/owner/b": { outcome: "failed", delay: 0 },
+  });
+  await wait(failedChangedCoordinator);
+  writeFileSync(selectionsPath, `${JSON.stringify(selections, null, 2)}\n`);
+  status = runPorcuPiProcess(home, ["status"]);
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  assert.match(status.stdout, /Tracked Branch updates: 2/);
+  assert.match(status.stdout, new RegExp(firstCandidate));
+  assert.match(status.stdout, new RegExp(secondCandidate));
+
+  const staleCandidate = "1".repeat(40);
+  const newestCandidate = "2".repeat(40);
+  const staleCoordinator = startCoordinator({
+    [first.locator]: { outcome: "candidate", delay: 700, candidate: candidate(first, staleCandidate) },
+    [second.locator]: { outcome: "failed", delay: 700 },
+  });
+  await delay(100);
+  const newestCoordinator = startCoordinator({
+    [first.locator]: { outcome: "candidate", delay: 0, candidate: candidate(first, newestCandidate) },
+    [second.locator]: { outcome: "failed", delay: 50 },
+  });
+  await Promise.all([wait(staleCoordinator), wait(newestCoordinator)]);
+
+  status = runPorcuPiProcess(home, ["status"]);
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  assert.match(status.stdout, new RegExp(newestCandidate));
+  assert.doesNotMatch(status.stdout, new RegExp(staleCandidate));
+
+  const removedCandidate = "3".repeat(40);
+  const removedStaleCoordinator = startCoordinator({
+    [first.locator]: { outcome: "candidate", delay: 700, candidate: candidate(first, removedCandidate) },
+    [second.locator]: { outcome: "failed", delay: 700 },
+  });
+  await delay(100);
+  const removingCoordinator = startCoordinator({
+    [first.locator]: { outcome: "none", delay: 0 },
+    [second.locator]: { outcome: "failed", delay: 50 },
+  });
+  await Promise.all([wait(removedStaleCoordinator), wait(removingCoordinator)]);
+
+  status = runPorcuPiProcess(home, ["status"]);
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  assert.match(status.stdout, /Tracked Branch updates: 1/);
+  assert.match(status.stdout, new RegExp(secondCandidate));
+  assert.doesNotMatch(status.stdout, new RegExp(removedCandidate));
+  assert.doesNotMatch(status.stdout, new RegExp(newestCandidate));
 });
 
 test("Tracked Branch cache publication lock covers asynchronous callback lifetime", async () => {

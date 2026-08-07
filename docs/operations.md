@@ -12,7 +12,7 @@ porcupi --model openai/gpt-5
 
 Arguments not recognized as PorcuPi lifecycle commands are forwarded unchanged to the active Managed Pi. Launch validates the active identity and required executable, claims a Composition process lease, and retains it for the Pi child process lifetime. Corruption fails closed; PorcuPi does not run the previous Composition or Stock Pi as fallback.
 
-Interactive launch also loads one fixed receipt-owned PorcuPi TUI Integration outside the Composition payload and Pi package settings. Its one reserved row checks release availability asynchronously, displays an exact external Release Installation command when available, and never enters saved conversation history or changes lifecycle state. `--offline` suppresses the request and preserves cached/offline guidance.
+Interactive launch also loads one fixed receipt-owned PorcuPi TUI Integration outside the Composition payload and Pi package settings. Its one reserved row checks release availability asynchronously and, only for a newer supported PorcuPi release without matching evidence, starts the exact target package's non-mutating Upgrade Readiness Check in a background process. The row distinguishes checking compatibility, ready, blocked, and unavailable/stale evidence, displays exact external Release Installation guidance, and never enters saved conversation history or changes Activation, runtime, launchers, Selection Intent, Pi settings, or a Managed Pi Composition. `--offline` suppresses both startup activities while preserving matching cached guidance. Set `PORCUPI_BACKGROUND_READINESS=0` to suppress only background readiness assessment without disabling ordinary Managed Pi networking or erasing cached evidence.
 
 ## Read cached release status
 
@@ -20,9 +20,9 @@ Interactive launch also loads one fixed receipt-owned PorcuPi TUI Integration ou
 porcupi status
 ```
 
-Status reads the installed release, active Pi Base, last successful release-availability cache, target release, and exact next command. It performs no network request and makes no filesystem or lifecycle change. An upgrade command must be completed outside the current Managed Pi session; the row and status command never install or activate a release.
+Status reads the installed release, active Pi Base, last successful release-availability cache, target release, matching exact-input Upgrade Readiness evidence, blockers, and the exact next command. It performs no network request and makes no filesystem or lifecycle change. An upgrade command must be completed outside the current Managed Pi session; the row and status command never install or activate a release.
 
-Checking, current, update-available, offline, and unavailable/stale are availability states, not Upgrade Readiness. Background readiness assessment and Tracked Branch status are separate lifecycle work.
+Release availability is not Upgrade Readiness. Readiness evidence is advisory and binds the target PorcuPi release/Pi Base, exact Selection Intent and source commits, ordered Patch Series members and digests, platform/architecture, and checker contract. Any local bound-input change makes the cached evidence stale. The guided target Release Installation always re-resolves and revalidates the exact inputs before mutation, even when status says ready. Tracked Branch startup status and Post-release Compatibility Updates remain separate lifecycle work.
 
 ## Add exact source intent
 
@@ -89,7 +89,7 @@ porcupi uninstall
 
 The guided uninstall inventories exact PorcuPi targets and separately reports Pi-owned resource configuration that will remain. It preflights all ownership evidence before deletion and fails closed if any target is malformed, modified, symbolic, foreign, or escaping its root. A live Composition lease defers uninstall without terminating Pi; retry after that process exits.
 
-Uninstall removes only receipt-proven PorcuPi launchers, runtime (including the TUI Integration), release-availability cache, state, and Compositions. It retains Pi global/project package configuration, package data, credentials, sessions, trust/resources, and Stock Pi. An interrupted confirmed uninstall is retried with the same command and converges through PorcuPi's receipt-owned recovery launcher.
+Uninstall removes only receipt-proven PorcuPi launchers, runtime (including the TUI Integration), release-availability and Upgrade Readiness caches, state, and Compositions. It retains Pi global/project package configuration, package data, credentials, sessions, trust/resources, and Stock Pi. An interrupted confirmed uninstall is retried with the same command and converges through PorcuPi's receipt-owned recovery launcher.
 
 ## Lifecycle and recovery boundaries
 

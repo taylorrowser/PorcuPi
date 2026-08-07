@@ -1,17 +1,24 @@
+import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { defaultDataRoot, managedLayout } from "./runtime.mjs";
 import {
+  backgroundReadinessDisabled,
   cachedReleaseStatus,
   checkReleaseAvailability,
+  checkingCompatibilityStatus,
   initialReleaseStatus,
   porcupiOffline,
   readReleaseStatusCache,
+  readUpgradeReadinessCache,
+  readinessStatus,
+  readinessUnavailableStatus,
   releaseInstallCommand,
   releaseStatusColor,
   renderReleaseStatusRow,
   unavailableReleaseStatus,
 } from "./release-status.mjs";
+import { readSelections } from "./resource-intent.mjs";
 
 const widgetIdentity = "porcupi-release-status";
 const renderGateIdentity = Symbol.for("porcupi.release-status.initial-render-gate");
@@ -26,12 +33,47 @@ function truncateRow(value, width) {
 
 function statusRow(status, width) {
   const full = renderReleaseStatusRow(status);
-  if ([...full].length <= width || !status.targetVersion) return truncateRow(full, width);
+  if (
+    [...full].length <= width
+    || !status.targetVersion
+    || new Set(["blocked", "checking-readiness"]).has(status.kind)
+  ) return truncateRow(full, width);
   const command = releaseInstallCommand(status.targetVersion);
   const externalGuidance = `${command} (outside session)`;
   if ([...externalGuidance].length <= width) return externalGuidance;
   if ([...command].length <= width) return command;
   return truncateRow(command, width);
+}
+
+function runTargetReadinessProcess(targetVersion, signal) {
+  const testPackage = process.env.NODE_ENV === "test" ? process.env.PORCUPI_TEST_READINESS_PACKAGE : undefined;
+  const packageTarget = testPackage ?? `porcupi@${targetVersion}`;
+  const args = [
+    "exec",
+    "--yes",
+    ...(testPackage ? ["--offline"] : []),
+    "--package",
+    packageTarget,
+    "--",
+    "porcupi",
+    "--porcupi-background-upgrade-readiness",
+  ];
+  return new Promise((resolve, reject) => {
+    const environment = { ...process.env };
+    for (const name of Object.keys(environment)) {
+      if (name.startsWith("PI_FIXTURE_TUI")) delete environment[name];
+    }
+    const child = spawn("npm", args, { env: environment, stdio: "ignore" });
+    const abort = () => child.kill("SIGTERM");
+    signal?.addEventListener("abort", abort, { once: true });
+    child.once("error", reject);
+    child.once("exit", (code, exitSignal) => {
+      signal?.removeEventListener("abort", abort);
+      if (exitSignal || code !== 0) reject(new Error("Background Upgrade Readiness process did not complete"));
+      else resolve();
+    });
+    if (signal?.aborted) abort();
+  });
 }
 
 async function managedTuiClass() {
@@ -106,18 +148,23 @@ export default async function porcupiTuiIntegration(pi) {
     const installedVersion = process.env.PORCUPI_INSTALLED_VERSION;
     const paths = managedLayout(defaultDataRoot());
     let cache = null;
+    let readiness = null;
+    let selections = { schemaVersion: 2, sources: [] };
     let cacheIsTrusted = true;
     try {
       cache = readReleaseStatusCache(paths);
+      readiness = readUpgradeReadinessCache(paths);
+      selections = readSelections(paths.root);
     } catch {
       cacheIsTrusted = false;
     }
     const offline = porcupiOffline();
+    const readinessDisabled = backgroundReadinessDisabled();
     let status = !cacheIsTrusted
       ? unavailableReleaseStatus({ installedVersion, cache: null })
       : event.reason === "startup" || offline
-        ? initialReleaseStatus({ installedVersion, cache, offline })
-        : cachedReleaseStatus({ installedVersion, cache });
+        ? initialReleaseStatus({ installedVersion, cache, readiness, selections, offline })
+        : cachedReleaseStatus({ installedVersion, cache, readiness, selections });
     let requestRender = () => {};
 
     ctx.ui.setWidget(widgetIdentity, (tui, theme) => {
@@ -139,13 +186,56 @@ export default async function porcupiTuiIntegration(pi) {
       installedVersion,
       endpoint: process.env.NODE_ENV === "test" ? process.env.PORCUPI_TEST_RELEASE_STATUS_URL : undefined,
       signal: controller.signal,
-    }).then((result) => {
+    }).then(async (result) => {
       if (generation !== currentGeneration) return;
-      status = result;
+      cache = result.cache;
+      if (result.kind !== "available") {
+        status = result;
+        requestRender();
+        return;
+      }
+      const cachedReadiness = readinessStatus({
+        installedVersion,
+        targetVersion: result.targetVersion,
+        readiness,
+        selections,
+      });
+      if (new Set(["ready", "blocked"]).has(cachedReadiness.kind)) {
+        status = cachedReadiness;
+        requestRender();
+        return;
+      }
+      if (readinessDisabled) {
+        status = readinessUnavailableStatus({
+          installedVersion,
+          targetVersion: result.targetVersion,
+          stale: Boolean(readiness),
+          disabled: true,
+        });
+        requestRender();
+        return;
+      }
+      status = checkingCompatibilityStatus({ installedVersion, targetVersion: result.targetVersion });
+      requestRender();
+      await runTargetReadinessProcess(result.targetVersion, controller.signal);
+      if (generation !== currentGeneration) return;
+      readiness = readUpgradeReadinessCache(paths);
+      status = readinessStatus({
+        installedVersion,
+        targetVersion: result.targetVersion,
+        readiness,
+        selections,
+      });
       requestRender();
     }).catch(() => {
       if (generation !== currentGeneration || controller?.signal.aborted) return;
-      status = unavailableReleaseStatus({ installedVersion, cache });
+      status = status.kind === "checking-readiness"
+        ? readinessUnavailableStatus({
+          installedVersion,
+          targetVersion: status.targetVersion,
+          stale: Boolean(readiness),
+        })
+        : unavailableReleaseStatus({ installedVersion, cache });
       requestRender();
     });
   });

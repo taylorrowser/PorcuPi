@@ -42,9 +42,9 @@ Add `~/.local/bin` to `PATH` if the installer reports that it is missing. Then l
 porcupi
 ```
 
-Every interactive Managed Pi starts with one fixed PorcuPi release-status row. Online startup checks the official npm release asynchronously; Pi's `--offline` mode suppresses that request. The row remains informational, stays out of conversation history, and never installs or activates an update. When an exact newer release is available, run the displayed `npx --yes porcupi@<version>` command in another terminal after leaving the current Managed Pi session.
+Every interactive Managed Pi starts with one fixed PorcuPi release-status row. Online startup checks the official npm release asynchronously and, only for a newer release without matching evidence, asks that exact target package to run its non-mutating Upgrade Readiness Check in the background. Matching cached ready or blocked evidence appears immediately on the next launch; changed bound inputs make it stale. Pi's `--offline` mode suppresses both startup activities, while `PORCUPI_BACKGROUND_READINESS=0` suppresses only background assessment and retains cached evidence. The row remains informational, stays out of conversation history, and never installs or activates an update. When an exact newer release is available, run the displayed `npx --yes porcupi@<version>` command in another terminal after leaving the current Managed Pi session; the guided installer revalidates readiness before mutation.
 
-Read the cached installed/target release and exact guidance without network or lifecycle changes:
+Read cached installed/target release, Upgrade Readiness evidence, blockers, input identity, and exact guidance without network or lifecycle changes:
 
 ```sh
 porcupi status

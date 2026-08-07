@@ -86,9 +86,11 @@ export function patchPendingMessage(pending) {
 }
 
 class SelectionStagingError extends Error {}
+export class UpgradeReadinessBlocker extends Error {}
 
 function selectionStagingFailure(prefix, message) {
-  throw new SelectionStagingError(`${prefix}${message}`);
+  const ErrorType = prefix ? UpgradeReadinessBlocker : SelectionStagingError;
+  throw new ErrorType(`${prefix}${message}`);
 }
 
 function patchIdentityKey(patch) {
@@ -164,8 +166,8 @@ function stageSelectedArtifacts({ stageRoot, sources, piBase, artifactsForSource
         }
       }
     } catch (error) {
-      if (error instanceof SelectionStagingError) throw error;
-      selectionStagingFailure(failurePrefix, `Source Repository ${source.locator}@${source.commit} could not be staged: ${error.message}`);
+      if (error instanceof SelectionStagingError || error instanceof UpgradeReadinessBlocker) throw error;
+      throw new SelectionStagingError(`${failurePrefix}Source Repository ${source.locator}@${source.commit} could not be staged: ${error.message}`);
     } finally {
       resolved?.dispose();
     }

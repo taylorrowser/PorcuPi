@@ -111,6 +111,7 @@ export function managedLayout(dataRoot) {
     launcherReceipt: join(root, "state", "launcher.json"),
     runtimeReceipt: join(root, "state", "runtime.json"),
     releaseStatus: join(root, "state", "release-status.json"),
+    upgradeReadiness: join(root, "state", "upgrade-readiness.json"),
     piLauncherReceipt: join(root, "state", "pi-launcher.json"),
     piTransition: join(root, "state", "pi-transition.json"),
   };

@@ -110,6 +110,7 @@ function createPiBase(root, { version = "0.81.1", buildFails = false } = {}) {
     `import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const output = join(process.cwd(), "packages", "coding-agent", "dist");
+if (process.env.PI_FIXTURE_BUILD_LOG) appendFileSync(process.env.PI_FIXTURE_BUILD_LOG, "build\\n");
 mkdirSync(output, { recursive: true });
 if (process.env.PI_FIXTURE_LEXICAL_PREFIX_PATHS) {
   mkdirSync(join(output, "prefix"), { recursive: true });
@@ -980,6 +981,7 @@ test("Managed Pi renders bounded release availability in one runtime-owned TUI r
 
   const available = runManagedTui(home, frameLog, {
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_BACKGROUND_READINESS: "0",
     PI_FIXTURE_TUI_WIDTH: "72",
     PI_FIXTURE_TUI_SESSION_REASONS: "startup,new,resume,fork,reload",
   });
@@ -988,14 +990,14 @@ test("Managed Pi renders bounded release availability in one runtime-owned TUI r
   assert.match(releaseStatusLine(availableFrames[0]), /checking release availability/i);
   const reloadResetFrame = availableFrames.find((frame) => frame.reason === "reload-reset");
   assert.ok(reloadResetFrame, "the pinned Pi reload fixture must render after clearing Extension widgets");
-  assert.match(releaseStatusLine(reloadResetFrame), /PorcuPi 0\.3\.0 available/);
-  assert.ok(availableFrames.some((frame) => /PorcuPi 0\.3\.0 available/.test(releaseStatusLine(frame))));
+  assert.match(releaseStatusLine(reloadResetFrame), /PorcuPi 0\.3\.0 readiness unavailable/);
+  assert.ok(availableFrames.some((frame) => /PorcuPi 0\.3\.0 readiness unavailable/.test(releaseStatusLine(frame))));
   assert.ok(availableFrames.some((frame) => /npx --yes porcupi@0\.3\.0/.test(releaseStatusLine(frame))));
   const transitionReasons = new Set(["new", "resume", "fork", "reload"]);
   const transitionFrames = availableFrames.filter((frame) => transitionReasons.has(frame.sessionReason));
   assert.ok(transitionFrames.length > 0);
   assert.ok(transitionFrames.every((frame) => !/checking/i.test(releaseStatusLine(frame))));
-  assert.ok(transitionFrames.every((frame) => /PorcuPi 0\.3\.0 available/.test(releaseStatusLine(frame))));
+  assert.ok(transitionFrames.every((frame) => /PorcuPi 0\.3\.0 readiness unavailable/.test(releaseStatusLine(frame))));
   assert.ok(availableFrames.every((frame) => frame.lines.length === 2 && frame.lines.every((line) => line.length <= frame.width)));
   assert.deepEqual(availableFrames.at(-1).lines, availableFrames.at(-2).lines, "theme invalidation and repeated render must be stable");
   assert.deepEqual(readFileSync(activationPath), activationBefore);
@@ -1004,6 +1006,7 @@ test("Managed Pi renders bounded release availability in one runtime-owned TUI r
   const narrowAvailableFramesPath = join(root, "narrow-available-frames.jsonl");
   const narrowAvailable = runManagedTui(home, narrowAvailableFramesPath, {
     PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_BACKGROUND_READINESS: "0",
     PI_FIXTURE_TUI_WIDTH: "40",
   });
   assert.equal(narrowAvailable.status, 0, narrowAvailable.stderr || narrowAvailable.stdout);
@@ -1072,6 +1075,258 @@ test("Managed Pi renders bounded release availability in one runtime-owned TUI r
   assert.equal(existsSync(managedRoot), false);
   assert.deepEqual(readFileSync(settingsPath), Buffer.from(`${JSON.stringify({ packages: ["settings-sentinel"], extensions: ["extension-sentinel"] }, null, 2)}\n`));
   assert.deepEqual(readFileSync(sessionPath), sessionBefore);
+});
+
+test("Managed Pi caches exact-input background Upgrade Readiness through the target public process", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const installedRelease = createReleaseFixture(root, base);
+  assert.equal(runInstaller(installedRelease, home).status, 0);
+
+  const targetRoot = join(root, "target");
+  mkdirSync(targetRoot);
+  const targetRelease = createReleaseFixture(targetRoot, base);
+  setReleaseFixtureVersion(targetRelease, "0.3.0");
+  const targetArtifact = packRelease(targetRelease, targetRoot);
+  const server = serveReleaseStatus(root);
+  const buildLog = join(root, "readiness-builds.log");
+  writeFileSync(buildLog, "");
+  const currentFramesPath = join(root, "readiness-current.jsonl");
+  const current = runManagedTui(home, currentFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
+    PI_FIXTURE_BUILD_LOG: buildLog,
+    PI_FIXTURE_TUI_WAIT_MS: "500",
+  });
+  assert.equal(current.status, 0, current.stderr || current.stdout);
+  assert.ok(readFrames(currentFramesPath).some((frame) => /current/i.test(releaseStatusLine(frame))));
+  assert.equal(readFileSync(buildLog, "utf8"), "", "no heavy readiness work may run without a newer release");
+  server.setVersion("0.3.0");
+  const managedRoot = dataRoot(home);
+  const authoritativePaths = [
+    join(managedRoot, "state", "activation.json"),
+    join(managedRoot, "state", "launcher.json"),
+    join(managedRoot, "state", "runtime.json"),
+  ];
+  const authoritativeBefore = authoritativePaths.map((path) => readFileSync(path));
+
+  const lifecycleLock = `${managedRoot}.lifecycle-lock`;
+  const holder = spawn(join(home, ".local", "bin", "porcupi"), ["pi", "enable"], {
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_DATA_HOME: join(home, ".local", "share"),
+      NODE_ENV: "test",
+      PORCUPI_TEST_HOLD_LOCK_MS: "10000",
+    },
+  });
+  childProcesses.push(holder);
+  for (let attempt = 0; attempt < 100 && !existsSync(lifecycleLock); attempt += 1) await delay(20);
+  assert.equal(existsSync(lifecycleLock), true, "the competing lifecycle mutation did not acquire its lock");
+  const contendedFramesPath = join(root, "readiness-contended.jsonl");
+  const contended = runManagedTui(home, contendedFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
+    PI_FIXTURE_BUILD_LOG: buildLog,
+    PI_FIXTURE_TUI_WAIT_MS: "500",
+  });
+  assert.equal(contended.status, 0, contended.stderr || contended.stdout);
+  assert.ok(readFrames(contendedFramesPath).some((frame) => /unavailable/i.test(releaseStatusLine(frame))));
+  assert.equal(readFileSync(buildLog, "utf8"), "", "readiness must not run while lifecycle mutation owns the lock");
+  holder.kill("SIGKILL");
+  await new Promise((resolvePromise) => holder.once("close", resolvePromise));
+
+  const firstFramesPath = join(root, "readiness-first.jsonl");
+  const first = runManagedTui(home, firstFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
+    PI_FIXTURE_BUILD_LOG: buildLog,
+    PI_FIXTURE_TUI_WAIT_MS: "3000",
+  });
+  assert.equal(first.status, 0, first.stderr || first.stdout);
+  const firstRows = readFrames(firstFramesPath).map(releaseStatusLine);
+  assert.match(firstRows[0], /checking release availability/i);
+  assert.ok(firstRows.some((row) => /checking compatibility/i.test(row)));
+  assert.ok(firstRows.some((row) => /PorcuPi 0\.3\.0.*ready/i.test(row)), JSON.stringify(firstRows));
+  assert.equal(readFileSync(buildLog, "utf8"), "build\n");
+  assert.deepEqual(authoritativePaths.map((path) => readFileSync(path)), authoritativeBefore);
+
+  const status = runPorcuPiProcess(home, ["status"]);
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  assert.match(status.stdout, /Upgrade Readiness: ready/);
+  assert.match(status.stdout, /Target Pi Base: v0\.81\.1/);
+  assert.match(status.stdout, /Input identity: [a-f0-9]{64}/);
+
+  const repository = createApplicablePatchRepository(join(root, "readiness-source"), [[
+    "patches/readiness.patch",
+    textPatch("series.txt", "base", "readiness"),
+  ]]);
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+  const activationAfterAdd = readFileSync(join(managedRoot, "state", "activation.json"));
+  const selectionsAfterAdd = readFileSync(join(managedRoot, "state", "selections.json"));
+
+  const disabledFramesPath = join(root, "readiness-disabled.jsonl");
+  const disabled = runManagedTui(home, disabledFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
+    PORCUPI_BACKGROUND_READINESS: "0",
+    PI_FIXTURE_BUILD_LOG: buildLog,
+    PI_FIXTURE_TUI_WAIT_MS: "500",
+  });
+  assert.equal(disabled.status, 0, disabled.stderr || disabled.stdout);
+  assert.ok(readFrames(disabledFramesPath).some((frame) => /unavailable|stale|disabled/i.test(releaseStatusLine(frame))));
+  assert.equal(readFileSync(buildLog, "utf8"), "build\n", "the opt-out must suppress invalidated readiness work");
+
+  const refreshedFramesPath = join(root, "readiness-refreshed.jsonl");
+  const refreshed = runManagedTui(home, refreshedFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
+    PI_FIXTURE_BUILD_LOG: buildLog,
+    PI_FIXTURE_TUI_WAIT_MS: "3000",
+  });
+  assert.equal(refreshed.status, 0, refreshed.stderr || refreshed.stdout);
+  assert.ok(readFrames(refreshedFramesPath).some((frame) => /PorcuPi 0\.3\.0.*ready/i.test(releaseStatusLine(frame))));
+  assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\n", "changed Selection Intent must invalidate readiness");
+  assert.deepEqual(readFileSync(join(managedRoot, "state", "activation.json")), activationAfterAdd);
+  assert.deepEqual(readFileSync(join(managedRoot, "state", "selections.json")), selectionsAfterAdd);
+
+  const cachedFramesPath = join(root, "readiness-cached.jsonl");
+  const requestsBeforeCachedLaunch = readFileSync(server.requestLog, "utf8");
+  const cached = runManagedTui(home, cachedFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
+    PI_FIXTURE_BUILD_LOG: buildLog,
+  });
+  assert.equal(cached.status, 0, cached.stderr || cached.stdout);
+  assert.match(releaseStatusLine(readFrames(cachedFramesPath)[0]), /PorcuPi 0\.3\.0.*ready/i);
+  assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\n", "a matching cache must skip heavy readiness work");
+
+  const requestCount = readFileSync(server.requestLog, "utf8").trim().split("\n").filter(Boolean).length;
+  assert.ok(requestCount > requestsBeforeCachedLaunch.toString().trim().split("\n").filter(Boolean).length);
+  const offlineFramesPath = join(root, "readiness-offline.jsonl");
+  const offline = runManagedTui(home, offlineFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
+    PI_FIXTURE_BUILD_LOG: buildLog,
+  }, ["--offline"]);
+  assert.equal(offline.status, 0, offline.stderr || offline.stdout);
+  assert.match(releaseStatusLine(readFrames(offlineFramesPath)[0]), /PorcuPi 0\.3\.0.*ready/i);
+  assert.equal(readFileSync(server.requestLog, "utf8").trim().split("\n").filter(Boolean).length, requestCount);
+  assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\n");
+
+  const failureSource = createApplicablePatchRepository(join(root, "failure-readiness-source"), [[
+    "patches/add-marker.patch",
+    [
+      "diff --git a/readiness-marker.txt b/readiness-marker.txt",
+      "new file mode 100644",
+      "index 0000000..9e842ad",
+      "--- /dev/null",
+      "+++ b/readiness-marker.txt",
+      "@@ -0,0 +1 @@",
+      "+marker",
+      "",
+    ].join("\n"),
+  ]]);
+  const failureServerRoot = join(root, "failure-readiness-server");
+  mkdirSync(failureServerRoot);
+  const failureLocator = await serveGitRepository(failureServerRoot, failureSource);
+  const addFailureInput = runPorcuPi(home, ["add", `${failureLocator}@main`], "616e6e0d");
+  assert.equal(addFailureInput.status, 0, addFailureInput.stderr || addFailureInput.stdout);
+  const failingTargetRoot = join(root, "failing-readiness-target");
+  mkdirSync(failingTargetRoot);
+  const failingBase = createPiBase(failingTargetRoot, { buildFails: true });
+  const failingRelease = createReleaseFixture(failingTargetRoot, failingBase);
+  setReleaseFixtureVersion(failingRelease, "0.3.0");
+  const failingArtifact = packRelease(failingRelease, failingTargetRoot);
+  const failedFramesPath = join(root, "readiness-build-failed.jsonl");
+  const failed = runManagedTui(home, failedFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_TEST_READINESS_PACKAGE: failingArtifact,
+    PI_FIXTURE_BUILD_LOG: buildLog,
+    PI_FIXTURE_TUI_WAIT_MS: "4000",
+  });
+  assert.equal(failed.status, 0, failed.stderr || failed.stdout);
+  assert.ok(readFrames(failedFramesPath).some((frame) => /readiness unavailable/i.test(releaseStatusLine(frame))));
+  assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\n");
+  const staleStatus = runPorcuPiProcess(home, ["status"]);
+  assert.equal(staleStatus.status, 0, staleStatus.stderr || staleStatus.stdout);
+  assert.match(staleStatus.stdout, /Upgrade Readiness: unavailable — cached evidence is stale/);
+  assert.doesNotMatch(staleStatus.stdout, /Upgrade Readiness: ready/);
+});
+
+test("background Upgrade Readiness caches an exact selected blocker without lifecycle mutation", async () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const installedBase = createPiBase(root);
+  const installedRelease = createReleaseFixture(root, installedBase);
+  assert.equal(runInstaller(installedRelease, home).status, 0);
+
+  const repository = createApplicablePatchRepository(join(root, "blocked-readiness-source"), [[
+    "patches/blocked.patch",
+    textPatch("series.txt", "base", "blocked"),
+  ]]);
+  writeFileSync(join(repository.source, "porcupi.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    supportedPiBaseVersions: ["v0.81.1"],
+  }, null, 2)}\n`);
+  git(repository.source, "add", ".");
+  git(repository.source, "commit", "-m", "Declare current Pi Base compatibility");
+  const locator = await serveGitRepository(root, repository);
+  const add = runPorcuPi(home, ["add", `${locator}@main`], "616e6e0d");
+  assert.equal(add.status, 0, add.stderr || add.stdout);
+
+  const targetRoot = join(root, "blocked-target");
+  mkdirSync(targetRoot);
+  const targetBase = createPiBase(targetRoot, { version: "0.82.0" });
+  git(targetBase.source, "tag", "v0.82.0");
+  const targetRelease = createReleaseFixture(targetRoot, targetBase, "0.82.0");
+  const targetLockPath = join(targetRelease, "upstream", "pi-base.json");
+  const targetLock = JSON.parse(readFileSync(targetLockPath, "utf8"));
+  targetLock.tag = "v0.82.0";
+  writeFileSync(targetLockPath, `${JSON.stringify(targetLock, null, 2)}\n`);
+  setReleaseFixtureVersion(targetRelease, "0.3.0");
+  const targetRecordPath = join(targetRelease, "release", "v0.3.0.json");
+  const targetRecord = JSON.parse(readFileSync(targetRecordPath, "utf8"));
+  targetRecord.piBase = { repository: targetLock.repository, tag: targetLock.tag, commit: targetLock.commit };
+  writeFileSync(targetRecordPath, `${JSON.stringify(targetRecord, null, 2)}\n`);
+  const targetArtifact = packRelease(targetRelease, targetRoot);
+  const server = serveReleaseStatus(root);
+  server.setVersion("0.3.0");
+
+  const managedRoot = dataRoot(home);
+  const activationBefore = readFileSync(join(managedRoot, "state", "activation.json"));
+  const selectionsBefore = readFileSync(join(managedRoot, "state", "selections.json"));
+  const framesPath = join(root, "blocked-readiness.jsonl");
+  const result = runManagedTui(home, framesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
+    PI_FIXTURE_TUI_WAIT_MS: "2000",
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const rows = readFrames(framesPath).map(releaseStatusLine);
+  assert.ok(rows.some((row) => /checking compatibility/i.test(row)));
+  assert.ok(rows.some((row) => /PorcuPi 0\.3\.0 blocked/i.test(row)), JSON.stringify(rows));
+  assert.deepEqual(readFileSync(join(managedRoot, "state", "activation.json")), activationBefore);
+  assert.deepEqual(readFileSync(join(managedRoot, "state", "selections.json")), selectionsBefore);
+
+  const status = runPorcuPiProcess(home, ["status"]);
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  assert.match(status.stdout, /Upgrade Readiness: blocked/);
+  assert.match(status.stdout, /Blocker: selected Patch Series .* does not support target Pi Base v0\.82\.0/);
+
+  const cachedFramesPath = join(root, "blocked-readiness-cached.jsonl");
+  const cached = runManagedTui(home, cachedFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
+  });
+  assert.equal(cached.status, 0, cached.stderr || cached.stdout);
+  assert.match(releaseStatusLine(readFrames(cachedFramesPath)[0]), /PorcuPi 0\.3\.0 blocked/i);
 });
 
 test("the packed npm artifact is behaviorally equivalent to the exact-tag source entrance", () => {

@@ -329,7 +329,13 @@ function preflightInstalled(dataRoot, environment) {
   validateRootDirectorySchema(paths);
   const stateNames = readdirSync(paths.state).sort();
   const requiredState = new Set(["activation.json", "launcher.json", "runtime.json"]);
-  const allowedState = new Set([...requiredState, "pi-launcher.json", "release-status.json", "selections.json"]);
+  const allowedState = new Set([
+    ...requiredState,
+    "pi-launcher.json",
+    "release-status.json",
+    "selections.json",
+    "upgrade-readiness.json",
+  ]);
   if (stateNames.some((name) => !allowedState.has(name)) || [...requiredState].some((name) => !stateNames.includes(name))) {
     fail(`Foreign PorcuPi state path requires manual inspection: ${paths.state}`);
   }

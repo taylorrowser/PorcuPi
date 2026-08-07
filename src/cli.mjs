@@ -26,7 +26,7 @@ async function runChild(command, args, environment = process.env) {
   process.exitCode = result.code ?? 1;
 }
 
-const piCommandsWithoutManagedSession = new Set(["install", "remove", "update", "list", "config"]);
+const piCommandsWithoutManagedSession = new Set(["install", "remove", "uninstall", "update", "list", "config"]);
 
 function managedPiArguments(args, integrationPath) {
   if (!process.stdin.isTTY || !process.stdout.isTTY || piCommandsWithoutManagedSession.has(args[0])) return args;
@@ -77,8 +77,7 @@ try {
     } else if (args[0] === "rollback") {
       if (args.length !== 1) fail("Usage: porcupi rollback");
       await rollbackComposition();
-    } else if (args[0] === "uninstall") {
-      if (args.length !== 1) fail("Usage: porcupi uninstall");
+    } else if (args[0] === "uninstall" && args.length === 1) {
       await uninstallManagedPi();
     } else if (args[0] === "verify") {
       if (args.length !== 1) fail("Usage: porcupi verify");

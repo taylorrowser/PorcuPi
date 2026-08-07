@@ -877,6 +877,45 @@ async function serveHttpRepository(root, repository) {
   throw new Error("Git HTTP fixture did not start");
 }
 
+test("Managed Pi forwards Pi's uninstall package alias", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  const installed = runInstaller(release, home);
+  assert.equal(installed.status, 0, installed.stderr || installed.stdout);
+
+  const forwardLog = join(root, "forwarded-pi-uninstall.jsonl");
+  const args = ["uninstall", "npm:example"];
+  const forwarded = runManagedTui(home, join(root, "unused-frames.jsonl"), { PI_FIXTURE_FORWARD_LOG: forwardLog }, args);
+  assert.equal(forwarded.status, 0, forwarded.stderr || forwarded.stdout);
+  assert.deepEqual(JSON.parse(readFileSync(forwardLog, "utf8")), args);
+});
+
+test("Managed Pi rejects malformed release identities before rendering guidance", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  const installed = runInstaller(release, home);
+  assert.equal(installed.status, 0, installed.stderr || installed.stdout);
+
+  const server = serveReleaseStatus(root);
+  const cachePath = join(dataRoot(home), "state", "release-status.json");
+  for (const [index, malformedVersion] of ["1.0.0-.", "1.0.0-a..b", "1.0.0-01"].entries()) {
+    server.setVersion(malformedVersion);
+    const frameLog = join(root, `malformed-release-${index}.jsonl`);
+    const result = runManagedTui(home, frameLog, { PORCUPI_TEST_RELEASE_STATUS_URL: server.url });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const rows = readFrames(frameLog).map(releaseStatusLine);
+    assert.ok(rows.some((row) => /unavailable/i.test(row)), `${malformedVersion} must remain unavailable`);
+    assert.ok(rows.every((row) => !row.includes(`porcupi@${malformedVersion}`)), `${malformedVersion} must not become exact guidance`);
+    assert.equal(existsSync(cachePath), false, `${malformedVersion} must not enter the availability cache`);
+  }
+});
+
 test("Managed Pi renders bounded release availability in one runtime-owned TUI row", () => {
   const root = temporaryRoot();
   const home = join(root, "home");

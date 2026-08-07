@@ -72,6 +72,12 @@ export function initialReleaseStatus({ installedVersion, cache, offline }) {
   return { kind: "checking", installedVersion, targetVersion: cached?.targetVersion ?? null, cache };
 }
 
+export function cachedReleaseStatus({ installedVersion, cache }) {
+  validateReleaseVersion(installedVersion);
+  return statusFromCache(installedVersion, cache)
+    ?? { kind: "unavailable", installedVersion, targetVersion: null, cache: null };
+}
+
 export function unavailableReleaseStatus({ installedVersion, cache }) {
   const cached = statusFromCache(installedVersion, cache);
   return { kind: "unavailable", installedVersion, targetVersion: cached?.targetVersion ?? null, cache };

@@ -26,20 +26,18 @@ async function runChild(command, args, environment = process.env) {
   process.exitCode = result.code ?? 1;
 }
 
-function isTuiInvocation(args) {
-  if (!process.stdin.isTTY || !process.stdout.isTTY || args.includes("--print") || args.includes("-p")) return false;
-  const modeIndex = args.indexOf("--mode");
-  if (modeIndex >= 0 && new Set(["rpc", "json"]).has(args[modeIndex + 1])) return false;
-  return !args.some((arg) => new Set(["--version", "-v", "--help", "-h", "--list-models", "--export"]).has(arg));
+const piCommandsWithoutManagedSession = new Set(["install", "remove", "update", "list", "config"]);
+
+function managedPiArguments(args, integrationPath) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY || piCommandsWithoutManagedSession.has(args[0])) return args;
+  return [...args, "--extension", integrationPath];
 }
 
 async function launch(args) {
   const active = readLeasedActiveComposition(defaultDataRoot());
   try {
     verifyLauncher(active.paths);
-    const managedArgs = isTuiInvocation(args)
-      ? ["--extension", join(active.paths.runtime, "tui-integration.mjs"), ...args]
-      : args;
+    const managedArgs = managedPiArguments(args, join(active.paths.runtime, "tui-integration.mjs"));
     await runChild(process.execPath, [active.executable, ...managedArgs], {
       ...process.env,
       PORCUPI_INSTALLED_VERSION: porcupiVersion,

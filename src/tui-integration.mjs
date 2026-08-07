@@ -1,5 +1,6 @@
 import { defaultDataRoot, managedLayout } from "./runtime.mjs";
 import {
+  cachedReleaseStatus,
   checkReleaseAvailability,
   initialReleaseStatus,
   porcupiOffline,
@@ -38,9 +39,11 @@ export default function porcupiTuiIntegration(pi) {
       cacheIsTrusted = false;
     }
     const offline = porcupiOffline();
-    let status = cacheIsTrusted
-      ? initialReleaseStatus({ installedVersion, cache, offline })
-      : unavailableReleaseStatus({ installedVersion, cache: null });
+    let status = !cacheIsTrusted
+      ? unavailableReleaseStatus({ installedVersion, cache: null })
+      : event.reason === "startup" || offline
+        ? initialReleaseStatus({ installedVersion, cache, offline })
+        : cachedReleaseStatus({ installedVersion, cache });
     let requestRender = () => {};
 
     ctx.ui.setWidget(widgetIdentity, (tui, theme) => {

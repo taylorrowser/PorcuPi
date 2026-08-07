@@ -334,6 +334,7 @@ function preflightInstalled(dataRoot, environment) {
     "pi-launcher.json",
     "release-status.json",
     "selections.json",
+    "source-updates.json",
     "upgrade-readiness.json",
   ]);
   if (stateNames.some((name) => !allowedState.has(name)) || [...requiredState].some((name) => !stateNames.includes(name))) {

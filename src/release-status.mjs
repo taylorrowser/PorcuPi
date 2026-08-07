@@ -2,6 +2,7 @@ import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import { compareReleaseVersions, isReleaseVersion, validateReleaseVersion } from "./release-version.mjs";
 import { patchSelectionSnapshot, readSelections } from "./resource-intent.mjs";
+import { formatSourceUpdates, readSourceUpdateCache } from "./source-update-status.mjs";
 import {
   atomicWrite,
   canonicalJson,
@@ -269,6 +270,7 @@ export function matchingUpgradeReadiness(cache, {
 
 export function verifyReleaseStatusState(paths) {
   readReleaseStatusCache(paths);
+  readSourceUpdateCache(paths);
   return readUpgradeReadinessCache(paths);
 }
 
@@ -563,6 +565,7 @@ export function showReleaseStatus({ environment = process.env, dataRoot = defaul
   if (!isReleaseVersion(metadata.version)) fail("Malformed installed PorcuPi package version");
   const cache = readReleaseStatusCache(active.paths);
   const readiness = readUpgradeReadinessCache(active.paths);
+  const sourceUpdates = readSourceUpdateCache(active.paths);
   const selections = readSelections(active.paths.root);
   output.write(formatReleaseStatus({
     installedVersion: metadata.version,
@@ -573,5 +576,6 @@ export function showReleaseStatus({ environment = process.env, dataRoot = defaul
     offline: porcupiOffline(environment),
     readinessDisabled: backgroundReadinessDisabled(environment),
   }));
-  return { installedVersion: metadata.version, cache, readiness };
+  output.write(`${formatSourceUpdates(sourceUpdates, selections)}\n`);
+  return { installedVersion: metadata.version, cache, readiness, sourceUpdates };
 }

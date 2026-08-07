@@ -11,6 +11,7 @@ import { defaultBinDirectory, defaultDataRoot, fail, readLeasedActiveComposition
 import { manageResources } from "./manage.mjs";
 import { setPiOwnership } from "./pi-ownership.mjs";
 import { showReleaseStatus } from "./release-status.mjs";
+import { checkTrackedBranchAvailability, inspectOneTrackedBranch } from "./source-update-status.mjs";
 import { uninstallManagedPi } from "./uninstall.mjs";
 
 async function runChild(command, args, environment = process.env) {
@@ -51,9 +52,24 @@ async function launch(args) {
 let launching = false;
 try {
   const args = process.argv.slice(2);
-  if (args[0] === "status") {
+  if (args[0] === "--porcupi-background-tracked-branches") {
+    if (args.length !== 1) fail("Malformed background Tracked Branch availability request");
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    process.once("SIGTERM", abort);
+    process.once("SIGINT", abort);
+    try {
+      await checkTrackedBranchAvailability({ signal: controller.signal });
+    } finally {
+      process.removeListener("SIGTERM", abort);
+      process.removeListener("SIGINT", abort);
+    }
+  } else if (args[0] === "--porcupi-background-tracked-branch") {
+    if (args.length !== 2) fail("Malformed background Tracked Branch availability worker request");
+    process.stdout.write(`${JSON.stringify(inspectOneTrackedBranch(args[1]))}\n`);
+  } else if (args[0] === "status") {
     if (args.length === 2 && new Set(["--help", "-h"]).has(args[1])) {
-      process.stdout.write("Usage: porcupi status\n\nShow cached PorcuPi release availability, Upgrade Readiness evidence, and exact external guidance without network or lifecycle mutation.\n");
+      process.stdout.write("Usage: porcupi status\n\nShow cached PorcuPi release availability, Upgrade Readiness evidence, Tracked Branch candidates, and exact guidance without network or lifecycle mutation.\n");
     } else {
       if (args.length !== 1) fail("Usage: porcupi status");
       showReleaseStatus();
@@ -83,7 +99,7 @@ try {
       if (args.length !== 1) fail("Usage: porcupi verify");
       const receipt = verifyManagedInstallation();
       process.stdout.write(`Verified Managed Pi Composition ${receipt.compositionId}.\n`);
-      process.stdout.write("Complete payload inventory, runtime and TUI Integration, release-status and Upgrade Readiness state, executable, version, public conformance, isolated-home smoke, and launcher ownership checks passed.\n");
+      process.stdout.write("Complete payload inventory, runtime and TUI Integration, release-status, Tracked Branch availability, and Upgrade Readiness state, executable, version, public conformance, isolated-home smoke, and launcher ownership checks passed.\n");
     } else {
       launching = true;
       await launch(args);

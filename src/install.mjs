@@ -16,6 +16,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { compareReleaseVersions } from "./release-version.mjs";
 import {
   atomicWrite,
   canonicalJson,
@@ -105,41 +106,10 @@ function publishFreshRuntime(paths, stageRoot) {
   renameSync(stageRuntime(stageRoot), paths.runtime);
 }
 
-function compareVersions(left, right) {
-  const parse = (value) => {
-    const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(value);
-    if (!match) fail(`Unsupported PorcuPi version identity: ${value}`);
-    return { numbers: match.slice(1, 4).map(Number), prerelease: match[4]?.split(".") ?? null };
-  };
-  const a = parse(left);
-  const b = parse(right);
-  for (let index = 0; index < 3; index += 1) {
-    if (a.numbers[index] !== b.numbers[index]) return a.numbers[index] < b.numbers[index] ? -1 : 1;
-  }
-  if (a.prerelease === null || b.prerelease === null) {
-    return a.prerelease === b.prerelease ? 0 : a.prerelease === null ? 1 : -1;
-  }
-  for (let index = 0; index < Math.max(a.prerelease.length, b.prerelease.length); index += 1) {
-    const leftPart = a.prerelease[index];
-    const rightPart = b.prerelease[index];
-    if (leftPart === undefined || rightPart === undefined) return leftPart === rightPart ? 0 : leftPart === undefined ? -1 : 1;
-    if (leftPart === rightPart) continue;
-    const leftNumber = /^\d+$/.test(leftPart) ? Number(leftPart) : null;
-    const rightNumber = /^\d+$/.test(rightPart) ? Number(rightPart) : null;
-    if (leftNumber !== null || rightNumber !== null) {
-      if (leftNumber === null) return 1;
-      if (rightNumber === null) return -1;
-      return leftNumber < rightNumber ? -1 : 1;
-    }
-    return leftPart < rightPart ? -1 : 1;
-  }
-  return 0;
-}
-
 function readInstalledVersion(paths) {
   const metadata = readJson(join(paths.runtime, "package.json"), "installed PorcuPi package metadata");
   if (typeof metadata.version !== "string") fail("Malformed installed PorcuPi package version");
-  compareVersions(metadata.version, metadata.version);
+  compareReleaseVersions(metadata.version, metadata.version);
   return metadata.version;
 }
 
@@ -368,8 +338,8 @@ function readUpgradeStageOwner(paths, stage) {
     || typeof owner.installedVersion !== "string"
     || typeof owner.targetVersion !== "string"
   ) fail(`Foreign PorcuPi upgrade stage requires manual inspection: ${stage}`);
-  compareVersions(owner.installedVersion, owner.installedVersion);
-  compareVersions(owner.targetVersion, owner.targetVersion);
+  compareReleaseVersions(owner.installedVersion, owner.installedVersion);
+  compareReleaseVersions(owner.targetVersion, owner.targetVersion);
   if (
     owner.targetVersion !== porcupiVersion
     || !upgradeMigrationContracts.has(migrationContractKey(owner.installedVersion, owner.targetVersion))
@@ -1132,7 +1102,7 @@ async function installManagedPiLocked({
   if (pathExists(paths.root) && pathExists(paths.activation)) {
     recoverInterruptedUpgradesLocked(paths, launcher, environment, output);
     const existing = validateExistingInstallation(paths, launcher, environment);
-    const comparison = compareVersions(porcupiVersion, existing.installedVersion);
+    const comparison = compareReleaseVersions(porcupiVersion, existing.installedVersion);
     if (comparison < 0) {
       fail(`Unsupported PorcuPi downgrade: installed ${existing.installedVersion}, invoked target ${porcupiVersion}; no changes were made`);
     }

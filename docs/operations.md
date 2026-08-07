@@ -1,6 +1,6 @@
-# PorcuPi v0.1.0 operations
+# PorcuPi operations
 
-PorcuPi intentionally has a small public command surface. There is no release channel, background updater, generalized adapter, arbitrary retention control, or Windows command path.
+PorcuPi intentionally has a small public command surface. There is no automatic updater, generalized adapter, arbitrary retention control, or Windows command path.
 
 ## Launch Managed Pi
 
@@ -11,6 +11,18 @@ porcupi --model openai/gpt-5
 ```
 
 Arguments not recognized as PorcuPi lifecycle commands are forwarded unchanged to the active Managed Pi. Launch validates the active identity and required executable, claims a Composition process lease, and retains it for the Pi child process lifetime. Corruption fails closed; PorcuPi does not run the previous Composition or Stock Pi as fallback.
+
+Interactive launch also loads one fixed receipt-owned PorcuPi TUI Integration outside the Composition payload and Pi package settings. Its one reserved row checks release availability asynchronously, displays an exact external Release Installation command when available, and never enters saved conversation history or changes lifecycle state. `--offline` suppresses the request and preserves cached/offline guidance.
+
+## Read cached release status
+
+```sh
+porcupi status
+```
+
+Status reads the installed release, active Pi Base, last successful release-availability cache, target release, and exact next command. It performs no network request and makes no filesystem or lifecycle change. An upgrade command must be completed outside the current Managed Pi session; the row and status command never install or activate a release.
+
+Checking, current, update-available, offline, and unavailable/stale are availability states, not Upgrade Readiness. Background readiness assessment and Tracked Branch status are separate lifecycle work.
 
 ## Add exact source intent
 
@@ -77,7 +89,7 @@ porcupi uninstall
 
 The guided uninstall inventories exact PorcuPi targets and separately reports Pi-owned resource configuration that will remain. It preflights all ownership evidence before deletion and fails closed if any target is malformed, modified, symbolic, foreign, or escaping its root. A live Composition lease defers uninstall without terminating Pi; retry after that process exits.
 
-Uninstall removes only receipt-proven PorcuPi launchers, runtime, state, and Compositions. It retains Pi global/project package configuration, package data, credentials, sessions, trust/resources, and Stock Pi. An interrupted confirmed uninstall is retried with the same command and converges through PorcuPi's receipt-owned recovery launcher.
+Uninstall removes only receipt-proven PorcuPi launchers, runtime (including the TUI Integration), release-availability cache, state, and Compositions. It retains Pi global/project package configuration, package data, credentials, sessions, trust/resources, and Stock Pi. An interrupted confirmed uninstall is retried with the same command and converges through PorcuPi's receipt-owned recovery launcher.
 
 ## Lifecycle and recovery boundaries
 

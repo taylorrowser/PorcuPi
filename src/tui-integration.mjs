@@ -34,11 +34,15 @@ function truncateRow(value, width) {
 
 function statusRow(status, width) {
   const full = renderReleaseStatusRow(status);
-  if (
-    [...full].length <= width
-    || !status.targetVersion
-    || new Set(["blocked", "checking-readiness"]).has(status.kind)
-  ) return truncateRow(full, width);
+  if ([...full].length <= width || !status.targetVersion) return truncateRow(full, width);
+
+  const compact = renderReleaseStatusRow(status, { compact: true });
+  if ([...compact].length <= width) return compact;
+  if (status.reason) {
+    const reasonWidth = width - ([...compact].length - [...status.reason].length);
+    if (reasonWidth > 3) return compact.replace(status.reason, truncateRow(status.reason, reasonWidth));
+  }
+
   const command = releaseInstallCommand(status.targetVersion);
   const externalGuidance = `${command} (outside session)`;
   if ([...externalGuidance].length <= width) return externalGuidance;

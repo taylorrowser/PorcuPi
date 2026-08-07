@@ -305,7 +305,15 @@ export function initialReleaseStatus({ installedVersion, cache, readiness = null
     context: offline ? "offline" : "cached",
   });
   if (ready) return ready;
-  if (offline) return { kind: "offline", installedVersion, targetVersion: cached?.targetVersion ?? null, cache };
+  if (offline) {
+    return {
+      kind: "offline",
+      installedVersion,
+      targetVersion: cached?.targetVersion ?? null,
+      cache,
+      stale: Boolean(readiness),
+    };
+  }
   return { kind: "checking", installedVersion, targetVersion: cached?.targetVersion ?? null, cache };
 }
 
@@ -434,35 +442,62 @@ export function releaseInstallCommand(version) {
   return `npx --yes porcupi@${version}`;
 }
 
-export function renderReleaseStatusRow(status) {
+function externalReleaseInstallGuidance(targetVersion, compact) {
+  const command = releaseInstallCommand(targetVersion);
+  return compact ? `outside: ${command}` : `${command} (outside session)`;
+}
+
+export function renderReleaseStatusRow(status, { compact = false } = {}) {
+  const guidance = status.targetVersion
+    ? externalReleaseInstallGuidance(status.targetVersion, compact)
+    : null;
   if (status.kind === "checking") {
-    const cachedTarget = status.targetVersion ? `; cached target ${status.targetVersion}` : "";
-    return `PorcuPi: checking release availability${cachedTarget}...`;
+    if (status.targetVersion) {
+      return compact
+        ? `${status.targetVersion} checking release availability; ${guidance}`
+        : `PorcuPi: checking release availability; cached target ${status.targetVersion}: ${guidance}`;
+    }
+    return "PorcuPi: checking release availability...";
   }
   if (status.kind === "checking-readiness") {
-    return `PorcuPi ${status.targetVersion}: checking compatibility...`;
+    return `PorcuPi ${status.targetVersion}${compact ? "" : ":"} checking compatibility; ${guidance}`;
   }
   if (status.kind === "ready") {
-    const context = status.context === "offline" ? "cached ready (offline)" : "ready";
-    return `PorcuPi ${status.targetVersion} ${context}: ${releaseInstallCommand(status.targetVersion)} (outside session)`;
+    const context = status.context === "offline"
+      ? compact ? "ready/offline" : "cached ready (offline)"
+      : "ready";
+    return `PorcuPi ${status.targetVersion} ${context}${compact ? ";" : ":"} ${guidance}`;
   }
-  if (status.kind === "blocked") return `PorcuPi ${status.targetVersion} blocked: ${status.reason}`;
+  if (status.kind === "blocked") {
+    const context = status.context === "offline" ? " (cached offline)" : "";
+    return `PorcuPi ${status.targetVersion} blocked${context}: ${status.reason}; ${guidance}`;
+  }
   if (status.kind === "readiness-unavailable") {
-    return `PorcuPi ${status.targetVersion} readiness unavailable: ${releaseInstallCommand(status.targetVersion)}`;
+    const evidence = status.stale ? "stale" : "unavailable";
+    let disabled = "";
+    if (status.disabled) disabled = compact ? " (disabled)" : " (background disabled)";
+    return `PorcuPi ${status.targetVersion} readiness ${evidence}${disabled}${compact ? ";" : ":"} ${guidance}`;
   }
   if (status.kind === "current") return `PorcuPi ${status.installedVersion}: current`;
   if (status.kind === "available") {
-    return `PorcuPi ${status.targetVersion} available; Upgrade Readiness unavailable: ${releaseInstallCommand(status.targetVersion)}`;
+    return compact
+      ? `PorcuPi ${status.targetVersion} readiness unavailable; ${guidance}`
+      : `PorcuPi ${status.targetVersion} available; Upgrade Readiness unavailable: ${guidance}`;
   }
   if (status.kind === "offline") {
     if (status.targetVersion) {
-      return `PorcuPi offline; cached ${status.targetVersion}; Upgrade Readiness unavailable/stale`;
+      const evidence = status.stale ? "stale" : "unavailable";
+      return compact
+        ? `PorcuPi ${status.targetVersion} offline/readiness-${evidence}; ${guidance}`
+        : `PorcuPi offline; cached ${status.targetVersion}; Upgrade Readiness ${evidence}: ${guidance}`;
     }
     if (status.cache) return `PorcuPi ${status.installedVersion}: offline; cached current`;
     return `PorcuPi ${status.installedVersion}: offline; cached release status unavailable`;
   }
   if (status.targetVersion) {
-    return `PorcuPi unavailable; stale ${status.targetVersion}: ${releaseInstallCommand(status.targetVersion)}`;
+    return compact
+      ? `PorcuPi ${status.targetVersion} release status stale; ${guidance}`
+      : `PorcuPi unavailable; stale ${status.targetVersion}: ${guidance}`;
   }
   if (status.cache) return `PorcuPi ${status.installedVersion}: unavailable; cached current result is stale`;
   return `PorcuPi ${status.installedVersion}: release status unavailable; no cached result`;

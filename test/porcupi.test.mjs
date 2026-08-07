@@ -1132,7 +1132,12 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PI_FIXTURE_TUI_WAIT_MS: "1000",
   });
   assert.equal(unsupported.status, 0, unsupported.stderr || unsupported.stdout);
-  assert.ok(readFrames(unsupportedFramesPath).some((frame) => /readiness unavailable/i.test(releaseStatusLine(frame))));
+  const unsupportedRows = readFrames(unsupportedFramesPath).map(releaseStatusLine);
+  assert.ok(unsupportedRows.some((row) => /readiness unavailable/i.test(row)));
+  assert.ok(unsupportedRows.some((row) => /readiness unavailable/i.test(row)
+    && /npx --yes porcupi@0\.3\.0/.test(row)
+    && /outside/i.test(row)
+    && !/stale/i.test(row)), "unavailable evidence must retain exact external guidance without claiming staleness");
   assert.equal(readFileSync(buildLog, "utf8"), "", "an unsupported upgrade route must not run heavy readiness work");
   assert.equal(existsSync(join(managedRoot, "state", "upgrade-readiness.json")), false);
 
@@ -1260,7 +1265,11 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PI_FIXTURE_TUI_WAIT_MS: "500",
   });
   assert.equal(disabled.status, 0, disabled.stderr || disabled.stdout);
-  assert.ok(readFrames(disabledFramesPath).some((frame) => /unavailable|stale|disabled/i.test(releaseStatusLine(frame))));
+  const disabledRows = readFrames(disabledFramesPath).map(releaseStatusLine);
+  assert.ok(disabledRows.some((row) => /stale/i.test(row)
+    && /disabled/i.test(row)
+    && /npx --yes porcupi@0\.3\.0/.test(row)
+    && /outside/i.test(row)), "stale disabled evidence must remain distinct and actionable");
   assert.equal(readFileSync(buildLog, "utf8"), "build\n", "the opt-out must suppress invalidated readiness work");
 
   const refreshedFramesPath = join(root, "readiness-refreshed.jsonl");
@@ -1364,8 +1373,28 @@ test("Managed Pi caches exact-input background Upgrade Readiness through the tar
     PI_FIXTURE_TUI_WAIT_MS: "4000",
   });
   assert.equal(failed.status, 0, failed.stderr || failed.stdout);
-  assert.ok(readFrames(failedFramesPath).some((frame) => /readiness unavailable/i.test(releaseStatusLine(frame))));
+  const failedRows = readFrames(failedFramesPath).map(releaseStatusLine);
+  assert.ok(failedRows.some((row) => /stale/i.test(row)
+    && /npx --yes porcupi@0\.3\.0/.test(row)
+    && /outside/i.test(row)), "failed reassessment must expose stale rather than unavailable evidence with external guidance");
   assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\nbuild\nbuild\n");
+
+  const staleOfflineFramesPath = join(root, "readiness-stale-offline.jsonl");
+  const staleOffline = runManagedTui(home, staleOfflineFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
+    PI_FIXTURE_BUILD_LOG: buildLog,
+  }, ["--offline"]);
+  assert.equal(staleOffline.status, 0, staleOffline.stderr || staleOffline.stdout);
+  assert.ok(readFrames(staleOfflineFramesPath).some((frame) => {
+    const row = releaseStatusLine(frame);
+    return /offline/i.test(row)
+      && /stale/i.test(row)
+      && /npx --yes porcupi@0\.3\.0/.test(row)
+      && /outside/i.test(row);
+  }), "offline stale target evidence must retain exact external guidance");
+  assert.equal(readFileSync(buildLog, "utf8"), "build\nbuild\nbuild\nbuild\n");
+
   const staleStatus = runPorcuPiProcess(home, ["status"]);
   assert.equal(staleStatus.status, 0, staleStatus.stderr || staleStatus.stdout);
   assert.match(staleStatus.stdout, /Upgrade Readiness: unavailable — cached evidence is stale/);
@@ -1424,7 +1453,9 @@ test("background Upgrade Readiness caches an exact selected blocker without life
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const rows = readFrames(framesPath).map(releaseStatusLine);
   assert.ok(rows.some((row) => /checking compatibility/i.test(row)));
-  assert.ok(rows.some((row) => /PorcuPi 0\.3\.0 blocked/i.test(row)), JSON.stringify(rows));
+  assert.ok(rows.some((row) => /PorcuPi 0\.3\.0 blocked/i.test(row)
+    && /npx --yes porcupi@0\.3\.0/.test(row)
+    && /outside/i.test(row)), JSON.stringify(rows));
   assert.deepEqual(readFileSync(join(managedRoot, "state", "activation.json")), activationBefore);
   assert.deepEqual(readFileSync(join(managedRoot, "state", "selections.json")), selectionsBefore);
 
@@ -1439,7 +1470,10 @@ test("background Upgrade Readiness caches an exact selected blocker without life
     PORCUPI_TEST_READINESS_PACKAGE: targetArtifact,
   });
   assert.equal(cached.status, 0, cached.stderr || cached.stdout);
-  assert.match(releaseStatusLine(readFrames(cachedFramesPath)[0]), /PorcuPi 0\.3\.0 blocked/i);
+  const cachedBlockedRow = releaseStatusLine(readFrames(cachedFramesPath)[0]);
+  assert.match(cachedBlockedRow, /PorcuPi 0\.3\.0 blocked/i);
+  assert.match(cachedBlockedRow, /npx --yes porcupi@0\.3\.0/);
+  assert.match(cachedBlockedRow, /outside/i);
 });
 
 test("the packed npm artifact is behaviorally equivalent to the exact-tag source entrance", () => {

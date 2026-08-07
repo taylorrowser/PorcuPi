@@ -22,7 +22,7 @@ At TUI session startup the integration synchronously reserves one one-line widge
 
 The row is recomputed for terminal width on every render, always returns exactly one line, and uses the current theme callback without retaining themed bytes. Theme invalidation, repeated rendering, network completion, and narrow widths therefore neither add nor remove layout rows. An available release shows `npx --yes porcupi@<exact-version>` and says it must run outside the current Managed Pi session. When the full prose does not fit but the exact command does, command-first rendering preserves that complete command before any optional prose is truncated.
 
-The integration uses only widget state and never sends or appends a message or session entry. Availability checking may write only its strict informational cache; it does not acquire lifecycle authority or write Activation, runtime, launchers, Selection Intent, Pi settings, or Composition state. `porcupi status` is a separate network-free, side-effect-free reader for installed release/Pi Base, cached target release, freshness, and exact guidance.
+The integration uses only widget state and never sends or appends a message or session entry. Availability checking may write only its strict informational cache; it does not acquire lifecycle authority or write Activation, runtime, launchers, Selection Intent, Pi settings, or Composition state. `porcupi status` is a separate network-free, side-effect-free reader for installed release/Pi Base, cached target release, freshness, and exact guidance. This decision explicitly narrows ADR 0011's earlier rule that every installed command recovers an interrupted upgrade: status neither acquires the lifecycle lock nor performs recovery and may fail closed against an incomplete old-or-new state. The next Release Installation or ordinary installed command retains sole responsibility for convergent recovery.
 
 The integration modules participate in the runtime inventory receipt. Full verification also validates the optional availability-cache schema. Conservative uninstall recognizes that one state file, binds it in the state inventory, and removes it with the PorcuPi ownership root while retaining all Pi-owned data.
 
@@ -30,6 +30,7 @@ The integration modules participate in the runtime inventory receipt. Full verif
 
 - Zero-Patch Composition identity still means exact Pi Base payload bytes; Managed Pi behavior also includes one separately receipt-owned launch integration.
 - Release availability is informational and does not claim Upgrade Readiness or activate an update.
+- Reading status cannot advance an interrupted upgrade; recovery remains visible output of a later lifecycle-capable command.
 - A corrupt cache cannot be repaired by startup checking; the row fails quiet, while `porcupi verify` and uninstall fail closed for inspection.
 - A live Managed Pi Composition lease prevents uninstall from deleting the runtime while its integration or request is active.
 - Future readiness and Tracked Branch status may extend the closed status model, but cannot turn this boundary into a configurable privileged-extension platform.

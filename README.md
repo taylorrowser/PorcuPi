@@ -42,6 +42,16 @@ Add `~/.local/bin` to `PATH` if the installer reports that it is missing. Then l
 porcupi
 ```
 
+Every interactive Managed Pi starts with one fixed PorcuPi release-status row. Online startup checks the official npm release asynchronously; Pi's `--offline` mode suppresses that request. The row remains informational, stays out of conversation history, and never installs or activates an update. When an exact newer release is available, run the displayed `npx --yes porcupi@<version>` command in another terminal after leaving the current Managed Pi session.
+
+Read the cached installed/target release and exact guidance without network or lifecycle changes:
+
+```sh
+porcupi status
+```
+
+The integration is receipt-owned PorcuPi runtime code loaded at one fixed path. It is absent from Pi package settings and Selection Intent and does not change the zero-Patch Managed Pi Composition payload. See [ADR 0018](docs/adr/0018-runtime-owned-tui-integration.md).
+
 Ordinary Pi arguments are forwarded unchanged:
 
 ```sh
@@ -145,7 +155,7 @@ Run the complete on-demand check with:
 porcupi verify
 ```
 
-Verification recomputes the active Composition's normalized complete payload inventory and reruns the required executable identity, exact version, public conformance, and isolated-home smoke checks. It also checks the installed PorcuPi runtime inventory receipt, the stable launcher's exact path, regular-file kind, mode, size, digest, ownership marker, and expected command bytes, plus the optional `pi` alias whenever PorcuPi has an ownership receipt for it. It reports a modified or foreign owned launcher without overwriting it.
+Verification recomputes the active Composition's normalized complete payload inventory and reruns the required executable identity, exact version, public conformance, and isolated-home smoke checks. It also checks the installed PorcuPi runtime inventory receipt (including the fixed TUI Integration), the strict optional release-availability cache, the stable launcher's exact path, regular-file kind, mode, size, digest, ownership marker, and expected command bytes, plus the optional `pi` alias whenever PorcuPi has an ownership receipt for it. It reports a modified or foreign owned launcher without overwriting it.
 
 Malformed state, receipt disagreement, platform/path mismatch, or a changed required executable makes normal launch exit nonzero. PorcuPi never silently runs the previous Composition or Stock Pi. The error points to `porcupi verify`, retained-composition rollback, `porcupi pi disable` for an unchanged owned alias, and the independently managed Stock Pi path for direct recovery because `pi` may currently resolve to PorcuPi.
 

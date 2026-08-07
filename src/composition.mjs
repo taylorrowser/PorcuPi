@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { verifyReleaseStatusState } from "./release-status.mjs";
 import {
   atomicWrite,
   canonicalJson,
@@ -376,6 +377,7 @@ export function verifyManagedInstallation({ dataRoot, environment = process.env 
   const active = readActiveComposition(dataRoot);
   verifyLauncher(active.paths, environment);
   verifyRuntime(active.paths);
+  verifyReleaseStatusState(active.paths);
   verifyOptionalPiLauncher(active.paths, environment);
   verifyCompositionContents(active.compositionRoot, active.receipt);
   const stageRoot = join(active.paths.temporary, `verify-${randomUUID()}`);

@@ -60,7 +60,7 @@ function createPiBase(root, { version = "0.81.1", buildFails = false } = {}) {
   mkdirSync(join(source, "packages", "coding-agent"), { recursive: true });
   mkdirSync(join(source, "packages", "ai", "src", "providers"), { recursive: true });
   mkdirSync(join(source, "packages", "agent"), { recursive: true });
-  mkdirSync(join(source, "packages", "tui"), { recursive: true });
+  mkdirSync(join(source, "packages", "tui", "dist"), { recursive: true });
   mkdirSync(join(source, "scripts"), { recursive: true });
   const packages = [
     ["ai", "@earendil-works/pi-ai"],
@@ -84,6 +84,14 @@ function createPiBase(root, { version = "0.81.1", buildFails = false } = {}) {
     }, null, 2)}\n`,
   );
   writeFileSync(join(source, "series.txt"), "base\n");
+  writeFileSync(
+    join(source, "packages", "tui", "dist", "index.js"),
+    `export class TUI {
+  constructor(onRender) { this.onRender = onRender; this.children = []; }
+  requestRender() { this.onRender(); }
+}
+`,
+  );
   writeFileSync(join(source, "packages", "ai", "src", "models.generated.ts"), 'import { FIXTURE_MODELS } from "./providers/fixture.models.ts";\n');
   writeFileSync(join(source, "packages", "ai", "src", "providers", "fixture.models.ts"), [
     'import values from "./data/fixture.json" with { type: "json" };',
@@ -99,7 +107,7 @@ function createPiBase(root, { version = "0.81.1", buildFails = false } = {}) {
   writeFileSync(join(source, "scripts", "fail-build.mjs"), "console.error('fixture build failed'); process.exit(23);\n");
   writeFileSync(
     join(source, "scripts", "build.mjs"),
-    `import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+    `import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const output = join(process.cwd(), "packages", "coding-agent", "dist");
 mkdirSync(output, { recursive: true });
@@ -112,8 +120,91 @@ const cli = join(output, "cli.js");
 writeFileSync(cli, \`#!/usr/bin/env node
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { TUI } from "../../tui/dist/index.js";
 const args = process.argv.slice(2);
-if (process.env.PI_FIXTURE_CHECK_FAIL === args[0]) process.exitCode = 44;
+if (process.env.PI_FIXTURE_FORWARD_LOG) {
+  appendFileSync(process.env.PI_FIXTURE_FORWARD_LOG, JSON.stringify(args) + "\\\\n");
+} else if (process.env.PI_FIXTURE_TUI === "1") {
+  if (args.includes("--offline")) process.env.PI_OFFLINE = "1";
+  const extensionIndex = args.indexOf("--extension");
+  if (extensionIndex < 0 || !args[extensionIndex + 1]) throw new Error("Managed Pi TUI Integration was not loaded");
+  const extension = await import(args[extensionIndex + 1]);
+  const handlers = new Map();
+  let renderCount = 0;
+  let renderReason = "update";
+  let sessionReason;
+  const frameLog = process.env.PI_FIXTURE_TUI_FRAME_LOG;
+  const width = Number(process.env.PI_FIXTURE_TUI_WIDTH || 80);
+  const widgetContainer = {
+    children: [],
+    addChild(child) { this.children.push(child); },
+    clear() { this.children = []; },
+  };
+  const render = () => {
+    if (!frameLog) return;
+    const component = widgetContainer.children.find((child) => typeof child.render === "function");
+    const lines = component ? ["", ...component.render(width)] : [""];
+    appendFileSync(frameLog, JSON.stringify({ reason: renderReason, sessionReason, renderCount: ++renderCount, width, lines }) + "\\\\n");
+  };
+  const theme = { fg: (_color, text) => text, bold: (text) => text };
+  const tui = new TUI(render);
+  const ctx = {
+    mode: "tui",
+    hasUI: true,
+    ui: {
+      theme,
+      setWidget(id, value) {
+        if (id !== "porcupi-release-status") throw new Error("Unexpected Managed Pi TUI widget identity: " + id);
+        const component = typeof value === "function"
+          ? value(tui, theme)
+          : { render: () => value, invalidate() {} };
+        widgetContainer.clear();
+        widgetContainer.addChild({});
+        widgetContainer.addChild(component);
+        tui.requestRender();
+      },
+    },
+  };
+  const pi = {
+    on(event, handler) {
+      const values = handlers.get(event) || [];
+      values.push(handler);
+      handlers.set(event, values);
+    },
+  };
+  await extension.default(pi);
+  let startupRenderCount = 0;
+  const startupTui = new TUI(() => { startupRenderCount += 1; });
+  startupTui.children.push({});
+  startupTui.requestRender();
+  if (startupRenderCount !== 1) throw new Error("Managed Pi TUI Integration blocked Pi's project-trust UI");
+  tui.children.push({}, {}, {}, {}, widgetContainer);
+  renderReason = "pre-bind";
+  tui.requestRender();
+  const sessionReasons = (process.env.PI_FIXTURE_TUI_SESSION_REASONS || "startup").split(",");
+  for (let index = 0; index < sessionReasons.length; index += 1) {
+    sessionReason = sessionReasons[index];
+    if (index > 0) {
+      if (sessionReason === "reload") {
+        widgetContainer.clear();
+        widgetContainer.addChild({});
+        renderReason = "reload-reset";
+        tui.requestRender();
+      }
+      for (const handler of handlers.get("session_shutdown") || []) await handler({ reason: sessionReason }, ctx);
+    }
+    renderReason = "session-start";
+    for (const handler of handlers.get("session_start") || []) await handler({ reason: sessionReason }, ctx);
+    renderReason = "update";
+    await new Promise((resolve) => setTimeout(resolve, Number(process.env.PI_FIXTURE_TUI_WAIT_MS || 250)));
+  }
+  widgetContainer.children.find((child) => typeof child.invalidate === "function")?.invalidate();
+  renderReason = "theme-invalidation";
+  tui.requestRender();
+  renderReason = "repeated";
+  tui.requestRender();
+  for (const handler of handlers.get("session_shutdown") || []) await handler({ reason: "quit" }, ctx);
+} else if (process.env.PI_FIXTURE_CHECK_FAIL === args[0]) process.exitCode = 44;
 else if (args[0] === "--version") console.log(process.env.PI_FIXTURE_VERSION_OVERRIDE || "${version}");
 else if (args[0] === "--help") console.log("Pi fixture help");
 else if (args[0] === "--list-models") {
@@ -683,6 +774,84 @@ function createManifestResourceRepository(root) {
   return { source, commit: git(source, "rev-parse", "HEAD") };
 }
 
+function serveReleaseStatus(root) {
+  const responsePath = join(root, "release-status-response.json");
+  const requestLog = join(root, "release-status-requests.log");
+  const delayPath = join(root, "release-status-delay.txt");
+  const serverPath = join(root, "release-status-server.py");
+  const port = Number(execFileSync("python3", ["-c", "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); print(s.getsockname()[1]); s.close()"], { encoding: "utf8" }).trim());
+  writeFileSync(responsePath, `${JSON.stringify({ version: porcupiVersion })}\n`);
+  writeFileSync(requestLog, "");
+  writeFileSync(delayPath, "0");
+  writeFileSync(serverPath, `
+import http.server
+import pathlib
+import time
+
+response_path = pathlib.Path(${JSON.stringify(responsePath)})
+request_log = pathlib.Path(${JSON.stringify(requestLog)})
+delay_path = pathlib.Path(${JSON.stringify(delayPath)})
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        with request_log.open("a") as log:
+            log.write(self.path + "\\n")
+        time.sleep(float(delay_path.read_text()))
+        body = response_path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format, *args):
+        pass
+
+http.server.ThreadingHTTPServer(("127.0.0.1", ${port}), Handler).serve_forever()
+`);
+  const child = spawn("python3", [serverPath], { stdio: "ignore" });
+  childProcesses.push(child);
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const ready = spawnSync("python3", ["-c", `import socket; s=socket.socket(); s.settimeout(.1); s.connect(('127.0.0.1',${port})); s.close()`]);
+    if (ready.status === 0) break;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  return {
+    url: `http://127.0.0.1:${port}/porcupi/latest`,
+    requestLog,
+    setDelay(seconds) { writeFileSync(delayPath, String(seconds)); },
+    setVersion(version) { writeFileSync(responsePath, `${JSON.stringify({ version })}\n`); },
+  };
+}
+
+function runManagedTui(home, frameLog, extraEnvironment = {}, args = []) {
+  return spawnSync(
+    "python3",
+    [join(repositoryRoot, "test", "support", "pty-driver.py"), "", join(home, ".local", "bin", "porcupi"), ...args],
+    {
+      encoding: "utf8",
+      timeout: 10_000,
+      env: {
+        ...process.env,
+        HOME: home,
+        XDG_DATA_HOME: join(home, ".local", "share"),
+        NODE_ENV: "test",
+        PI_FIXTURE_TUI: "1",
+        PI_FIXTURE_TUI_FRAME_LOG: frameLog,
+        ...extraEnvironment,
+      },
+    },
+  );
+}
+
+function readFrames(path) {
+  return readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function releaseStatusLine(frame) {
+  return frame.lines.find((line) => line.length > 0) ?? "";
+}
+
 async function serveGitRepository(root, repository) {
   const daemonRoot = join(root, "git-daemon");
   mkdirSync(daemonRoot);
@@ -721,6 +890,189 @@ async function serveHttpRepository(root, repository) {
   }
   throw new Error("Git HTTP fixture did not start");
 }
+
+test("Managed Pi forwards Pi's uninstall package alias", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  const installed = runInstaller(release, home);
+  assert.equal(installed.status, 0, installed.stderr || installed.stdout);
+
+  const forwardLog = join(root, "forwarded-pi-uninstall.jsonl");
+  const args = ["uninstall", "npm:example"];
+  const forwarded = runManagedTui(home, join(root, "unused-frames.jsonl"), { PI_FIXTURE_FORWARD_LOG: forwardLog }, args);
+  assert.equal(forwarded.status, 0, forwarded.stderr || forwarded.stdout);
+  assert.deepEqual(JSON.parse(readFileSync(forwardLog, "utf8")), args);
+});
+
+test("Managed Pi rejects malformed release identities before rendering guidance", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  const installed = runInstaller(release, home);
+  assert.equal(installed.status, 0, installed.stderr || installed.stdout);
+
+  const server = serveReleaseStatus(root);
+  const cachePath = join(dataRoot(home), "state", "release-status.json");
+  for (const [index, malformedVersion] of ["1.0.0-.", "1.0.0-a..b", "1.0.0-01"].entries()) {
+    server.setVersion(malformedVersion);
+    const frameLog = join(root, `malformed-release-${index}.jsonl`);
+    const result = runManagedTui(home, frameLog, { PORCUPI_TEST_RELEASE_STATUS_URL: server.url });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const rows = readFrames(frameLog).map(releaseStatusLine);
+    assert.ok(rows.some((row) => /unavailable/i.test(row)), `${malformedVersion} must remain unavailable`);
+    assert.ok(rows.every((row) => !row.includes(`porcupi@${malformedVersion}`)), `${malformedVersion} must not become exact guidance`);
+    assert.equal(existsSync(cachePath), false, `${malformedVersion} must not enter the availability cache`);
+  }
+});
+
+test("Managed Pi renders bounded release availability in one runtime-owned TUI row", () => {
+  const root = temporaryRoot();
+  const home = join(root, "home");
+  mkdirSync(home);
+  const settingsPath = join(home, ".pi", "agent", "settings.json");
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  writeFileSync(settingsPath, `${JSON.stringify({ packages: ["settings-sentinel"], extensions: ["extension-sentinel"] }, null, 2)}\n`);
+  const base = createPiBase(root);
+  const release = createReleaseFixture(root, base);
+  const installed = runInstaller(release, home);
+  assert.equal(installed.status, 0, installed.stderr || installed.stdout);
+
+  const managedRoot = dataRoot(home);
+  const activationPath = join(managedRoot, "state", "activation.json");
+  const activationBefore = readFileSync(activationPath);
+  const activeId = JSON.parse(activationBefore).active.compositionId;
+  const activeReceipt = JSON.parse(readFileSync(join(managedRoot, "receipts", `${activeId}.json`), "utf8"));
+  assert.equal(activeReceipt.payload.some((entry) => /tui-integration|release-status/.test(entry.path)), false);
+  assert.equal(existsSync(join(managedRoot, "runtime", "tui-integration.mjs")), true);
+  assert.equal(existsSync(join(managedRoot, "state", "selections.json")), false);
+  assert.doesNotMatch(readFileSync(settingsPath, "utf8"), /tui-integration|porcupi-release-status/);
+  const forwardedArguments = [
+    ["install", "npm:example"],
+    ["remove", "npm:example"],
+    ["update", "--all"],
+    ["list"],
+    ["config"],
+  ];
+  const forwardLog = join(root, "forwarded-pi-commands.jsonl");
+  for (const args of forwardedArguments) {
+    const forwarded = runManagedTui(home, join(root, "unused-frames.jsonl"), { PI_FIXTURE_FORWARD_LOG: forwardLog }, args);
+    assert.equal(forwarded.status, 0, forwarded.stderr || forwarded.stdout);
+  }
+  assert.deepEqual(
+    readFileSync(forwardLog, "utf8").trim().split("\n").map((line) => JSON.parse(line)),
+    forwardedArguments,
+    "Pi package and config commands must remain first and otherwise unchanged",
+  );
+
+  const server = serveReleaseStatus(root);
+  server.setDelay(0.1);
+  server.setVersion("0.3.0");
+  const frameLog = join(root, "release-frames.jsonl");
+  const sessionPath = join(home, ".pi", "agent", "sessions", "release-status.jsonl");
+  mkdirSync(dirname(sessionPath), { recursive: true });
+  writeFileSync(sessionPath, "session sentinel\n");
+  const sessionBefore = readFileSync(sessionPath);
+
+  const available = runManagedTui(home, frameLog, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PI_FIXTURE_TUI_WIDTH: "72",
+    PI_FIXTURE_TUI_SESSION_REASONS: "startup,new,resume,fork,reload",
+  });
+  assert.equal(available.status, 0, available.stderr || available.stdout);
+  const availableFrames = readFrames(frameLog);
+  assert.match(releaseStatusLine(availableFrames[0]), /checking release availability/i);
+  const reloadResetFrame = availableFrames.find((frame) => frame.reason === "reload-reset");
+  assert.ok(reloadResetFrame, "the pinned Pi reload fixture must render after clearing Extension widgets");
+  assert.match(releaseStatusLine(reloadResetFrame), /PorcuPi 0\.3\.0 available/);
+  assert.ok(availableFrames.some((frame) => /PorcuPi 0\.3\.0 available/.test(releaseStatusLine(frame))));
+  assert.ok(availableFrames.some((frame) => /npx --yes porcupi@0\.3\.0/.test(releaseStatusLine(frame))));
+  const transitionReasons = new Set(["new", "resume", "fork", "reload"]);
+  const transitionFrames = availableFrames.filter((frame) => transitionReasons.has(frame.sessionReason));
+  assert.ok(transitionFrames.length > 0);
+  assert.ok(transitionFrames.every((frame) => !/checking/i.test(releaseStatusLine(frame))));
+  assert.ok(transitionFrames.every((frame) => /PorcuPi 0\.3\.0 available/.test(releaseStatusLine(frame))));
+  assert.ok(availableFrames.every((frame) => frame.lines.length === 2 && frame.lines.every((line) => line.length <= frame.width)));
+  assert.deepEqual(availableFrames.at(-1).lines, availableFrames.at(-2).lines, "theme invalidation and repeated render must be stable");
+  assert.deepEqual(readFileSync(activationPath), activationBefore);
+  assert.deepEqual(readFileSync(sessionPath), sessionBefore);
+
+  const narrowAvailableFramesPath = join(root, "narrow-available-frames.jsonl");
+  const narrowAvailable = runManagedTui(home, narrowAvailableFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PI_FIXTURE_TUI_WIDTH: "40",
+  });
+  assert.equal(narrowAvailable.status, 0, narrowAvailable.stderr || narrowAvailable.stdout);
+  const narrowAvailableLines = readFrames(narrowAvailableFramesPath).map(releaseStatusLine);
+  assert.ok(narrowAvailableLines.some((line) => line === "npx --yes porcupi@0.3.0"));
+
+  const requestsBeforeStatus = readFileSync(server.requestLog, "utf8");
+  const status = runPorcuPiProcess(home, ["status"]);
+  assert.equal(status.status, 0, status.stderr || status.stdout);
+  assert.equal(readFileSync(server.requestLog, "utf8"), requestsBeforeStatus, "local status must not check the network");
+  assert.match(status.stdout, /Installed release: 0\.2\.0/);
+  assert.match(status.stdout, /Target release: 0\.3\.0/);
+  assert.match(status.stdout, /npx --yes porcupi@0\.3\.0/);
+  assert.match(status.stdout, /outside the current Managed Pi session/i);
+
+  server.setVersion(porcupiVersion);
+  server.setDelay(0);
+  const currentFramesPath = join(root, "current-frames.jsonl");
+  const current = runManagedTui(home, currentFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PI_FIXTURE_TUI_WIDTH: "24",
+  });
+  assert.equal(current.status, 0, current.stderr || current.stdout);
+  const currentFrames = readFrames(currentFramesPath);
+  assert.ok(currentFrames.some((frame) => /current/i.test(releaseStatusLine(frame))));
+  assert.ok(currentFrames.every((frame) => frame.lines.length === 2 && frame.lines.every((line) => line.length <= 24)));
+
+  const requestCount = readFileSync(server.requestLog, "utf8").trim().split("\n").filter(Boolean).length;
+  const offlineFramesPath = join(root, "offline-frames.jsonl");
+  const offline = runManagedTui(home, offlineFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: server.url,
+    PI_FIXTURE_TUI_WIDTH: "72",
+  }, ["--offline"]);
+  assert.equal(offline.status, 0, offline.stderr || offline.stdout);
+  assert.equal(readFileSync(server.requestLog, "utf8").trim().split("\n").filter(Boolean).length, requestCount);
+  assert.ok(readFrames(offlineFramesPath).every((frame) => /offline/i.test(releaseStatusLine(frame))));
+
+  const staleFramesPath = join(root, "stale-frames.jsonl");
+  const stale = runManagedTui(home, staleFramesPath, {
+    PORCUPI_TEST_RELEASE_STATUS_URL: "http://127.0.0.1:1/unavailable",
+    PI_FIXTURE_TUI_WIDTH: "72",
+  });
+  assert.equal(stale.status, 0, stale.stderr || stale.stdout);
+  assert.ok(readFrames(staleFramesPath).some((frame) => /unavailable|stale/i.test(releaseStatusLine(frame))));
+
+  const verified = runPorcuPiProcess(home, ["verify"]);
+  assert.equal(verified.status, 0, verified.stderr || verified.stdout);
+  const integrationPath = join(managedRoot, "runtime", "tui-integration.mjs");
+  const integrationBytes = readFileSync(integrationPath);
+  writeFileSync(integrationPath, Buffer.concat([integrationBytes, Buffer.from("\n// changed\n")]));
+  const changed = runPorcuPiProcess(home, ["verify"]);
+  assert.notEqual(changed.status, 0);
+  assert.match(`${changed.stdout}${changed.stderr}`, /runtime inventory mismatch/i);
+  writeFileSync(integrationPath, integrationBytes);
+
+  const cachePath = join(managedRoot, "state", "release-status.json");
+  assert.equal(existsSync(cachePath), true);
+  const cacheBytes = readFileSync(cachePath);
+  writeFileSync(cachePath, `${JSON.stringify({ schemaVersion: 1, type: "porcupi-release-availability", latestVersion: "latest", checkedAt: "never" }, null, 2)}\n`);
+  const malformedCache = runPorcuPiProcess(home, ["verify"]);
+  assert.notEqual(malformedCache.status, 0);
+  assert.match(`${malformedCache.stdout}${malformedCache.stderr}`, /Malformed PorcuPi release availability cache/);
+  writeFileSync(cachePath, cacheBytes);
+  const uninstall = runPorcuPi(home, ["uninstall"], "0d0d0d");
+  assert.equal(uninstall.status, 0, uninstall.stderr || uninstall.stdout);
+  assert.equal(existsSync(managedRoot), false);
+  assert.deepEqual(readFileSync(settingsPath), Buffer.from(`${JSON.stringify({ packages: ["settings-sentinel"], extensions: ["extension-sentinel"] }, null, 2)}\n`));
+  assert.deepEqual(readFileSync(sessionPath), sessionBefore);
+});
 
 test("the packed npm artifact is behaviorally equivalent to the exact-tag source entrance", () => {
   const root = temporaryRoot();

@@ -5,6 +5,7 @@ import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { compositionRecipe } from "../src/composition.mjs";
+import { isReleaseVersion } from "../src/release-version.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const readJson = (path) => JSON.parse(readFileSync(join(root, path), "utf8"));
@@ -44,7 +45,7 @@ function walk(directory) {
 const manifest = readJson("package.json");
 if (manifest.name !== "porcupi") fail(`package name must be porcupi, found ${String(manifest.name)}`);
 if (manifest.private !== undefined) fail("public package must not set private");
-if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(manifest.version || "")) fail("version must be exact semver");
+if (!isReleaseVersion(manifest.version)) fail("version must be exact semver");
 if (manifest.version === "0.1.0") fail("v0.1.0 is immutable and was not an npm Release Installation artifact");
 if (JSON.stringify(manifest.bin) !== JSON.stringify({ porcupi: "scripts/install.mjs" })) fail("bin must expose only the one-shot porcupi installer");
 if (!Array.isArray(manifest.files) || manifest.files.length === 0) fail("files must declare the packed inventory");
